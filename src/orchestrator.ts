@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { buildPlan } from './planner';
 import { SkillRouter } from './router';
+import { buildPokeGraph, type PokeGraphState } from './graph';
+import { RagCorpus } from './rag/retriever';
+import { EpisodicMemory } from './memory/episodic-memory';
+import { WorkingMemory } from './memory/working-memory';
 import { getSkillPlaybook, listSkillPlaybooks } from './skill-playbooks';
 import { validatePlan, validateSkillResult } from './validator';
 import { classifyTransition, isTerminal, transition } from './state-machine';
@@ -19,6 +23,9 @@ export type TaskExecutionResult = {
 
 export class PokeCoreOrchestrator {
   private router: SkillRouter;
+  private rag = new RagCorpus();
+  private working = new WorkingMemory();
+  private episodic = new EpisodicMemory();
 
   constructor(private store: PokeCoreStore, skills: SkillAdapter[]) {
     this.router = new SkillRouter(skills);
@@ -30,6 +37,18 @@ export class PokeCoreOrchestrator {
 
   get skillPlaybooks() {
     return listSkillPlaybooks();
+  }
+
+  get ragCorpus() {
+    return this.rag;
+  }
+
+  get workingMemory() {
+    return this.working;
+  }
+
+  get episodicMemory() {
+    return this.episodic;
   }
 
   private inferPrimarySource(input: TaskInput, plan: TaskPlan): ExecutionProfile {
@@ -71,10 +90,34 @@ export class PokeCoreOrchestrator {
     return plan;
   }
 
+  private buildContextState(input: TaskInput, plan: TaskPlan, executionProfile: ExecutionProfile): PokeGraphState {
+    const initial: PokeGraphState = {
+      objective: plan.objective,
+      cursor: 0,
+      attempts: {},
+      outputs: {},
+      artifacts: {},
+      breadcrumbs: [],
+      recovery: [],
+      query: `${input.objective}\n${JSON.stringify(input.context ?? {})}`,
+      executionProfile,
+    };
+    return initial;
+  }
+
   private loadOrCreateState(task: TaskRecord, plan: TaskPlan, profile: ExecutionProfile): RuntimeState {
     const existing = task.resultJson ? JSON.parse(task.resultJson) as RuntimeState : null;
     if (existing) return { ...existing, executionProfile: existing.executionProfile ?? profile };
-    return { objective: plan.objective, cursor: task.currentStepIndex, attempts: {}, outputs: {}, artifacts: {}, breadcrumbs: [], recovery: [], executionProfile: profile };
+    return {
+      objective: plan.objective,
+      cursor: task.currentStepIndex,
+      attempts: {},
+      outputs: {},
+      artifacts: {},
+      breadcrumbs: [],
+      recovery: [],
+      executionProfile: profile,
+    };
   }
 
   private persistTransition(taskId: string, from: TaskStatus | null, to: TaskStatus | null, detail: unknown) {
@@ -147,8 +190,17 @@ export class PokeCoreOrchestrator {
     if (!planValidation.ok) throw new Error(planValidation.reasons.join('; '));
 
     const executionProfile = this.inferPrimarySource(input, plan);
+    const graph = buildPokeGraph({ rag: this.rag, working: this.working, episodic: this.episodic });
+    const contextPack = await graph.run(this.buildContextState(input, plan, executionProfile));
+    if (contextPack.state.retrieval) this.store.recordRetrieval(input.objective, contextPack.state.retrieval);
+    this.working.appendTrail('graph_context_pack_built', { taskId: input.id, primarySource: contextPack.state.executionProfile?.primarySource, retrievalHits: contextPack.state.retrieval?.hits.length ?? 0 });
+    const primarySourceFact = this.working.upsertFact(`task:${input.id}:primary_source`, contextPack.state.executionProfile?.primarySource ?? 'integration', 0.95, 'graph');
+    this.store.replaceWorkingFact(primarySourceFact);
+    const episode = this.episodic.add({ id: randomUUID(), taskId: input.id, category: 'decision', summary: 'built context pack for ' + input.id + ' using ' + (contextPack.state.executionProfile?.primarySource ?? 'integration'), signals: ['graph', 'retrieval', contextPack.state.executionProfile?.primarySource ?? 'integration'], score: 0.9 });
+    this.store.upsertEpisodicItem(episode);
+
     this.persistTransition(task.taskId, 'draft', 'planning', { steps: plan.steps.length, score: planValidation.score, executionProfile });
-    this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify(this.loadOrCreateState(task, plan, executionProfile)), errorJson: null, revision: task.revision + 1 });
+    this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify({ ...contextPack.state, objective: plan.objective }), errorJson: null, revision: task.revision + 1 });
     this.persistTransition(task.taskId, 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id), executionProfile, playbookPaths: this.skillPlaybooks.map((playbook) => playbook.instructionPath) });
 
     let state = this.loadOrCreateState(this.store.getTask(input.id)!, plan, executionProfile);

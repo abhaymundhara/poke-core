@@ -1,6 +1,9 @@
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { ExecutionEvent, StepAttempt, TaskPlan, TaskRecord, TaskSnapshot, TaskStatus, RuntimeState } from './types';
+import type { MemoryDocument, ChunkRecord, RetrievalResult } from './rag/types';
+import type { MemoryFact } from './memory/working-memory';
+import type { EpisodicMemoryItem } from './memory/episodic-memory';
 
 export class PokeCoreStore {
   private db: Database;
@@ -70,6 +73,50 @@ export class PokeCoreStore {
         to_step_id TEXT,
         edge_kind TEXT NOT NULL,
         reason TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS memory_documents(
+        document_id TEXT PRIMARY KEY,
+        source TEXT NOT NULL,
+        title TEXT NOT NULL,
+        body TEXT NOT NULL,
+        tags_json TEXT NOT NULL,
+        metadata_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS memory_chunks(
+        chunk_id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        token_count INTEGER NOT NULL,
+        term_vector_json TEXT NOT NULL,
+        salience REAL NOT NULL,
+        recency_score REAL NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS working_facts(
+        fact_key TEXT PRIMARY KEY,
+        fact_value TEXT NOT NULL,
+        confidence REAL NOT NULL,
+        source TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS episodic_memory(
+        item_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        category TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        signals_json TEXT NOT NULL,
+        score REAL NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS retrieval_queries(
+        query_id TEXT PRIMARY KEY,
+        query TEXT NOT NULL,
+        result_json TEXT NOT NULL,
         created_at INTEGER NOT NULL
       );
     `);
@@ -150,6 +197,42 @@ export class PokeCoreStore {
 
   recordGraphEdge(taskId: string, fromStepId: string | null, toStepId: string | null, edgeKind: string, reason: string) {
     this.db.prepare(`INSERT INTO graph_edges(edge_id, task_id, from_step_id, to_step_id, edge_kind, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), taskId, fromStepId, toStepId, edgeKind, reason, Date.now());
+  }
+
+  upsertMemoryDocument(doc: MemoryDocument) {
+    this.db.prepare(`
+      INSERT INTO memory_documents(document_id, source, title, body, tags_json, metadata_json, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(document_id) DO UPDATE SET source = excluded.source, title = excluded.title, body = excluded.body, tags_json = excluded.tags_json, metadata_json = excluded.metadata_json, created_at = excluded.created_at, updated_at = excluded.updated_at
+    `).run(doc.id, doc.source, doc.title, doc.body, JSON.stringify(doc.tags), JSON.stringify(doc.metadata), doc.createdAt, doc.updatedAt);
+  }
+
+  upsertMemoryChunk(chunk: ChunkRecord) {
+    this.db.prepare(`
+      INSERT INTO memory_chunks(chunk_id, document_id, position, text, token_count, term_vector_json, salience, recency_score, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(chunk_id) DO UPDATE SET document_id = excluded.document_id, position = excluded.position, text = excluded.text, token_count = excluded.token_count, term_vector_json = excluded.term_vector_json, salience = excluded.salience, recency_score = excluded.recency_score, updated_at = excluded.updated_at
+    `).run(chunk.chunkId, chunk.documentId, chunk.position, chunk.text, chunk.tokenCount, JSON.stringify(chunk.termVector), chunk.salience, chunk.recencyScore, Date.now(), Date.now());
+  }
+
+  replaceWorkingFact(fact: MemoryFact) {
+    this.db.prepare(`
+      INSERT INTO working_facts(fact_key, fact_value, confidence, source, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(fact_key) DO UPDATE SET fact_value = excluded.fact_value, confidence = excluded.confidence, source = excluded.source, updated_at = excluded.updated_at
+    `).run(fact.key, fact.value, fact.confidence, fact.source, fact.updatedAt);
+  }
+
+  upsertEpisodicItem(item: EpisodicMemoryItem) {
+    this.db.prepare(`
+      INSERT INTO episodic_memory(item_id, task_id, category, summary, signals_json, score, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(item_id) DO UPDATE SET task_id = excluded.task_id, category = excluded.category, summary = excluded.summary, signals_json = excluded.signals_json, score = excluded.score, created_at = excluded.created_at
+    `).run(item.id, item.taskId, item.category, item.summary, JSON.stringify(item.signals), item.score, item.createdAt);
+  }
+
+  recordRetrieval(query: string, result: RetrievalResult) {
+    this.db.prepare(`INSERT INTO retrieval_queries(query_id, query, result_json, created_at) VALUES (?, ?, ?, ?)`).run(randomUUID(), query, JSON.stringify(result), Date.now());
   }
 
   allEvents(taskId: string): ExecutionEvent[] {
