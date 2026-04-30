@@ -13,7 +13,6 @@ function parse(argv: string[]): Args { const out: Args = { _: [] }; for (let i =
 function str(args: Args, key: string, fallback?: string) { const v = args[key]; if (typeof v === 'string') return v; if (fallback !== undefined) return fallback; throw new Error(`Missing --${key}`); }
 function dbPath(args: Args) { return str(args, 'db', './poke-core.sqlite'); }
 function storeFor(args: Args) { const path = dbPath(args); const dir = dirname(resolve(path)); if (!existsSync(dir)) mkdirSync(dir, { recursive: true }); const store = new PokeCoreStore(path); store.init(); return store; }
-function runtime() { const store = new PokeCoreStore('./poke-core.sqlite'); store.init(); return store; }
 
 const args = parse(process.argv.slice(2)); const [cmd] = args._;
 if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
