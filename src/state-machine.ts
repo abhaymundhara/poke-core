@@ -5,7 +5,7 @@ const ALLOWED: Record<TaskStatus, TaskStatus[]> = {
   planning: ['routing', 'failed'],
   routing: ['executing', 'failed'],
   executing: ['verifying', 'failed', 'rolled_back'],
-  verifying: ['completed', 'failed', 'rolled_back'],
+  verifying: ['routing', 'completed', 'failed', 'rolled_back'],
   completed: [],
   failed: ['rolled_back'],
   rolled_back: [],
