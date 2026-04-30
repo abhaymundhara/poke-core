@@ -1,11 +1,11 @@
 # poke-core roadmap
 
 ## product thesis
-poke-core is the deterministic runtime beneath a personal assistant: one orchestrator, many skills, explicit state, and verifiable tool execution. the roadmap is organized around hardening the kernel first, then expanding skill coverage, then building the systems needed for trust: evaluation, rollback, telemetry, and reproducibility.
+poke-core is the deterministic runtime beneath a personal assistant: one orchestrator, many skills, explicit state, and verifiable tool execution. the roadmap is organized around hardening the kernel first, then expanding skill coverage, then building the systems needed for trust: validation, rollback, telemetry, and reproducibility.
 
 ## design principles
 - deterministic over probabilistic wherever the runtime is making control decisions
-- typed boundaries between planning, routing, execution, verification, and persistence
+- typed boundaries between planning, routing, execution, validation, and persistence
 - every externally visible side effect must be represented in sqlite history
 - skills are replaceable modules, not hidden prompt chains
 - failures are state transitions, not exceptions that disappear into logs
@@ -16,10 +16,10 @@ objective: make the orchestrator reliable enough to serve as the default runtime
 
 deliverables
 - strengthen the task state machine with explicit transition guards and structured rollback rules
-- standardize plan objects, execution envelopes, and verification payloads
+- standardize plan objects, execution envelopes, and validation payloads
 - persist snapshots before and after every side-effecting step
 - add idempotency markers for repeated tool calls and retried tasks
-- define a canonical event schema for task planning, routing, execution, verification, and rollback
+- define a canonical event schema for task planning, routing, execution, validation, and rollback
 
 acceptance criteria
 - a task can be replayed from persisted history without hidden state
@@ -39,13 +39,13 @@ skills to add
 skill contract requirements
 - every skill exposes canHandle() and execute()
 - skill inputs are typed, serializable, and audited
-- skill outputs include verification metadata and safe defaults
+- skill outputs include validation metadata and safe defaults
 - external actions must return machine-readable proof of execution whenever possible
 
-## phase 2: verification and jury layer
+## phase 2: validation layer
 objective: make tool execution reviewable before it becomes system state.
 
-jury responsibilities
+validation responsibilities
 - validate that the selected skill matches the requested step kind
 - score execution outputs against expected structure and policy rules
 - reject ambiguous results that do not satisfy minimum confidence thresholds
@@ -53,8 +53,8 @@ jury responsibilities
 
 planned capabilities
 - deterministic rubric engine for common tasks like extraction, update, scheduling, and file edits
-- model-assisted judging mode that produces scores but never bypasses rule-based guards
-- multi-pass verification for high-risk actions such as sending email, changing calendar state, or mutating repositories
+- model-assisted analysis mode that produces scores but never bypasses rule-based guards
+- multi-pass validation for high-risk actions such as sending email, changing calendar state, or mutating repositories
 - weighted confidence aggregation across step-level and task-level checks
 
 ## phase 3: durable context and memory
@@ -85,7 +85,7 @@ priority integrations
 integration requirements
 - each integration has a typed action layer, not just one generic function
 - actions are replayable and track request/response metadata
-- sensitive actions require an explicit verification policy
+- sensitive actions require an explicit validation policy
 - integrations must degrade gracefully when auth, rate limits, or partial failures occur
 
 ## phase 5: observability, replay, and auditability
@@ -124,13 +124,13 @@ objective: turn the runtime into a reusable assistant kernel.
 platform work
 - api surface for embedding the runtime in other agents
 - cli for local and server-side orchestration
-- plugin model for skills and verification policies
+- plugin model for skills and validation policies
 - shared schemas for state, events, and exports
 - compatibility layer for future model providers and orchestration strategies
 
 ## near-term milestones
 - complete browser navigation and extraction flows with robust error recovery
-- add at least one integration skill with full verification metadata
+- add at least one integration skill with full validation metadata
 - add crdt-backed durable state for assistant memory
 - implement exportable audit bundles and task replay
 - build a benchmark suite for deterministic regressions
@@ -139,7 +139,7 @@ platform work
 poke-core is ready when it can:
 - plan a task deterministically
 - route each step to the correct skill
-- verify the output before advancing
+- validate the output before advancing
 - roll back on failure without losing history
 - replay the full task from sqlite
 - expose the entire flow through a stable cli and api surface

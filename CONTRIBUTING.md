@@ -17,7 +17,7 @@ thanks for helping improve poke-core. this repository is intentionally structure
 5. document any new skill or state transition in architecture.md and roadmap.md if relevant.
 
 ## code quality expectations
-- use typed objects for plans, steps, execution envelopes, and jury results
+- use typed objects for plans, steps, execution envelopes, and validation results
 - keep skill adapters isolated from orchestrator logic
 - prefer explicit errors over silent fallback behavior
 - ensure new transitions are added to the state machine and documented
@@ -38,13 +38,13 @@ update docs when introducing:
 - a new skill
 - a new transition
 - a new persistence table
-- a new verification rule
+- a new validation rule
 - a new export format
 
 ## commit hygiene
 commit messages should describe what changed, not just that something changed.
 examples:
-- feat: add a browser extraction verifier
+- feat: add a browser extraction validator
 - fix: block invalid verify-to-complete transitions
 - docs: describe snapshot replay semantics
 - test: cover rollback after skill failure
@@ -54,5 +54,5 @@ before merging, confirm:
 - the orchestrator can still complete a representative task
 - history records match the transition path
 - snapshots are captured at the intended boundaries
-- no new behavior bypasses jury checks
+- no new behavior bypasses validation checks
 - the repo still reads as a runtime, not a demo

@@ -1,9 +1,9 @@
 # poke-core architecture
 
 ## overview
-poke-core is a single-agent runtime that treats every assistant action as a deterministic state transition. the orchestrator owns control flow, a skill boundary owns execution, and a jury layer verifies whether the result is safe and structurally valid before the system advances.
+poke-core is a single-agent runtime that turns a user objective into deterministic tool execution through a typed orchestrator and specialized skill modules. the orchestrator owns control flow, skills own execution, and a verification layer validates outputs before state advances.
 
-this architecture intentionally avoids a free-form agent loop. the runtime is composed of typed plans, persisted task state, explicit transitions, and auditable tool calls.
+this architecture avoids free-form agent loops. all control decisions are explicit, serialized, and replayable.
 
 ## runtime layers
 
@@ -13,7 +13,7 @@ responsibilities:
 - convert the objective into a typed task plan
 - maintain the active step index and durable task status
 - invoke the router for step-to-skill selection
-- coordinate persistence, verification, and rollback
+- coordinate persistence, validation, and rollback
 
 properties:
 - deterministic control flow
@@ -46,7 +46,7 @@ routing rules:
 responsibilities:
 - perform the concrete side effect or data extraction requested by the step
 - return a structured output envelope
-- expose verification metadata for the jury
+- expose verification metadata for the validation layer
 
 skill contract:
 - canHandle(step) returns a boolean
@@ -54,18 +54,18 @@ skill contract:
 - the skill never mutates task state directly
 - the skill never decides whether the whole task is complete
 
-### 5. jury layer
+### 5. verification layer
 responsibilities:
 - validate plan structure before execution
 - verify each skill result before the orchestrator advances
 - classify failures into actionable reasons
 
-jury modes:
+verification modes:
 - rule-based checks for deterministic validation
 - rubric-driven checks for task-specific outcomes
 - model-assisted analysis as a secondary signal, never as the sole source of truth
 
-jury outputs:
+verification outputs:
 - ok / not ok
 - confidence score
 - human-readable reasons
@@ -115,11 +115,11 @@ persistent entities:
 1. receive objective
 2. create or load a task record
 3. generate a task plan
-4. review the plan with the jury
+4. validate the plan
 5. route the first step to the matching skill
-6. capture skill output and verification signal
+6. capture skill output and validation signal
 7. persist execution and snapshot state
-8. advance or roll back based on verification
+8. advance or roll back based on validation
 9. finalize the task when all steps complete
 
 ## failure handling
@@ -128,7 +128,7 @@ persistent entities:
 - planning failure: invalid or unsupported objective decomposition
 - routing failure: no skill can handle a step
 - execution failure: the skill errors or returns unusable data
-- verification failure: the jury rejects the result
+- validation failure: the result does not satisfy the runtime contract
 - state failure: an illegal transition or persistence error occurs
 
 ### rollback model
@@ -158,8 +158,8 @@ persistent entities:
 ## why this design works
 poke-core stays shippable because the system separates responsibility cleanly:
 - orchestration is not execution
-- execution is not verification
-- verification is not persistence
+- execution is not validation
+- validation is not persistence
 - persistence is not decision making
 
 that separation makes the runtime debuggable, testable, and safe enough to expand into deeper assistant capabilities without turning into prompt soup.

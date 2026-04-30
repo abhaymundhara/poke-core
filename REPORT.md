@@ -10,7 +10,7 @@ architecture
 - typed task plan and step model
 - sqlite-backed task, plan, execution, snapshot, and history tables
 - router-based skill dispatch with a browser adapter and integration adapter
-- internal jury checks for plan validity and execution verification
+- validation checks for plan validity and execution verification
 - explicit state machine with planning, routing, executing, verifying, completed, failed, and rolled_back states
 
 smoke test

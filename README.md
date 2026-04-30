@@ -7,7 +7,7 @@ what's live
 - durable sqlite store for tasks, plans, executions, snapshots, and history
 - browser skill boundary with file:// and http(s) support
 - router for skill selection
-- jury checks for plan and execution verification
+- validation checks for plan and execution verification
 
 usage
 - bun src/cli.ts init --db ./poke-core.sqlite
