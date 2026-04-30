@@ -109,6 +109,13 @@ export type SkillDescriptor = {
   version: string;
 };
 
+export type ExecutionProfile = {
+  primarySource: string;
+  secondarySources: string[];
+  parallelizable: boolean;
+  rationale: string[];
+};
+
 export type RuntimeState = {
   objective: string;
   cursor: number;
@@ -117,4 +124,5 @@ export type RuntimeState = {
   artifacts: Record<string, unknown>;
   breadcrumbs: Array<{ stepId: string; kind: StepKind; skill: string; status: 'done' | 'failed' | 'compensated' }>;
   recovery: Array<{ stepId: string; reason: string; at: number }>;
+  executionProfile?: ExecutionProfile;
 };

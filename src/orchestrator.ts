@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { buildPlan } from './planner';
 import { SkillRouter } from './router';
+import { getSkillPlaybook, listSkillPlaybooks } from './skill-playbooks';
 import { validatePlan, validateSkillResult } from './validator';
 import { classifyTransition, isTerminal, transition } from './state-machine';
-import type { ExecutionContext, RuntimeState, StepAttempt, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
+import type { ExecutionContext, ExecutionProfile, RuntimeState, StepAttempt, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
 import type { PokeCoreStore } from './store';
 import type { SkillAdapter } from './skills/types';
 
@@ -27,6 +28,41 @@ export class PokeCoreOrchestrator {
     return this.router.descriptors();
   }
 
+  get skillPlaybooks() {
+    return listSkillPlaybooks();
+  }
+
+  private inferPrimarySource(input: TaskInput, plan: TaskPlan): ExecutionProfile {
+    const haystack = `${input.objective} ${JSON.stringify(input.context ?? {})}`.toLowerCase();
+    const scores = new Map<string, number>([
+      ['email', 0],
+      ['calendar', 0],
+      ['browser', 0],
+      ['filesystem', 0],
+      ['integration', 0],
+    ]);
+
+    const bump = (key: string, amount: number) => scores.set(key, (scores.get(key) ?? 0) + amount);
+    if (/(email|inbox|thread|reply|forward|mail|gmail|outlook)/.test(haystack)) bump('email', 4);
+    if (/(calendar|meeting|schedule|reschedule|availability|timezone|event)/.test(haystack)) bump('calendar', 4);
+    if (/(browser|web|site|page|url|navigate|click|extract)/.test(haystack)) bump('browser', 4);
+    if (/(file|filesystem|folder|directory|path|write|read|diff|export)/.test(haystack)) bump('filesystem', 4);
+    if (/(github|notion|linear|todoist|vercel|slack|integration|repo|issue)/.test(haystack)) bump('integration', 4);
+
+    for (const step of plan.steps) {
+      bump(step.skill, 2);
+      if (step.kind === 'browser.navigate' || step.kind === 'browser.extract') bump('browser', 1);
+      if (step.kind === 'integration.call') bump('integration', 1);
+    }
+
+    const ordered = [...scores.entries()].sort((a, b) => b[1] - a[1]);
+    const [primarySource = 'integration'] = ordered.map(([name]) => name);
+    const secondarySources = ordered.map(([name]) => name).filter((name) => name !== primarySource && (scores.get(name) ?? 0) > 0);
+    const parallelizable = secondarySources.length > 0 && primarySource !== 'calendar';
+    const rationale = ordered.filter(([, score]) => score > 0).map(([name, score]) => `${name}:${score}`);
+    return { primarySource, secondarySources, parallelizable, rationale };
+  }
+
   private ensurePlan(input: TaskInput): TaskPlan {
     const plan = buildPlan(input);
     const validation = validatePlan(plan.steps);
@@ -35,10 +71,10 @@ export class PokeCoreOrchestrator {
     return plan;
   }
 
-  private loadOrCreateState(task: TaskRecord, plan: TaskPlan): RuntimeState {
+  private loadOrCreateState(task: TaskRecord, plan: TaskPlan, profile: ExecutionProfile): RuntimeState {
     const existing = task.resultJson ? JSON.parse(task.resultJson) as RuntimeState : null;
-    if (existing) return existing;
-    return { objective: plan.objective, cursor: task.currentStepIndex, attempts: {}, outputs: {}, artifacts: {}, breadcrumbs: [], recovery: [] };
+    if (existing) return { ...existing, executionProfile: existing.executionProfile ?? profile };
+    return { objective: plan.objective, cursor: task.currentStepIndex, attempts: {}, outputs: {}, artifacts: {}, breadcrumbs: [], recovery: [], executionProfile: profile };
   }
 
   private persistTransition(taskId: string, from: TaskStatus | null, to: TaskStatus | null, detail: unknown) {
@@ -110,18 +146,19 @@ export class PokeCoreOrchestrator {
     const planValidation = validatePlan(plan.steps);
     if (!planValidation.ok) throw new Error(planValidation.reasons.join('; '));
 
-    this.persistTransition(task.taskId, 'draft', 'planning', { steps: plan.steps.length, score: planValidation.score });
-    this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify(this.loadOrCreateState(task, plan)), errorJson: null, revision: task.revision + 1 });
-    this.persistTransition(task.taskId, 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id) });
+    const executionProfile = this.inferPrimarySource(input, plan);
+    this.persistTransition(task.taskId, 'draft', 'planning', { steps: plan.steps.length, score: planValidation.score, executionProfile });
+    this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify(this.loadOrCreateState(task, plan, executionProfile)), errorJson: null, revision: task.revision + 1 });
+    this.persistTransition(task.taskId, 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id), executionProfile, playbookPaths: this.skillPlaybooks.map((playbook) => playbook.instructionPath) });
 
-    let state = this.loadOrCreateState(this.store.getTask(input.id)!, plan);
+    let state = this.loadOrCreateState(this.store.getTask(input.id)!, plan, executionProfile);
 
     while (true) {
       task = this.store.getTask(input.id)!;
       if (task.currentStepIndex >= plan.steps.length) {
         this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: plan.steps.at(-1)?.id ?? null, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
         this.store.recordSnapshot(task.taskId, 'completed', state);
-        this.persistTransition(task.taskId, 'routing', 'completed', { totalSteps: plan.steps.length });
+        this.persistTransition(task.taskId, 'routing', 'completed', { totalSteps: plan.steps.length, executionProfile: state.executionProfile });
         return { ok: true, taskId: input.id, status: 'completed', plan, state };
       }
 
@@ -130,7 +167,7 @@ export class PokeCoreOrchestrator {
       const routeTransition = transition(task.status, 'executing');
       if (!routeTransition.ok) throw new Error(routeTransition.reason ?? 'unable to advance to executing');
       this.store.updateTask(task.taskId, { status: 'executing', activeStepId: step.id, resultJson: JSON.stringify(state), revision: task.revision + 1 });
-      this.persistTransition(task.taskId, 'routing', 'executing', { stepId: step.id, stepIndex });
+      this.persistTransition(task.taskId, 'routing', 'executing', { stepId: step.id, stepIndex, playbook: getSkillPlaybook(step.skill as any) });
 
       const outcome = await this.runStep(this.store.getTask(input.id)!, plan, state, stepIndex);
       state = outcome.state;
@@ -140,14 +177,14 @@ export class PokeCoreOrchestrator {
       if (stepIndex === plan.steps.length - 1) {
         this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: step.id, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
         this.store.recordSnapshot(task.taskId, 'completed', state);
-        this.persistTransition(task.taskId, 'routing', 'completed', { stepId: step.id, totalSteps: plan.steps.length });
+        this.persistTransition(task.taskId, 'routing', 'completed', { stepId: step.id, totalSteps: plan.steps.length, executionProfile: state.executionProfile });
         return { ok: true, taskId: input.id, status: 'completed', plan, state };
       }
 
       const backToRouting = transition(task.status, 'routing');
       if (!backToRouting.ok) throw new Error(backToRouting.reason ?? 'unable to return to routing');
       this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: stepIndex + 1, activeStepId: plan.steps[stepIndex + 1]?.id ?? null, resultJson: JSON.stringify(state), revision: task.revision + 1 });
-      this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, nextStepId: plan.steps[stepIndex + 1]?.id ?? null });
+      this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, nextStepId: plan.steps[stepIndex + 1]?.id ?? null, executionProfile: state.executionProfile });
     }
   }
 }

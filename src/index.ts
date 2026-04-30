@@ -4,5 +4,6 @@ export * from './validator';
 export * from './planner';
 export * from './store';
 export * from './router';
+export * from './skill-playbooks';
 export * from './orchestrator';
 export * from './skills';
