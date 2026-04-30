@@ -50,7 +50,7 @@ export class PokeCoreOrchestrator {
       const skill = this.router.resolve(step);
       const ctx: SkillContext = { taskId, step, state };
       const execution = await skill.execute(ctx);
-      const verdict = juryReviewExecution(execution);
+      const verdict = juryReviewExecution({ output: execution.output, note: execution.note, passed: execution.verified });
 
       const record: ExecutionRecord = {
         executionId: randomUUID(),
