@@ -45,7 +45,7 @@ update docs when introducing:
 commit messages should describe what changed, not just that something changed.
 examples:
 - feat: add a browser extraction validator
-- fix: block invalid verify-to-complete transitions
+- fix: block invalid routing transitions
 - docs: describe snapshot replay semantics
 - test: cover rollback after skill failure
 

@@ -4,10 +4,10 @@ single-agent runtime for poke with deterministic orchestration, durable state, s
 
 what's live
 - deterministic task planner and state machine
-- durable sqlite store for tasks, plans, executions, snapshots, and history
+- durable sqlite store for tasks, plans, attempts, snapshots, and events
 - browser skill boundary with file:// and http(s) support
-- router for skill selection
-- validation checks for plan and execution verification
+- integration router with provider-specific adapters
+- validation checks for plan and execution results
 
 usage
 - bun src/cli.ts init --db ./poke-core.sqlite
