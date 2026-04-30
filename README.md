@@ -1,10 +1,14 @@
 poke-core
 
-single-agent runtime for poke with deterministic orchestration, durable state, skill routing, and verified tool execution.
+single-agent runtime for poke with deterministic orchestration, durable state, skill routing, and verified execution.
 
-core ideas
-- one orchestrator, many skills
-- deterministic state machine with explicit transitions
-- durable sqlite state, execution history, and snapshots
-- skill router for browser and integration boundaries
-- jury checks before actions are committed
+what's live
+- deterministic task planner and state machine
+- durable sqlite store for tasks, plans, executions, snapshots, and history
+- browser skill boundary with file:// and http(s) support
+- router for skill selection
+- jury checks for plan and execution verification
+
+usage
+- bun src/cli.ts init --db ./poke-core.sqlite
+- bun src/cli.ts run --db ./poke-core.sqlite --task task-1 --objective "browse file:///tmp/page.html and extract the page text"
