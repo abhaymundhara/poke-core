@@ -1,19 +1,8 @@
-import type { PlanStep } from '../types';
-
-export type SkillExecution = {
-  output: unknown;
-  note?: string;
-  verified: boolean;
-};
-
-export type SkillContext = {
-  taskId: string;
-  step: PlanStep;
-  state: Record<string, unknown>;
-};
+import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
 
 export interface SkillAdapter {
-  name: string;
+  descriptor: SkillDescriptor;
   canHandle(step: PlanStep): boolean;
-  execute(ctx: SkillContext): Promise<SkillExecution>;
+  execute(ctx: ExecutionContext): Promise<SkillResult>;
+  compensate?(ctx: ExecutionContext): Promise<SkillResult>;
 }

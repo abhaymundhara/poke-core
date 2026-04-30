@@ -3,9 +3,9 @@ import type { TaskStatus, TransitionKind } from './types';
 const ALLOWED: Record<TaskStatus, TaskStatus[]> = {
   draft: ['planning', 'failed'],
   planning: ['routing', 'failed'],
-  routing: ['executing', 'failed'],
-  executing: ['verifying', 'failed', 'rolled_back'],
-  verifying: ['routing', 'completed', 'failed', 'rolled_back'],
+  routing: ['executing', 'recovering', 'failed'],
+  executing: ['routing', 'recovering', 'failed', 'rolled_back', 'completed'],
+  recovering: ['routing', 'failed', 'rolled_back'],
   completed: [],
   failed: ['rolled_back'],
   rolled_back: [],
@@ -20,8 +20,12 @@ export function classifyTransition(from: TaskStatus, to: TaskStatus): Transition
   if (to === 'planning') return 'plan';
   if (to === 'routing') return 'route';
   if (to === 'executing') return 'execute';
-  if (to === 'verifying') return 'verify';
+  if (to === 'recovering') return 'recover';
   if (to === 'completed') return 'complete';
   if (to === 'rolled_back') return 'rollback';
-  return 'fail';
+  return from === to ? 'validate' : 'fail';
+}
+
+export function isTerminal(status: TaskStatus): boolean {
+  return status === 'completed' || status === 'failed' || status === 'rolled_back';
 }

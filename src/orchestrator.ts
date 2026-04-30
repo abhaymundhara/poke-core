@@ -1,95 +1,153 @@
 import { randomUUID } from 'node:crypto';
 import { buildPlan } from './planner';
 import { SkillRouter } from './router';
-import { validateExecution, validatePlan } from './validator';
-import { classifyTransition, transition } from './state-machine';
-import type { ExecutionRecord, TaskInput, TaskPlan, TaskStatus } from './types';
+import { validatePlan, validateSkillResult } from './validator';
+import { classifyTransition, isTerminal, transition } from './state-machine';
+import type { ExecutionContext, RuntimeState, StepAttempt, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
 import type { PokeCoreStore } from './store';
-import type { SkillContext } from './skills/types';
+import type { SkillAdapter } from './skills/types';
 
-export type OrchestratorRuntime = {
+export type TaskExecutionResult = {
+  ok: boolean;
   taskId: string;
-  objective: string;
+  status: TaskStatus;
   plan: TaskPlan;
-  state: Record<string, unknown>;
+  state: RuntimeState;
+  error?: string;
 };
 
 export class PokeCoreOrchestrator {
-  constructor(private store: PokeCoreStore, private router: SkillRouter) {}
+  private router: SkillRouter;
 
-  planTask(input: TaskInput): OrchestratorRuntime {
-    this.store.upsertTask(input.id, input.objective, 'planning');
-    const plan = buildPlan(input);
-    const validation = validatePlan(plan.steps);
-    if (!validation.ok) {
-      this.store.recordHistory(input.id, 'fail', 'planning', 'failed', { reasons: validation.reasons });
-      this.store.updateTask(input.id, { status: 'failed', error: validation.reasons.join('; ') });
-      throw new Error(validation.reasons.join('; '));
-    }
-    this.store.savePlan(plan);
-    this.store.recordHistory(input.id, classifyTransition('draft', 'planning'), 'draft', 'planning', { steps: plan.steps.length, score: validation.score });
-    this.store.updateTask(input.id, { status: 'routing', currentStepIndex: 0, activeStepId: plan.steps[0]?.id ?? null });
-    this.store.recordHistory(input.id, classifyTransition('planning', 'routing'), 'planning', 'routing', { stepIds: plan.steps.map((s) => s.id) });
-    this.store.addGraphEdge(input.id, null, plan.steps[0]?.id ?? null, 'ENTRY', 'task entry point');
-    for (let i = 0; i < plan.steps.length - 1; i++) this.store.addGraphEdge(input.id, plan.steps[i].id, plan.steps[i + 1].id, 'NEXT', 'sequential plan');
-    return { taskId: input.id, objective: input.objective, plan, state: { objective: input.objective, steps: [] as unknown[], outputs: {} as Record<string, unknown> } };
+  constructor(private store: PokeCoreStore, skills: SkillAdapter[]) {
+    this.router = new SkillRouter(skills);
   }
 
-  async runTask(input: TaskInput) {
-    const runtime = this.planTask(input);
-    const plan = runtime.plan;
-    const taskId = input.id;
-    const state = runtime.state;
-    const startingStatus: TaskStatus = 'routing';
+  get skillCatalog() {
+    return this.router.descriptors();
+  }
 
-    for (let index = 0; index < plan.steps.length; index++) {
-      const step = plan.steps[index];
-      const beforeSnapshot = this.store.recordSnapshot(taskId, 'routing', { state, index, stepId: step.id });
-      this.store.recordHistory(taskId, 'route', startingStatus, 'executing', { stepId: step.id, snapshotId: beforeSnapshot.snapshotId });
+  private ensurePlan(input: TaskInput): TaskPlan {
+    const plan = buildPlan(input);
+    const validation = validatePlan(plan.steps);
+    if (!validation.ok) throw new Error(validation.reasons.join('; '));
+    this.store.savePlan(plan);
+    return plan;
+  }
 
-      const skill = this.router.resolve(step);
-      const ctx: SkillContext = { taskId, step, state };
-      const execution = await skill.execute(ctx);
-      const validation = validateExecution({ output: execution.output, note: execution.note, passed: execution.verified });
+  private loadOrCreateState(task: TaskRecord, plan: TaskPlan): RuntimeState {
+    const existing = task.resultJson ? JSON.parse(task.resultJson) as RuntimeState : null;
+    if (existing) return existing;
+    return { objective: plan.objective, cursor: task.currentStepIndex, attempts: {}, outputs: {}, artifacts: {}, breadcrumbs: [], recovery: [] };
+  }
 
-      const record: ExecutionRecord = {
-        executionId: randomUUID(),
-        taskId,
-        stepId: step.id,
-        skill: skill.name,
-        kind: step.kind,
-        inputJson: JSON.stringify(ctx.step.args),
-        outputJson: JSON.stringify(execution.output),
-        passed: validation.ok ? 1 : 0,
-        note: execution.note ?? validation.reasons.join('; '),
-        createdAt: Date.now(),
-      };
-      this.store.recordExecution(record);
-      this.store.recordHistory(taskId, 'execute', 'executing', validation.ok ? 'verifying' : 'failed', { stepId: step.id, validation });
+  private persistTransition(taskId: string, from: TaskStatus | null, to: TaskStatus | null, detail: unknown) {
+    const kind = from && to ? classifyTransition(from, to) : 'validate';
+    this.store.recordEvent(taskId, kind, from, to, detail);
+  }
 
-      if (!validation.ok) {
-        const rollbackState = { restoredFrom: beforeSnapshot.snapshotId, state };
-        this.store.recordSnapshot(taskId, 'rolled_back', rollbackState);
-        this.store.recordHistory(taskId, 'rollback', 'failed', 'rolled_back', rollbackState);
-        this.store.updateTask(taskId, { status: 'rolled_back', currentStepIndex: index, activeStepId: step.id, error: validation.reasons.join('; '), resultJson: JSON.stringify(rollbackState) });
-        return { ok: false, taskId, status: 'rolled_back' as const, error: validation.reasons.join('; '), plan, state };
+  private createAttempt(taskId: string, stepId: string, attemptIndex: number, skill: string, input: unknown): StepAttempt {
+    return { attemptId: randomUUID(), taskId, stepId, attemptIndex, status: 'started', skill, inputJson: JSON.stringify(input), outputJson: null, errorJson: null, startedAt: Date.now(), endedAt: null };
+  }
+
+  private async runStep(task: TaskRecord, plan: TaskPlan, state: RuntimeState, stepIndex: number): Promise<{ ok: boolean; state: RuntimeState; error?: string }> {
+    const step = plan.steps[stepIndex];
+    const beforeSnapshot = this.store.recordSnapshot(task.taskId, 'executing', state);
+    this.persistTransition(task.taskId, task.status, 'executing', { stepId: step.id, snapshotId: beforeSnapshot.snapshotId, stepIndex });
+
+    const skill = this.router.resolve(step);
+    const ctx: ExecutionContext = { taskId: task.taskId, task, plan, step, state };
+    let attemptIndex = state.attempts[step.id] ?? 0;
+    let lastError: string | null = null;
+
+    while (attemptIndex < step.retryPolicy.maxAttempts) {
+      const attempt = this.createAttempt(task.taskId, step.id, attemptIndex, skill.descriptor.name, step.args);
+      this.store.recordAttempt(attempt);
+      try {
+        const result = await skill.execute(ctx);
+        const validation = validateSkillResult(result);
+        if (!validation.ok) throw new Error(validation.reasons.join('; '));
+        this.store.finalizeAttempt(attempt.attemptId, { status: 'succeeded', outputJson: JSON.stringify(result.output), endedAt: Date.now() });
+        state.cursor = stepIndex + 1;
+        state.attempts[step.id] = attemptIndex + 1;
+        state.outputs[step.id] = result.output;
+        state.breadcrumbs.push({ stepId: step.id, kind: step.kind, skill: skill.descriptor.name, status: 'done' });
+        state.artifacts[step.id] = { note: result.note ?? null, trace: result.trace ?? null };
+        this.store.recordSnapshot(task.taskId, 'routing', state);
+        this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, stepIndex, validation });
+        return { ok: true, state };
+      } catch (err) {
+        lastError = err instanceof Error ? err.message : String(err);
+        this.store.finalizeAttempt(attempt.attemptId, { status: 'failed', errorJson: JSON.stringify({ message: lastError, stepId: step.id, attemptIndex }), endedAt: Date.now() });
+        attemptIndex += 1;
+        state.attempts[step.id] = attemptIndex;
+        state.recovery.push({ stepId: step.id, reason: lastError, at: Date.now() });
+        this.store.recordSnapshot(task.taskId, 'recovering', state);
+        this.persistTransition(task.taskId, 'executing', 'recovering', { stepId: step.id, attemptIndex, error: lastError });
+        if (attemptIndex >= step.retryPolicy.maxAttempts) break;
       }
-
-      state.steps.push({ stepId: step.id, skill: skill.name, kind: step.kind });
-      state.outputs[step.id] = execution.output;
-      state.lastNote = execution.note ?? null;
-      this.store.recordSnapshot(taskId, 'verifying', { state, index, stepId: step.id, output: execution.output });
-      this.store.updateTask(taskId, { status: 'verifying', currentStepIndex: index + 1, activeStepId: step.id, resultJson: JSON.stringify(state), error: null });
-
-      const nextStatus = index === plan.steps.length - 1 ? 'completed' : 'routing';
-      const nextTransition = transition('verifying', nextStatus);
-      if (!nextTransition.ok) throw new Error(nextTransition.reason ?? 'invalid transition');
-      this.store.recordHistory(taskId, classifyTransition('verifying', nextStatus), 'verifying', nextStatus, { stepId: step.id });
     }
 
-    this.store.updateTask(taskId, { status: 'completed', resultJson: JSON.stringify(state), error: null, activeStepId: plan.steps.at(-1)?.id ?? null, currentStepIndex: plan.steps.length });
-    this.store.recordSnapshot(taskId, 'completed', state);
-    this.store.recordHistory(taskId, 'complete', 'verifying', 'completed', { taskId, stepCount: plan.steps.length });
-    return { ok: true, taskId, status: 'completed' as const, plan, state };
+    const compensation = skill.compensate ? await skill.compensate(ctx) : null;
+    if (compensation) {
+      state.breadcrumbs.push({ stepId: step.id, kind: step.kind, skill: skill.descriptor.name, status: 'compensated' });
+      state.artifacts[`${step.id}:compensation`] = compensation.output;
+    }
+
+    const rollbackState = { restoredFrom: beforeSnapshot.snapshotId, state, error: lastError, compensation: compensation?.output ?? null };
+    this.store.recordSnapshot(task.taskId, 'rolled_back', state);
+    this.persistTransition(task.taskId, 'recovering', 'rolled_back', rollbackState);
+    this.store.updateTask(task.taskId, { status: 'rolled_back', currentStepIndex: stepIndex, activeStepId: step.id, resultJson: JSON.stringify(state), errorJson: JSON.stringify({ message: lastError, stepId: step.id, stepIndex }), revision: task.revision + 1 });
+    return { ok: false, state, error: lastError ?? 'step failed' };
+  }
+
+  async execute(input: TaskInput): Promise<TaskExecutionResult> {
+    this.store.upsertTask(input.id, input.objective, 'planning');
+    const plan = this.store.getPlan(input.id) ?? this.ensurePlan(input);
+    let task = this.store.getTask(input.id)!;
+    if (isTerminal(task.status)) throw new Error(`task ${input.id} is already terminal: ${task.status}`);
+
+    const planValidation = validatePlan(plan.steps);
+    if (!planValidation.ok) throw new Error(planValidation.reasons.join('; '));
+
+    this.persistTransition(task.taskId, 'draft', 'planning', { steps: plan.steps.length, score: planValidation.score });
+    this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify(this.loadOrCreateState(task, plan)), errorJson: null, revision: task.revision + 1 });
+    this.persistTransition(task.taskId, 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id) });
+
+    let state = this.loadOrCreateState(this.store.getTask(input.id)!, plan);
+
+    while (true) {
+      task = this.store.getTask(input.id)!;
+      if (task.currentStepIndex >= plan.steps.length) {
+        this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: plan.steps.at(-1)?.id ?? null, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
+        this.store.recordSnapshot(task.taskId, 'completed', state);
+        this.persistTransition(task.taskId, 'routing', 'completed', { totalSteps: plan.steps.length });
+        return { ok: true, taskId: input.id, status: 'completed', plan, state };
+      }
+
+      const stepIndex = task.currentStepIndex;
+      const step = plan.steps[stepIndex];
+      const routeTransition = transition(task.status, 'executing');
+      if (!routeTransition.ok) throw new Error(routeTransition.reason ?? 'unable to advance to executing');
+      this.store.updateTask(task.taskId, { status: 'executing', activeStepId: step.id, resultJson: JSON.stringify(state), revision: task.revision + 1 });
+      this.persistTransition(task.taskId, 'routing', 'executing', { stepId: step.id, stepIndex });
+
+      const outcome = await this.runStep(this.store.getTask(input.id)!, plan, state, stepIndex);
+      state = outcome.state;
+      task = this.store.getTask(input.id)!;
+      if (!outcome.ok) return { ok: false, taskId: input.id, status: 'rolled_back', plan, state, error: outcome.error };
+
+      if (stepIndex === plan.steps.length - 1) {
+        this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: step.id, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
+        this.store.recordSnapshot(task.taskId, 'completed', state);
+        this.persistTransition(task.taskId, 'routing', 'completed', { stepId: step.id, totalSteps: plan.steps.length });
+        return { ok: true, taskId: input.id, status: 'completed', plan, state };
+      }
+
+      const backToRouting = transition(task.status, 'routing');
+      if (!backToRouting.ok) throw new Error(backToRouting.reason ?? 'unable to return to routing');
+      this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: stepIndex + 1, activeStepId: plan.steps[stepIndex + 1]?.id ?? null, resultJson: JSON.stringify(state), revision: task.revision + 1 });
+      this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, nextStepId: plan.steps[stepIndex + 1]?.id ?? null });
+    }
   }
 }
