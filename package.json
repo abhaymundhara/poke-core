@@ -1,0 +1,8 @@
+{
+  "name": "poke-core",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "poke-core": "./src/cli.ts"
+  }
+}
