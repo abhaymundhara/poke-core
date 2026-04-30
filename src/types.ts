@@ -1,5 +1,5 @@
 export type TaskStatus = 'draft' | 'planning' | 'routing' | 'executing' | 'recovering' | 'completed' | 'failed' | 'rolled_back';
-export type StepKind = 'browser.navigate' | 'browser.extract' | 'integration.call' | 'verify';
+export type StepKind = 'browser.navigate' | 'browser.extract' | 'integration.call' | 'verify' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use';
 export type TransitionKind = 'plan' | 'route' | 'execute' | 'validate' | 'recover' | 'complete' | 'fail' | 'rollback';
 
 export type TaskInput = {

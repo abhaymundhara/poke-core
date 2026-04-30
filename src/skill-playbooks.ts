@@ -1,7 +1,7 @@
 export type SkillPlaybookStatus = 'live' | 'planned';
 
 export type SkillPlaybook = {
-  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration';
+  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use';
   status: SkillPlaybookStatus;
   instructionPath: string;
   summary: string;
@@ -79,6 +79,71 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
     failureModes: ['unsupported provider', 'permission failure', 'rate limit', 'duplicate write'],
     recovery: ['validate provider/action', 'retry with idempotency key', 'compensate on partial success'],
     advancedNotes: ['capability routing from execution', 'normalize provider responses', 'parallel inspection when source is ambiguous'],
+  },
+  autopilot: {
+    name: 'autopilot',
+    status: 'planned',
+    instructionPath: 'src/skills/autopilot/skill.md',
+    summary: 'self-directed execution planning with bounded checkpoints',
+    coreCapabilities: ['task decomposition', 'step sequencing', 'checkpointing', 'handoff planning'],
+    boundaries: ['does not execute side effects directly', 'keeps checkpoints explicit', 'preserves recovery history'],
+    inputSchema: ['objective', 'context', 'constraints', 'mode'],
+    outputSchema: ['executionPlan', 'checkpoints', 'risks', 'nextAction'],
+    failureModes: ['over-broad objective', 'missing constraints', 'feedback loops'],
+    recovery: ['tighten the objective', 'split into smaller tasks', 'fall back to a shorter plan'],
+    advancedNotes: ['optimizes for orchestration before action', 'prefer narrow, validated steps'],
+  },
+  'user-modeling': {
+    name: 'user-modeling',
+    status: 'planned',
+    instructionPath: 'src/skills/user-modeling/skill.md',
+    summary: 'preference and persona inference from task context',
+    coreCapabilities: ['preference extraction', 'tone detection', 'constraint memory', 'profile shaping'],
+    boundaries: ['does not invent user preferences', 'retains uncertainty', 'keeps evidence attached'],
+    inputSchema: ['objective', 'context', 'knownPreferences', 'interactionHistory'],
+    outputSchema: ['profile', 'confidence', 'signals', 'nextAction'],
+    failureModes: ['sparse context', 'conflicting preferences', 'stale memory'],
+    recovery: ['ask for clarification', 'prefer explicit hints', 'lower confidence when signals are weak'],
+    advancedNotes: ['treat persona as soft state', 'prefer explicit evidence over inference'],
+  },
+  grounding: {
+    name: 'grounding',
+    status: 'planned',
+    instructionPath: 'src/skills/grounding/skill.md',
+    summary: 'evidence-first fact alignment for task outputs',
+    coreCapabilities: ['claim tracing', 'evidence pairing', 'assumption tagging', 'consistency checks'],
+    boundaries: ['does not promote assumptions to facts', 'keeps provenance visible', 'separates inference from evidence'],
+    inputSchema: ['objective', 'claims', 'evidence', 'context'],
+    outputSchema: ['groundedFacts', 'assumptions', 'confidence', 'nextAction'],
+    failureModes: ['missing evidence', 'overconfident inference', 'conflicting sources'],
+    recovery: ['ask for stronger evidence', 'narrow the claim set', 'surface uncertainty explicitly'],
+    advancedNotes: ['optimize for verifiable statements', 'attach supporting signals to each claim'],
+  },
+  'signal-observation': {
+    name: 'signal-observation',
+    status: 'planned',
+    instructionPath: 'src/skills/signal-observation/skill.md',
+    summary: 'trend and anomaly scanning over task signals',
+    coreCapabilities: ['trend detection', 'anomaly detection', 'signal summarization', 'monitoring focus'],
+    boundaries: ['does not hallucinate telemetry', 'preserves the observation window', 'keeps raw signals intact'],
+    inputSchema: ['objective', 'signals', 'window', 'thresholds'],
+    outputSchema: ['observations', 'anomalies', 'trend', 'nextAction'],
+    failureModes: ['thin signal set', 'noisy inputs', 'window mismatch'],
+    recovery: ['expand the observation window', 'reduce thresholds', 'return the strongest signals only'],
+    advancedNotes: ['favor compact signal summaries', 'track changes over time'],
+  },
+  'computer-use': {
+    name: 'computer-use',
+    status: 'planned',
+    instructionPath: 'src/skills/computer-use/skill.md',
+    summary: 'desktop and UI action planning for computer-use flows',
+    coreCapabilities: ['ui action planning', 'surface selection', 'safety checks', 'fallback planning'],
+    boundaries: ['no blind clicking', 'no credential capture', 'requires visible state before action'],
+    inputSchema: ['objective', 'surface', 'actions', 'constraints'],
+    outputSchema: ['interactionPlan', 'safetyChecks', 'fallback', 'nextAction'],
+    failureModes: ['ambiguous interface', 'hidden destructive action', 'missing state'],
+    recovery: ['switch back to browser extraction', 'reduce scope', 'ask for a confirmed target'],
+    advancedNotes: ['treat UI work as stateful interaction', 'capture intent before execution'],
   },
 };
 

@@ -3,8 +3,15 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { PokeCoreStore } from './store';
 import { PokeCoreOrchestrator } from './orchestrator';
-import { BrowserSkill } from './skills/browser';
-import { IntegrationSkill } from './skills/integrations';
+import {
+  AutopilotSkill,
+  BrowserSkill,
+  ComputerUseSkill,
+  GroundingSkill,
+  IntegrationSkill,
+  SignalObservationSkill,
+  UserModelingSkill,
+} from './skills';
 import { buildPlan } from './planner';
 
 type Args = { _: string[]; [k: string]: string | boolean | undefined };
@@ -17,7 +24,15 @@ const [cmd] = args._;
 const db = ensureDbPath(str(args, 'db', './poke-core.sqlite'));
 const store = new PokeCoreStore(db);
 store.init();
-const orchestrator = new PokeCoreOrchestrator(store, [new BrowserSkill(), new IntegrationSkill()]);
+const orchestrator = new PokeCoreOrchestrator(store, [
+  new BrowserSkill(),
+  new IntegrationSkill(),
+  new AutopilotSkill(),
+  new UserModelingSkill(),
+  new GroundingSkill(),
+  new SignalObservationSkill(),
+  new ComputerUseSkill(),
+]);
 
 try {
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
