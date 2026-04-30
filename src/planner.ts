@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { PlanStep, TaskPlan, TaskInput } from './types';
 
 function hasUrl(text: string): string | null {
-  const match = text.match(/https?:\/\/\S+/i);
+  const match = text.match(/(?:https?|file):\/\/\S+/i);
   return match?.[0] ?? null;
 }
 
