@@ -1,4 +1,4 @@
-import type { PolicyDecision, SearchIntent, SearchPolicyRule, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown } from './types.ts';
+import type { PolicyDecision, SearchIntent, SearchPolicyRule, SearchPolicyState, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown } from './types.ts';
 import { average, clamp, hostname, words } from './utils.ts';
 
 const OFFICIAL_DOMAINS = [/\.gov$/i, /\.edu$/i, /github\.com$/i, /docs\./i, /developer\./i, /openai\.com$/i];
@@ -68,6 +68,16 @@ function reliabilityDistribution(result: SearchResult, breakdown: TrustScoreBrea
   return { mean, variance, sampleSize, failureModes, epistemicClass } as const;
 }
 
+function learnedEpistemicPrior(policy: SearchPolicyState | undefined, result: SearchResult, breakdown: TrustScoreBreakdown, epistemicClass: ReturnType<typeof reliabilityDistribution>['epistemicClass']): number {
+  const domain = hostname(result.url);
+  const model = policy?.epistemicModel;
+  if (!model) return clamp((breakdown.provenance + breakdown.domainReliability + breakdown.expertise + breakdown.independence) / 4);
+  const sourceEntry = model.sourceMemory[result.source];
+  const domainEntry = model.domainMemory[domain];
+  const classPrior = model.classPriors[epistemicClass] ?? model.classPriors.unknown ?? 0.5;
+  return clamp((sourceEntry?.mean ?? breakdown.domainReliability) * 0.42 + (domainEntry?.mean ?? breakdown.provenance) * 0.24 + classPrior * 0.24 + model.calibration * 0.1);
+}
+
 function corroborationScore(result: SearchResult, all: SearchResult[]): number {
   const resultTerms = new Set(words(`${result.title} ${result.snippet} ${(result.claims ?? []).join(' ')}`));
   const overlaps = all.filter((other) => other !== result).map((other) => {
@@ -78,7 +88,7 @@ function corroborationScore(result: SearchResult, all: SearchResult[]): number {
   return clamp(0.45 + Math.min(0.4, average(overlaps) * 1.2) + (new Set(all.map((entry) => hostname(entry.url))).size > 1 ? 0.08 : 0));
 }
 
-export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[], reliability: Record<string, SearchSourceReliability> = {}, decision?: PolicyDecision): TrustedEvidence[] {
+export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[], reliability: Record<string, SearchSourceReliability> = {}, decision?: PolicyDecision, policy?: SearchPolicyState): TrustedEvidence[] {
   return results.map((result) => {
     const domain = hostname(result.url);
     const official = OFFICIAL_DOMAINS.some((pattern) => pattern.test(domain));
@@ -97,15 +107,17 @@ export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[]
       ...partial,
       uncertainty: reliabilityShape.variance,
     };
+    const learnedPrior = learnedEpistemicPrior(policy, result, breakdown, reliabilityShape.epistemicClass);
     const trustScore = clamp(
-      breakdown.evidenceQuality * 0.2 +
-      breakdown.provenance * 0.18 +
-      breakdown.recency * 0.12 +
-      breakdown.corroboration * 0.16 +
-      breakdown.domainReliability * 0.12 +
-      breakdown.expertise * 0.12 +
-      breakdown.independence * 0.08 -
-      breakdown.uncertainty * 0.1,
+      breakdown.evidenceQuality * 0.17 +
+      breakdown.provenance * 0.15 +
+      breakdown.recency * 0.1 +
+      breakdown.corroboration * 0.14 +
+      breakdown.domainReliability * 0.1 +
+      breakdown.expertise * 0.1 +
+      breakdown.independence * 0.07 +
+      learnedPrior * 0.17 -
+      breakdown.uncertainty * 0.08,
     );
     return { ...result, trustScore, trustBreakdown: breakdown, trust: trustScore, reliability: reliabilityShape, provenance: { domain, source: result.source, official, primary } };
   }).filter((result) => result.trustScore >= (decision?.minTrustScore ?? 0)).sort((left, right) => right.trustScore - left.trustScore);
