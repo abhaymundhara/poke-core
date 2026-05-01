@@ -1,4 +1,5 @@
 export * from './types.ts';
+export * from './deep-primitives.ts';
 export * from './state-machine.ts';
 export * from './validator.ts';
 export * from './planner.ts';
