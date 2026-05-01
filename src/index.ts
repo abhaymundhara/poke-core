@@ -1,4 +1,5 @@
 export * from './types.ts';
+export * from './deep-primitives.ts';
 export * from './state-machine.ts';
 export * from './validator.ts';
 export * from './planner.ts';
@@ -12,4 +13,5 @@ export * from './memory/index.ts';
 export * from './graph/index.ts';
 export * from './runtime/index.ts';
 export * from './adapters/index.ts';
-export * from './autopilot/engine.ts';
+export * from './autopilot/index.ts';
+export * from './raidingai/index.ts';
