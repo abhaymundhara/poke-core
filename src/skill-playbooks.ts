@@ -1,7 +1,7 @@
 export type SkillPlaybookStatus = 'live' | 'planned';
 
 export type SkillPlaybook = {
-  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use';
+  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use' | 'harness';
   status: SkillPlaybookStatus;
   instructionPath: string;
   summary: string;
@@ -30,25 +30,25 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
   },
   email: {
     name: 'email',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/email/skill.md',
     summary: 'thread-aware inbox search and confirmation-safe drafting',
-    coreCapabilities: ['search', 'thread reconstruction', 'drafting', 'reply composition', 'forward composition'],
+    coreCapabilities: ['readthread', 'draftreply', 'relationship recall', 'thread compaction'],
     boundaries: ['no send without confirmation', 'no invented recipients', 'no attachment drift'],
-    inputSchema: ['mode', 'query', 'threadId', 'recipients', 'attachments', 'confirmationState'],
-    outputSchema: ['draftId', 'threadSummary', 'matches', 'riskFlags', 'nextAction'],
+    inputSchema: ['mode', 'threadId', 'relationships', 'messages', 'tone', 'intent'],
+    outputSchema: ['draftId', 'threadSummary', 'relationshipWeight', 'compaction', 'nextAction'],
     failureModes: ['ambiguous recipient', 'missing thread', 'partial mailbox coverage', 'provider quirks'],
-    recovery: ['search parallel sources', 'resolve aliases', 'show draft before send', 'reconstruct latest human intent'],
+    recovery: ['compact stale transactional context', 'resolve aliases', 'show draft before send', 'reconstruct latest human intent'],
     advancedNotes: ['thread-first reasoning', 'idempotent send strategy', 'attachment provenance'],
   },
   calendar: {
     name: 'calendar',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/calendar/skill.md',
-    summary: 'timezone-safe scheduling and event mutation',
-    coreCapabilities: ['drafting', 'conflict detection', 'update', 'reschedule', 'cancel'],
+    summary: 'timezone-safe scheduling and conflict detection',
+    coreCapabilities: ['conflict_detection', 'drafting', 'update', 'reschedule', 'cancel'],
     boundaries: ['never guess timezone', 'never mutate without snapshot', 'never drop attendees'],
-    inputSchema: ['mode', 'title', 'start', 'end', 'timezone', 'attendees', 'changes'],
+    inputSchema: ['mode', 'events', 'title', 'start', 'end', 'timezone', 'attendees'],
     outputSchema: ['draftId', 'eventId', 'normalizedStart', 'conflicts', 'nextAction'],
     failureModes: ['timezone ambiguity', 'conflicting events', 'recurrence edge cases', 'stale snapshots'],
     recovery: ['normalize times', 'dry-run conflict checks', 'present confirmation-safe drafts'],
@@ -56,10 +56,10 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
   },
   filesystem: {
     name: 'filesystem',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/filesystem/skill.md',
     summary: 'safe workspace reads, writes, diffs, and exports',
-    coreCapabilities: ['read', 'write', 'diff', 'scan', 'hash', 'export'],
+    coreCapabilities: ['filesystem_scan', 'read', 'write', 'diff', 'hash', 'export'],
     boundaries: ['stay inside workspace', 'respect symlinks', 'atomic writes only'],
     inputSchema: ['mode', 'path', 'content', 'recursive', 'atomicWrite', 'baselinePath'],
     outputSchema: ['path', 'hash', 'diff', 'entries', 'warnings', 'backupPath'],
@@ -82,7 +82,7 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
   },
   autopilot: {
     name: 'autopilot',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/autopilot/skill.md',
     summary: 'self-directed execution planning with bounded checkpoints',
     coreCapabilities: ['task decomposition', 'step sequencing', 'checkpointing', 'handoff planning'],
@@ -95,7 +95,7 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
   },
   'user-modeling': {
     name: 'user-modeling',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/user-modeling/skill.md',
     summary: 'preference and persona inference from task context',
     coreCapabilities: ['preference extraction', 'tone detection', 'constraint memory', 'profile shaping'],
@@ -108,7 +108,7 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
   },
   grounding: {
     name: 'grounding',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/grounding/skill.md',
     summary: 'evidence-first fact alignment for task outputs',
     coreCapabilities: ['claim tracing', 'evidence pairing', 'assumption tagging', 'consistency checks'],
@@ -121,7 +121,7 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
   },
   'signal-observation': {
     name: 'signal-observation',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/signal-observation/skill.md',
     summary: 'trend and anomaly scanning over task signals',
     coreCapabilities: ['trend detection', 'anomaly detection', 'signal summarization', 'monitoring focus'],
@@ -134,7 +134,7 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
   },
   'computer-use': {
     name: 'computer-use',
-    status: 'planned',
+    status: 'live',
     instructionPath: 'src/skills/computer-use/skill.md',
     summary: 'desktop and UI action planning for computer-use flows',
     coreCapabilities: ['ui action planning', 'surface selection', 'safety checks', 'fallback planning'],
@@ -144,6 +144,19 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
     failureModes: ['ambiguous interface', 'hidden destructive action', 'missing state'],
     recovery: ['switch back to browser extraction', 'reduce scope', 'ask for a confirmed target'],
     advancedNotes: ['treat UI work as stateful interaction', 'capture intent before execution'],
+  },
+  harness: {
+    name: 'harness',
+    status: 'live',
+    instructionPath: 'src/skills/harness/skill.md',
+    summary: 'first-class domain primitives for threads, conflicts, and relationship recall',
+    coreCapabilities: ['readthread', 'draftreply', 'conflict_detection', 'relationship_recall', 'filesystem_scan'],
+    boundaries: ['compact stale transactional data', 'keep relationship history', 'surface uncertainty explicitly'],
+    inputSchema: ['mode', 'threadId', 'relationships', 'messages', 'events', 'files'],
+    outputSchema: ['threadSummary', 'draft', 'conflicts', 'rankedRelationships', 'compaction'],
+    failureModes: ['missing thread signal', 'stale transactional noise', 'over-compressed history'],
+    recovery: ['re-run compaction with a narrower query', 'fall back to relationship-weighted recall', 'prefer the freshest high-value context'],
+    advancedNotes: ['no harness, no moat', 'domain primitives beat generic tool calls', 'preserve provenance through compaction'],
   },
 };
 

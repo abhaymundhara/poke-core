@@ -3,16 +3,9 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { PokeCoreStore } from './store';
 import { PokeCoreOrchestrator } from './orchestrator';
-import {
-  AutopilotSkill,
-  BrowserSkill,
-  ComputerUseSkill,
-  GroundingSkill,
-  IntegrationSkill,
-  SignalObservationSkill,
-  UserModelingSkill,
-} from './skills';
+import { AutopilotSkill, BrowserSkill, ComputerUseSkill, GroundingSkill, HarnessSkill, IntegrationSkill, SignalObservationSkill, UserModelingSkill } from './skills';
 import { buildPlan } from './planner';
+import { formatRetrievalBenchmark } from './rag';
 
 type Args = { _: string[]; [k: string]: string | boolean | undefined };
 function parse(argv: string[]): Args { const out: Args = { _: [] }; for (let i = 0; i < argv.length; i++) { const t = argv[i]; if (!t.startsWith('--')) { out._.push(t); continue; } const k = t.slice(2); const next = argv[i + 1]; if (!next || next.startsWith('--')) { out[k] = true; continue; } out[k] = next; i++; } return out; }
@@ -24,19 +17,11 @@ const [cmd] = args._;
 const db = ensureDbPath(str(args, 'db', './poke-core.sqlite'));
 const store = new PokeCoreStore(db);
 store.init();
-const orchestrator = new PokeCoreOrchestrator(store, [
-  new BrowserSkill(),
-  new IntegrationSkill(),
-  new AutopilotSkill(),
-  new UserModelingSkill(),
-  new GroundingSkill(),
-  new SignalObservationSkill(),
-  new ComputerUseSkill(),
-]);
+const orchestrator = new PokeCoreOrchestrator(store, [new BrowserSkill(), new IntegrationSkill(), new AutopilotSkill(), new UserModelingSkill(), new GroundingSkill(), new SignalObservationSkill(), new ComputerUseSkill(), new HarnessSkill()]);
 
 try {
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {
-    console.log('poke-core init|plan|run|tasks|events|snapshots|attempts|skills');
+    console.log('poke-core init|plan|run|tasks|events|snapshots|attempts|skills|bench');
   } else if (cmd === 'init') {
     console.log(JSON.stringify({ ok: true, db }, null, 2));
   } else if (cmd === 'plan') {
@@ -56,6 +41,8 @@ try {
     console.log(JSON.stringify(store.allAttempts(str(args, 'task')), null, 2));
   } else if (cmd === 'skills') {
     console.log(JSON.stringify(orchestrator.skillCatalog, null, 2));
+  } else if (cmd === 'bench') {
+    console.log(formatRetrievalBenchmark());
   } else {
     throw new Error(`unknown command: ${cmd}`);
   }

@@ -1,5 +1,5 @@
 export type TaskStatus = 'draft' | 'planning' | 'routing' | 'executing' | 'recovering' | 'completed' | 'failed' | 'rolled_back';
-export type StepKind = 'browser.navigate' | 'browser.extract' | 'integration.call' | 'verify' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use';
+export type StepKind = 'browser.navigate' | 'browser.extract' | 'integration.call' | 'verify' | 'autopilot.loop' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use.vision' | 'harness.readthread' | 'harness.draftreply' | 'harness.conflict_detection' | 'harness.relationship_recall' | 'harness.filesystem_scan';
 export type TransitionKind = 'plan' | 'route' | 'execute' | 'validate' | 'recover' | 'complete' | 'fail' | 'rollback';
 
 export type TaskInput = {
