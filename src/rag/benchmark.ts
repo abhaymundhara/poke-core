@@ -104,6 +104,12 @@ export function buildRetrievalBenchmarkCorpus(): RagCorpus {
   return corpus;
 }
 
+function classifyDocumentFromTags(document: MemoryDocument): DocumentLifecycle {
+  const metadataLifecycle = typeof document.metadata['lifecycle'] === 'string' ? (document.metadata['lifecycle'] as DocumentLifecycle) : undefined;
+  if (metadataLifecycle) return metadataLifecycle;
+  return (document.tags.find((tag) => ['relationship', 'thread', 'transactional', 'preference', 'reference'].includes(tag)) as DocumentLifecycle | undefined) ?? 'unknown';
+}
+
 export function runRetrievalBenchmark(corpus = buildRetrievalBenchmarkCorpus(), cases = DEFAULT_RETRIEVAL_BENCHMARK_CASES): {
   results: RetrievalBenchmarkResult[];
   summary: { meanScore: number; lifecycleAccuracy: number; sourceAccuracy: number };
@@ -111,8 +117,8 @@ export function runRetrievalBenchmark(corpus = buildRetrievalBenchmarkCorpus(), 
   const results = cases.map((benchmarkCase) => {
     const result = corpus.retrieve({ query: benchmarkCase.query, k: 3, mode: 'hybrid', ...(benchmarkCase.queryOptions ?? {}) });
     const topHit = result.hits[0];
-    const lifecycle = topHit ? corpus.listDocuments().find((document) => document.id === topHit.documentId) : null;
-    const lifecycleName = lifecycle ? (lifecycle.metadata.lifecycle as DocumentLifecycle | undefined) ?? (lifecycle.tags.find((tag) => benchmarkCase.expectedLifecycle.includes(tag as DocumentLifecycle)) as DocumentLifecycle | undefined) ?? 'unknown' : 'unknown';
+    const document = topHit ? corpus.listDocuments().find((entry) => entry.id === topHit.documentId) : null;
+    const lifecycleName = document ? classifyDocumentFromTags(document) : 'unknown';
     const sourceMatch = topHit ? (benchmarkCase.expectedSources?.length ? benchmarkCase.expectedSources.includes(topHit.source) : true) : false;
     const lifecycleMatch = benchmarkCase.expectedLifecycle.includes(lifecycleName);
     return {
