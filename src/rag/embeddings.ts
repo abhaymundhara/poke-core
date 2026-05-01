@@ -1,4 +1,4 @@
-const DEFAULT_DIMENSION = 40;
+const DEFAULT_DIMENSION = 46;
 
 export type SemanticSignals = {
   tokens: string[];
