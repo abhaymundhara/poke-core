@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { classifyLifecycle, compactDocuments } from './compaction';
 import { RagCorpus } from './retriever';
 import type { DocumentLifecycle, MemoryDocument, RetrievalHit, RetrievalQuery } from './types';
 
@@ -112,9 +113,7 @@ export function buildRetrievalBenchmarkCorpus(): RagCorpus {
 }
 
 function classifyDocument(document: MemoryDocument): DocumentLifecycle {
-  const lifecycle = typeof document.metadata.lifecycle === 'string' ? (document.metadata.lifecycle as DocumentLifecycle) : undefined;
-  if (lifecycle) return lifecycle;
-  return (document.tags.find((tag) => ['relationship', 'thread', 'transactional', 'preference', 'reference', 'calendar', 'filesystem'].includes(tag)) as DocumentLifecycle | undefined) ?? 'unknown';
+  return classifyLifecycle(document);
 }
 
 export function runRetrievalBenchmark(corpus = buildRetrievalBenchmarkCorpus(), cases = DEFAULT_RETRIEVAL_BENCHMARK_CASES): {
