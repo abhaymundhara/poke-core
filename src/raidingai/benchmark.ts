@@ -1,0 +1,81 @@
+import { canonicalThreadIdentity, expandRecurrence, reconcileAttendees, normalizeWallTime, DEEP_PRIMITIVES_FIXTURES } from '../deep-primitives';
+import { runVisionLoop, type VisionFrame } from '../skills/computer-use';
+import { MemoryConsolidationJob } from '../memory/consolidation';
+import { RAIDINGAI_FIXTURES } from './fixtures';
+
+export type RaidingAiCaseResult = { name: string; score: number; passed: boolean; notes: string[]; metrics: Record<string, number | string | boolean> };
+export type RaidingAiSummary = { averageScore: number; minScore: number; maxScore: number; passRate: number; verdict: 'pass' | 'needs-work' };
+export type RaidingAiAudit = { results: RaidingAiCaseResult[]; summary: RaidingAiSummary; passed: boolean; gaps: string[] };
+
+function average(values: number[]): number { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0; }
+function scoreRatio(condition: boolean, weight: number): number { return condition ? weight : 0; }
+function assertNear(actual: string, expected: string): boolean { return actual === expected; }
+
+function runComputerUseCase(): RaidingAiCaseResult {
+  const frames = RAIDINGAI_FIXTURES.computerUse.frames as VisionFrame[];
+  const result = runVisionLoop(frames, { keys: RAIDINGAI_FIXTURES.computerUse.keys as string[], fallbackSelectors: RAIDINGAI_FIXTURES.computerUse.fallbackSelectors as string[] });
+  const recovered = result.driftRecoveries >= 1;
+  const focusRecovered = result.session.focus.selector === 'button.save' || result.session.focus.selector === 'input[name="query"]';
+  const windowStable = result.session.windows.length === 1 && result.session.tabs.length === 1;
+  const score = [scoreRatio(result.perceptions.length === 3, 0.25), scoreRatio(recovered, 0.35), scoreRatio(focusRecovered, 0.2), scoreRatio(windowStable, 0.2)].reduce((sum, value) => sum + value, 0);
+  return { name: 'computer-use', score, passed: score >= 0.9, notes: result.perceptions.map((perception) => `${perception.frameId}:${perception.driftDetected}`), metrics: { perceptions: result.perceptions.length, driftRecoveries: result.driftRecoveries, finalSelector: result.session.focus.selector ?? 'none', lastAction: result.actions.at(-1) ?? 'none' } };
+}
+
+function runDeepPrimitivesCase(): RaidingAiCaseResult {
+  const threadA = canonicalThreadIdentity(RAIDINGAI_FIXTURES.deepPrimitives.threadA as any);
+  const threadB = canonicalThreadIdentity(RAIDINGAI_FIXTURES.deepPrimitives.threadB as any);
+  const normalized = normalizeWallTime(RAIDINGAI_FIXTURES.deepPrimitives.timezone.local, RAIDINGAI_FIXTURES.deepPrimitives.timezone.timeZone);
+  const attendees = reconcileAttendees(RAIDINGAI_FIXTURES.deepPrimitives.attendees as any, 'America/New_York', 'en-US');
+  const recurrence = expandRecurrence(RAIDINGAI_FIXTURES.deepPrimitives.recurrence as any);
+  const score = [
+    scoreRatio(threadA.threadId === threadB.threadId, 0.35),
+    scoreRatio(assertNear(normalized.utc, RAIDINGAI_FIXTURES.deepPrimitives.timezone.expectedUtc), 0.3),
+    scoreRatio(attendees[0]?.canonicalEmail === 'abhay@example.com' && attendees[0]?.effectiveLocale === 'en-GB', 0.15),
+    scoreRatio(recurrence.length === 3 && recurrence[0]?.weekday === 'MO', 0.2),
+  ].reduce((sum, value) => sum + value, 0);
+  return { name: 'deep-primitives', score, passed: score >= 0.9, notes: [threadA.threadId, threadB.threadId, normalized.utc, recurrence.map((instance) => instance.startUtc).join(',')], metrics: { threadId: threadA.threadId, normalizedUtc: normalized.utc, attendeeCount: attendees.length, recurrenceCount: recurrence.length } };
+}
+
+function runMemoryConsolidationCase(): RaidingAiCaseResult {
+  const job = new MemoryConsolidationJob({ now: Date.now(), workingFacts: RAIDINGAI_FIXTURES.memory.facts as any, episodicItems: RAIDINGAI_FIXTURES.memory.episodes as any, decayHalfLifeHours: 24 });
+  const result = job.run();
+  const hasRelationshipDoc = result.semanticDocuments.some((doc) => doc.title.includes('relationship') || doc.body.includes('BT Group'));
+  const hasThreadLink = result.links.some((link) => link.entityId.includes('thread') || link.label.includes('thread'));
+  const promotedEnough = result.promotedFacts.length >= 3;
+  const decayedCaptured = result.decayedFacts.includes('stale:transactional');
+  const score = [scoreRatio(hasRelationshipDoc, 0.3), scoreRatio(hasThreadLink, 0.25), scoreRatio(promotedEnough, 0.25), scoreRatio(decayedCaptured, 0.2)].reduce((sum, value) => sum + value, 0);
+  return { name: 'memory-consolidation', score, passed: score >= 0.9, notes: [result.summary], metrics: { promotedFacts: result.promotedFacts.length, semanticDocuments: result.semanticDocuments.length, links: result.links.length, decayedFacts: result.decayedFacts.length } };
+}
+
+export function runRaidingAiBenchmark() {
+  const results = [runComputerUseCase(), runDeepPrimitivesCase(), runMemoryConsolidationCase()];
+  const scores = results.map((result) => result.score);
+  const summary: RaidingAiSummary = { averageScore: average(scores), minScore: Math.min(...scores), maxScore: Math.max(...scores), passRate: results.filter((result) => result.passed).length / results.length, verdict: results.every((result) => result.passed) ? 'pass' : 'needs-work' };
+  return { results, summary };
+}
+
+export function runRaidingAiAudit(): RaidingAiAudit {
+  const benchmark = runRaidingAiBenchmark();
+  const thresholds = { 'computer-use': 0.9, 'deep-primitives': 0.9, 'memory-consolidation': 0.9 } as const;
+  const gaps = benchmark.results.filter((result) => result.score < thresholds[result.name as keyof typeof thresholds]).map((result) => result.name);
+  const passed = gaps.length === 0 && benchmark.summary.passRate === 1;
+  return { results: benchmark.results, summary: benchmark.summary, passed, gaps };
+}
+
+export function formatRaidingAiBenchmark(): string {
+  const benchmark = runRaidingAiBenchmark();
+  const lines = [`average score: ${benchmark.summary.averageScore.toFixed(3)}`, `min score: ${benchmark.summary.minScore.toFixed(3)}`, `max score: ${benchmark.summary.maxScore.toFixed(3)}`, `pass rate: ${(benchmark.summary.passRate * 100).toFixed(1)}%`, `verdict: ${benchmark.summary.verdict}`, ''];
+  for (const result of benchmark.results) lines.push(`${result.name}: ${result.score.toFixed(3)} passed=${result.passed} metrics=${JSON.stringify(result.metrics)}`);
+  return lines.join('\n');
+}
+
+export function formatRaidingAiAudit(): string {
+  const audit = runRaidingAiAudit();
+  return [`passed: ${audit.passed}`, `average score: ${audit.summary.averageScore.toFixed(3)}`, `pass rate: ${(audit.summary.passRate * 100).toFixed(1)}%`, `gaps: ${audit.gaps.length > 0 ? audit.gaps.join(', ') : 'none'}`].join('\n');
+}
+
+if (import.meta.main) {
+  console.log(formatRaidingAiBenchmark());
+  console.log('');
+  console.log(formatRaidingAiAudit());
+}

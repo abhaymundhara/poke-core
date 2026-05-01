@@ -7,6 +7,7 @@ import { AutopilotSkill, BrowserSkill, ComputerUseSkill, GroundingSkill, Harness
 import { buildPlan } from './planner';
 import { formatRetrievalBenchmark } from './rag';
 import { formatAutopilotAudit, formatAutopilotBenchmark } from './autopilot';
+import { formatRaidingAiAudit, formatRaidingAiBenchmark } from './raidingai';
 
 type Args = { _: string[]; [k: string]: string | boolean | undefined };
 function parse(argv: string[]): Args { const out: Args = { _: [] }; for (let i = 0; i < argv.length; i++) { const t = argv[i]; if (!t.startsWith('--')) { out._.push(t); continue; } const k = t.slice(2); const next = argv[i + 1]; if (!next || next.startsWith('--')) { out[k] = true; continue; } out[k] = next; i++; } return out; }
@@ -50,12 +51,20 @@ try {
       console.log(formatAutopilotBenchmark());
       console.log('');
       console.log(formatAutopilotAudit());
+    } else if (suite === 'raidingai') {
+      console.log(formatRaidingAiBenchmark());
+      console.log('');
+      console.log(formatRaidingAiAudit());
     } else {
       console.log(formatRetrievalBenchmark());
       console.log('');
       console.log(formatAutopilotBenchmark());
       console.log('');
       console.log(formatAutopilotAudit());
+      console.log('');
+      console.log(formatRaidingAiBenchmark());
+      console.log('');
+      console.log(formatRaidingAiAudit());
     }
   } else {
     throw new Error(`unknown command: ${cmd}`);
