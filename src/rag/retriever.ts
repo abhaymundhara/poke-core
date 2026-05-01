@@ -18,7 +18,7 @@ export class RagCorpus {
     const record: MemoryDocument = { ...doc, createdAt: doc.createdAt ?? now, updatedAt: now };
     this.documents.set(record.id, record);
     this.reindexDocument(record);
-    if (this.documents.size > 256) this.compact({ tokenBudget: 12_000, query: `${record.title} ${record.body}` });
+    if (this.documents.size > 256) this.compact({ tokenBudget: 12_000, query: `${record.title} ${record.body}`, apply: true });
     return record;
   }
 
@@ -32,7 +32,7 @@ export class RagCorpus {
     this.documents.delete(documentId);
   }
 
-  compact(options: { tokenBudget?: number; maxDocuments?: number; query?: string; preserveLifecycle?: ReturnType<typeof classifyLifecycle>[]; preserveSources?: string[] } = {}) {
+  compact(options: { tokenBudget?: number; maxDocuments?: number; query?: string; preserveLifecycle?: ReturnType<typeof classifyLifecycle>[]; preserveSources?: string[]; apply?: boolean } = {}) {
     const plan = compactDocuments([...this.documents.values()], {
       tokenBudget: options.tokenBudget,
       maxDocuments: options.maxDocuments,
@@ -41,7 +41,7 @@ export class RagCorpus {
       preserveSources: options.preserveSources,
     });
 
-    if (plan.dropped.length > 0) {
+    if (options.apply && plan.dropped.length > 0) {
       for (const document of plan.dropped) this.deleteDocument(document.id);
       this.lastCompaction = plan.summary;
     }
@@ -131,18 +131,13 @@ export class RagCorpus {
   }
 
   private buildEvidence(anchor: RetrievalHit, query: RetrievalQuery, availableHits: RetrievalHit[]): RetrievalEvidenceHit[] {
-    const queryVector = defaultSemanticEmbeddingModel.embedText(`${query.query} ${anchor.title} ${anchor.excerpt}`);
     const candidates = availableHits
       .filter((hit) => hit.documentId !== anchor.documentId)
       .filter((hit) => hit.source !== anchor.source || hit.lifecycle !== anchor.lifecycle)
       .slice(0, 12);
 
     return candidates
-      .map((candidate) => {
-        const evidence = scoreEvidence(anchor, candidate, query);
-        const sourceWeight = candidate.source === anchor.source ? 0.9 : 1;
-        return { ...evidence, score: evidence.score + sourceWeight * 0.03 + queryVector[0] * 0 };
-      })
+      .map((candidate) => scoreEvidence(anchor, candidate, query))
       .sort((left, right) => right.score - left.score)
       .slice(0, 3);
   }
