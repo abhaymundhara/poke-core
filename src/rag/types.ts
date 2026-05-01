@@ -12,7 +12,7 @@ export type MemoryDocument = {
   importance?: number;
 };
 
-export type DocumentLifecycle = 'relationship' | 'thread' | 'transactional' | 'preference' | 'reference' | 'unknown';
+export type DocumentLifecycle = 'relationship' | 'thread' | 'transactional' | 'preference' | 'reference' | 'filesystem' | 'calendar' | 'unknown';
 
 export type ChunkRecord = {
   chunkId: string;
@@ -25,6 +25,7 @@ export type ChunkRecord = {
   salience: number;
   recencyScore: number;
   lifecycle: DocumentLifecycle;
+  source: string;
 };
 
 export type RetrievalQuery = {
@@ -36,8 +37,10 @@ export type RetrievalQuery = {
     source?: string[];
     documentIds?: string[];
     compaction?: {
+      tokenBudget?: number;
       maxDocuments?: number;
       preserveLifecycle?: DocumentLifecycle[];
+      preserveSources?: string[];
     };
   };
   boost?: {
@@ -48,18 +51,34 @@ export type RetrievalQuery = {
   };
 };
 
+export type RetrievalEvidenceHit = {
+  chunkId: string;
+  documentId: string;
+  title: string;
+  source: string;
+  lifecycle: DocumentLifecycle;
+  score: number;
+  excerpt: string;
+  rationale: string;
+};
+
 export type RetrievalHit = {
   chunkId: string;
   documentId: string;
   title: string;
   source: string;
+  lifecycle: DocumentLifecycle;
   score: number;
+  baseScore: number;
   lexicalScore: number;
   semanticScore: number;
+  rerankScore: number;
   recencyScore: number;
   salienceScore: number;
+  sourceScore: number;
   phraseMatches: string[];
   excerpt: string;
+  evidence: RetrievalEvidenceHit[];
 };
 
 export type RetrievalResult = {
@@ -76,8 +95,14 @@ export type RetrievalResult = {
     stages: Array<{ name: string; topScore: number; notes: string[] }>;
     compaction?: {
       summary: string;
-      kept: number;
+      budgetTokens: number;
+      usedTokens: number;
+      retained: number;
       dropped: number;
     };
+    evidence?: Array<{
+      anchorDocumentId: string;
+      evidence: RetrievalEvidenceHit[];
+    }>;
   };
 };
