@@ -67,6 +67,7 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
     previousTopic = topic;
   }
 
+  const latentArchetypes = policy.latentIntentModel?.archetypes ?? [];
   const forecasts = [...buckets.entries()].map(([topic, bucket], index) => {
     const source = [...bucket.sources.entries()].sort((left, right) => right[1] - left[1])[0]?.[0] ?? sourceFor(topic);
     const reliability = policy.sourceReliability[source]?.score ?? 0.6;
@@ -94,6 +95,18 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
       },
     };
   });
+
+  for (const [index, archetype] of latentArchetypes.slice(0, 4).entries()) {
+    forecasts.push({
+      source: archetype.sources[0] ?? intent.sourceHints[0] ?? 'memory',
+      topic: archetype.label,
+      confidence: clamp(archetype.probability),
+      reason: 'latent-intent-model:' + archetype.label + ' support=' + archetype.support,
+      suggestedQueries: uniq([intent.semanticQuery, ...intent.querySeeds, intent.objective + ' ' + archetype.label]).slice(0, 3),
+      priority: clamp(archetype.probability + 0.02 - index * 0.03),
+      latentNeed: { label: archetype.label, features: { ...archetype.features, support: archetype.support, modelProbability: archetype.probability }, horizon: archetype.horizon, intervention: archetype.intervention },
+    });
+  }
 
   if (forecasts.length === 0) {
     forecasts.push({
