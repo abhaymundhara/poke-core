@@ -6,6 +6,7 @@ import { PokeCoreOrchestrator } from './orchestrator';
 import { AutopilotSkill, BrowserSkill, ComputerUseSkill, GroundingSkill, HarnessSkill, IntegrationSkill, SignalObservationSkill, UserModelingSkill } from './skills';
 import { buildPlan } from './planner';
 import { formatRetrievalBenchmark } from './rag';
+import { formatAutopilotAudit, formatAutopilotBenchmark } from './autopilot';
 
 type Args = { _: string[]; [k: string]: string | boolean | undefined };
 function parse(argv: string[]): Args { const out: Args = { _: [] }; for (let i = 0; i < argv.length; i++) { const t = argv[i]; if (!t.startsWith('--')) { out._.push(t); continue; } const k = t.slice(2); const next = argv[i + 1]; if (!next || next.startsWith('--')) { out[k] = true; continue; } out[k] = next; i++; } return out; }
@@ -42,7 +43,20 @@ try {
   } else if (cmd === 'skills') {
     console.log(JSON.stringify(orchestrator.skillCatalog, null, 2));
   } else if (cmd === 'bench') {
-    console.log(formatRetrievalBenchmark());
+    const suite = args._[1] ?? 'all';
+    if (suite === 'rag') {
+      console.log(formatRetrievalBenchmark());
+    } else if (suite === 'autopilot') {
+      console.log(formatAutopilotBenchmark());
+      console.log('');
+      console.log(formatAutopilotAudit());
+    } else {
+      console.log(formatRetrievalBenchmark());
+      console.log('');
+      console.log(formatAutopilotBenchmark());
+      console.log('');
+      console.log(formatAutopilotAudit());
+    }
   } else {
     throw new Error(`unknown command: ${cmd}`);
   }
