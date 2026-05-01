@@ -1,4 +1,4 @@
-import type { ClaimAssessment, EvidenceConflict, PolicyDecision, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
+import type { ClaimAssessment, EvidenceConflict, PolicyDecision, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchPolicyState, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
 import { average, clamp, stableHash, words } from './utils.ts';
 import { scoreEvidenceTrust } from './trust.ts';
 import { addKnowledgeGraphNodes, canonicalizeEntities, chainOfExploration, detectEvidenceCommunities, synthesizeEvidence } from './knowledge-graph.ts';
@@ -59,8 +59,8 @@ export function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProf
   return [...new Set(hopPlan)].slice(0, Math.max(2, intent.hopBudget + 1));
 }
 
-export function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], strategy: SearchStrategyProfile, reliability = {}, policy: PolicyDecision = { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] }): SearchEvidenceGraph {
-  const trusted = scoreEvidenceTrust(intent, results, reliability);
+export function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], strategy: SearchStrategyProfile, reliability = {}, policy: PolicyDecision = { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] }, policyState?: SearchPolicyState): SearchEvidenceGraph {
+  const trusted = scoreEvidenceTrust(intent, results, reliability, policy, policyState);
   const nodes: SearchEvidenceNode[] = [];
   const edges: SearchEvidenceEdge[] = [];
   const claimIndex = new Map<string, { text: string; support: TrustedEvidence[]; contradiction: TrustedEvidence[]; assessments: ClaimAssessment[] }>();
