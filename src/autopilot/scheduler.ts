@@ -78,5 +78,6 @@ export class AutopilotSchedulerWorker {
       this.timer = null;
       this.flushDue();
     }, delay);
+    this.timer.unref?.();
   }
 }
