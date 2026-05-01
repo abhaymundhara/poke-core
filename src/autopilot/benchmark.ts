@@ -52,11 +52,11 @@ function runWakeOnSignalCase(): AutopilotBenchmarkCaseResult {
   const snapshot = engine.tick('wake-on-signal');
   const wakeTriggered = snapshot.liveState.status === 'running' && snapshot.liveState.lastWakeReason !== null;
   const selfTrigger = snapshot.backgroundTriggers.some((trigger) => trigger.name === 'thread-watcher' || trigger.name === 'relationship-recall');
-  const score = average([
+  const score = [
     scoreRatio(wakeTriggered, 0.45),
     scoreRatio(snapshot.scheduler.pendingCount === 0, 0.2),
     scoreRatio(selfTrigger, 0.35),
-  ]);
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'wake-on-signal',
     score,
@@ -84,11 +84,11 @@ function runDebounceCollapseCase(): AutopilotBenchmarkCaseResult {
   const collapsedToSingleWake = beforeFlush.scheduler.pendingCount === 1;
   const flushedCleanly = afterFlush.scheduler.pendingCount === 0;
   const signalCount = afterFlush.signalSummary.system ?? 0;
-  const score = average([
+  const score = [
     scoreRatio(collapsedToSingleWake, 0.45),
     scoreRatio(flushedCleanly, 0.2),
     scoreRatio(signalCount === 12, 0.35),
-  ]);
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'debounce-collapse',
     score,
@@ -112,10 +112,10 @@ function runAutoResumeCase(): AutopilotBenchmarkCaseResult {
   const snapshot = engine.tick('auto-resume');
   const resumed = snapshot.liveState.status === 'running';
   const wakeReasoned = typeof snapshot.liveState.lastWakeReason === 'string' && /resume|wake|auto/i.test(snapshot.liveState.lastWakeReason);
-  const score = average([
+  const score = [
     scoreRatio(resumed, 0.6),
     scoreRatio(wakeReasoned, 0.4),
-  ]);
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'auto-resume',
     score,
@@ -139,10 +139,10 @@ function runLiveObservationCase(): AutopilotBenchmarkCaseResult {
   const snapshot = engine.tick('live-observation');
   const sources = new Set(snapshot.observations.slice(-3).map((observation) => observation.source));
   const breadth = sources.size >= 3;
-  const score = average([
+  const score = [
     scoreRatio(breadth, 0.7),
     scoreRatio(snapshot.liveState.observationCount >= 8, 0.3),
-  ]);
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'live-observation',
     score,
@@ -183,11 +183,11 @@ function runCrossSourceCoverageCase(): AutopilotBenchmarkCaseResult {
   const snapshot = engine.tick('cross-source');
   const uniqueSources = Object.keys(snapshot.signalSummary).length;
   const diverseSubscriptions = new Set(snapshot.subscriptions.map((subscription) => subscription.source)).size;
-  const score = average([
+  const score = [
     scoreRatio(uniqueSources >= 5, 0.5),
     scoreRatio(diverseSubscriptions >= 5, 0.3),
     scoreRatio(snapshot.backgroundTriggers.some((trigger) => trigger.name === 'signal-observer'), 0.2),
-  ]);
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'cross-source-coverage',
     score,

@@ -263,16 +263,21 @@ export class AutopilotEngine {
   }
 
   private seedSignals(): void {
+    const recordSeedSignal = (signal: AutopilotSignal): void => {
+      this.signals.push(signal);
+      this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
+    };
+
     const sources = inferSources(this.objective, this.harnessState, this.context);
     for (const source of sources) {
-      this.ingestSignal(signalFromObjective(source, this.objective, this.harnessState, this.context));
+      recordSeedSignal(signalFromObjective(source, this.objective, this.harnessState, this.context));
     }
     if (Array.isArray(this.context.signals)) {
       for (const item of this.context.signals) {
         if (typeof item === 'object' && item !== null) {
           const record = item as Record<string, unknown>;
           const source = (normalizeText(record.source) as AutopilotSignalSource) || 'system';
-          this.ingestSignal({
+          recordSeedSignal({
             ...signalFromObjective(source, this.objective, this.harnessState, this.context),
             id: `${normalizeText(record.id) || randomUUID()}-${this.clock()}`,
             source,
