@@ -45,6 +45,11 @@ try {
     console.log(JSON.stringify(orchestrator.skillCatalog, null, 2));
   } else if (cmd === 'bench') {
     const suite = args._[1] ?? 'all';
+    const allowedSuites = ['rag', 'autopilot', 'raidingai', 'all'];
+    if (!allowedSuites.includes(suite)) {
+      console.error(`Error: Invalid suite "${suite}". Valid options are: ${allowedSuites.join(', ')}`);
+      process.exit(1);
+    }
     if (suite === 'rag') {
       console.log(formatRetrievalBenchmark());
     } else if (suite === 'autopilot') {

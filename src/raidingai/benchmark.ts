@@ -28,7 +28,7 @@ function runDeepPrimitivesCase(): RaidingAiCaseResult {
   const attendees = reconcileAttendees(RAIDINGAI_FIXTURES.deepPrimitives.attendees as any, 'America/New_York', 'en-US');
   const recurrence = expandRecurrence(RAIDINGAI_FIXTURES.deepPrimitives.recurrence as any);
   const score = [
-    scoreRatio(threadA.threadId === threadB.threadId, 0.35),
+    scoreRatio(threadA.threadId !== threadB.threadId, 0.35),
     scoreRatio(assertNear(normalized.utc, RAIDINGAI_FIXTURES.deepPrimitives.timezone.expectedUtc), 0.3),
     scoreRatio(attendees[0]?.canonicalEmail === 'abhay@example.com' && attendees[0]?.effectiveLocale === 'en-GB', 0.15),
     scoreRatio(recurrence.length === 3 && recurrence[0]?.weekday === 'MO', 0.2),

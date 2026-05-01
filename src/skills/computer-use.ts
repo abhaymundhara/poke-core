@@ -36,12 +36,21 @@ export function captureFrame(frame: VisionFrame, session: ComputerUseSession): U
   const selectors = detectSelectors(frame);
   const activeWindowId = frame.activeWindowId ?? session.focus.windowId;
   const activeTabId = frame.activeTabId ?? session.focus.tabId;
+
+  if (frame.activeTabId && !session.tabs.find((t) => t.id === frame.activeTabId)) {
+    session.tabs.push({ id: frame.activeTabId, title: 'New Tab', url: 'about:blank', active: false, history: ['about:blank'], selectors: [] });
+  }
+  if (frame.activeWindowId && !session.windows.find((w) => w.id === frame.activeWindowId)) {
+    session.windows.push({ id: frame.activeWindowId, title: 'New Window', focused: false, width: 1280, height: 800 });
+  }
+
+  const tab = session.tabs.find((entry) => entry.id === activeTabId) ?? session.tabs[0];
+  if (tab) tab.selectors = selectors;
+
   const focusedSelector = detectFocusedSelector(session, frame, selectors);
   const driftDetected = session.focus.selector !== null && focusedSelector !== session.focus.selector;
   const perception: UiPerception = { frameId: frame.id, visibleText: visibleText(frame).slice(0, 4000), detectedSelectors: selectors, activeTabId, activeWindowId, driftDetected, focusedSelector, keyboardHints: selectors.filter((selector) => /button|input|textarea|tab|dialog|menu/.test(selector)).slice(0, 6), tabCount: session.tabs.length, windowCount: session.windows.length };
   session.captures.push(perception);
-  const tab = session.tabs.find((entry) => entry.id === activeTabId) ?? session.tabs[0];
-  if (tab) tab.selectors = selectors;
   session.focus.windowId = activeWindowId;
   session.focus.tabId = activeTabId;
   session.focus.selector = focusedSelector;
@@ -66,14 +75,19 @@ export function keyboardNavigate(session: ComputerUseSession, key: string): stri
   }
   if (normalized === 'alt+left') {
     const tab = session.tabs.find((entry) => entry.id === session.focus.tabId);
-    const prev = tab?.history.at(-2) ?? tab?.history[0] ?? 'about:blank';
-    if (tab) tab.url = prev;
-    return prev;
+    if (tab && tab.history.length > 1) {
+      tab.history.pop();
+      tab.url = tab.history.at(-1) ?? 'about:blank';
+    } else if (tab) {
+      tab.url = tab.history[0] ?? 'about:blank';
+    }
+    return tab?.url ?? 'about:blank';
   }
   if (normalized === 'tab') {
     const tab = session.tabs.find((entry) => entry.id === session.focus.tabId);
     const selectors = tab?.selectors ?? [];
-    const nextSelector = selectors.find((selector) => selector !== session.focus.selector) ?? selectors[0] ?? null;
+    const currentIndex = session.focus.selector ? selectors.indexOf(session.focus.selector) : -1;
+    const nextSelector = selectors.length > 0 ? selectors[(currentIndex + 1) % selectors.length] : null;
     ensureFocus(session, session.focus.windowId, session.focus.tabId, nextSelector);
     return nextSelector ?? 'tab-cycle';
   }
