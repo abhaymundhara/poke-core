@@ -438,7 +438,7 @@ export class AutopilotEngine {
     if (snapshot.signalIntensity > 0.35 || this.signals.length > 3 || hasBrowserSubscription || /signal|telemetry|monitor|anomaly|trend/i.test(this.objective)) {
       triggers.push(buildTrigger('signal-observer', 'signal intensity suggests the loop should re-run without a user nudge', 90, 'observe signals, summarize drift, and refresh the working set', 'system', 'signal', 'debounce'));
     }
-    if (this.lastLiveSnapshot?.web.forecast.length) {
+    if (this.lastLiveSnapshot?.web.predictedSignals?.length) {
       triggers.push(buildTrigger('search-forecast', 'predictive search signals are available and should be refreshed', 45, 'refresh live search plans, source reliability, and the next signal forecast', 'browser', 'search', 'debounce'));
     }
 
