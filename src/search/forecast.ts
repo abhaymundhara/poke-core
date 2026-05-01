@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import type { SearchIntent, SearchPolicyState, SearchSignalForecast, SearchSource } from './types.ts';
+import type { SearchEvidenceGraph, SearchIntent, SearchPolicyState, SearchSignalForecast, SearchSource } from './types.ts';
 import { clamp, readJson, uniq } from './utils.ts';
 
 export type BehaviorTrajectoryEvent = {
@@ -45,6 +45,7 @@ function sourceFor(topic: string, source?: string): SearchSource | string {
 
 export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicyState, behaviorSeed?: Record<string, unknown>): SearchSignalForecast[] {
   const observations = observationsFrom(behaviorSeed);
+  const evidenceGraph = behaviorSeed?.evidenceGraph as SearchEvidenceGraph | undefined;
   const newest = Math.max(0, ...observations.map((event) => Number(event.at ?? 0)));
   const buckets = new Map<string, { count: number; successes: number; failures: number; ignored: number; sources: Map<string, number>; lastAt: number; durationMs: number; value: number; confidence: number; transitions: Map<string, number> }>();
   let previousTopic = '';
@@ -74,7 +75,8 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
     const dwellLift = clamp(bucket.durationMs / Math.max(1, bucket.count) / 300_000) * 0.1;
     const transitionLift = clamp([...bucket.transitions.values()].reduce((sum, value) => sum + value, 0) / Math.max(1, bucket.count)) * 0.12;
     const averageConfidence = bucket.confidence / Math.max(1, bucket.count);
-    const latentScore = clamp(0.26 + bucket.count * 0.055 + reliability * 0.14 + outcomeLift * 0.2 + recencyLift + dwellLift + transitionLift + averageConfidence * 0.12);
+    const graphLift = evidenceGraph ? clamp((evidenceGraph.communities.filter((community) => community.label.includes(topic.split(/\s+/)[0] ?? topic)).length * 0.08) + (evidenceGraph.synthesis.stance === 'contested' ? 0.05 : 0) + evidenceGraph.confidence * 0.08) : 0;
+    const latentScore = clamp(0.26 + bucket.count * 0.055 + reliability * 0.14 + outcomeLift * 0.2 + recencyLift + dwellLift + transitionLift + averageConfidence * 0.12 + graphLift);
     const horizon = latentScore > 0.78 || intent.freshness === 'live' ? 'immediate' : latentScore > 0.58 ? 'near-term' : 'later';
     const intervention = bucket.failures > bucket.successes ? 'clarify-before-acting' : bucket.ignored > bucket.successes ? 'lower-priority-monitor' : 'prepare-evidence-backed-action';
     return {
@@ -86,7 +88,7 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
       priority: clamp(latentScore + (intent.freshness === 'live' ? 0.08 : 0) - index * 0.03),
       latentNeed: {
         label: topic,
-        features: { frequency: bucket.count, outcomeLift, recencyLift, dwellLift, transitionLift, averageConfidence, value: bucket.value },
+        features: { frequency: bucket.count, outcomeLift, recencyLift, dwellLift, transitionLift, averageConfidence, value: bucket.value, graphLift, graphConfidence: evidenceGraph?.confidence ?? 0 },
         horizon,
         intervention,
       },

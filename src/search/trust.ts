@@ -1,4 +1,4 @@
-import type { SearchIntent, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown } from './types.ts';
+import type { PolicyDecision, SearchIntent, SearchPolicyRule, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown } from './types.ts';
 import { average, clamp, hostname, words } from './utils.ts';
 
 const OFFICIAL_DOMAINS = [/\.gov$/i, /\.edu$/i, /github\.com$/i, /docs\./i, /developer\./i, /openai\.com$/i];
@@ -78,7 +78,7 @@ function corroborationScore(result: SearchResult, all: SearchResult[]): number {
   return clamp(0.45 + Math.min(0.4, average(overlaps) * 1.2) + (new Set(all.map((entry) => hostname(entry.url))).size > 1 ? 0.08 : 0));
 }
 
-export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[], reliability: Record<string, SearchSourceReliability> = {}): TrustedEvidence[] {
+export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[], reliability: Record<string, SearchSourceReliability> = {}, decision?: PolicyDecision): TrustedEvidence[] {
   return results.map((result) => {
     const domain = hostname(result.url);
     const official = OFFICIAL_DOMAINS.some((pattern) => pattern.test(domain));
@@ -108,22 +108,36 @@ export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[]
       breakdown.uncertainty * 0.1,
     );
     return { ...result, trustScore, trustBreakdown: breakdown, trust: trustScore, reliability: reliabilityShape, provenance: { domain, source: result.source, official, primary } };
-  }).sort((left, right) => right.trustScore - left.trustScore);
+  }).filter((result) => result.trustScore >= (decision?.minTrustScore ?? 0)).sort((left, right) => right.trustScore - left.trustScore);
 }
 
-export function sourceScoreFor(source: SearchSource | string, intent: SearchIntent, reliability: Record<string, SearchSourceReliability>): number {
+function ruleBoostFor(source: SearchSource | string, intent: SearchIntent, rules: SearchPolicyRule[], decision?: PolicyDecision): number {
+  if (decision) return decision.sourceBoosts[source] ?? 0;
+  return rules.filter((rule) => rule.enabled).reduce((boost, rule) => {
+    const sourceMatch = !rule.when?.sources || rule.when.sources.includes(source);
+    const focusMatch = !rule.when?.focus || rule.when.focus.includes(intent.focus);
+    const freshnessMatch = !rule.when?.freshness || rule.when.freshness.includes(intent.freshness);
+    if (!sourceMatch || !focusMatch || !freshnessMatch) return boost;
+    return boost + (rule.actions ?? []).filter((action) => action.type === 'boost-source' && action.value === source).reduce((sum, action) => sum + action.weight, 0);
+  }, 0);
+}
+
+export function sourceScoreFor(source: SearchSource | string, intent: SearchIntent, reliability: Record<string, SearchSourceReliability>, rules: SearchPolicyRule[] = [], decision?: PolicyDecision): number {
   const base = reliability[source]?.score ?? 0.6;
   const prior = intent.sourcePriors.find((entry) => entry.source === source)?.weight ?? 0;
   const freshnessBonus = source === 'realtime-web' && intent.freshness === 'live' ? 0.16 : 0;
   const trustBonus = (source === 'scholar' || source === 'github') && intent.trustMode === 'official-first' ? 0.12 : 0;
-  return clamp(base * 0.68 + prior * 0.24 + freshnessBonus + trustBonus);
+  return clamp(base * 0.68 + prior * 0.24 + freshnessBonus + trustBonus + ruleBoostFor(source, intent, rules, decision));
 }
 
-export function buildSourceRanking(intent: SearchIntent, reliability: Record<string, SearchSourceReliability>): Array<{ source: SearchSource | string; score: number; reason: string }> {
+export function buildSourceRanking(intent: SearchIntent, reliability: Record<string, SearchSourceReliability>, rules: SearchPolicyRule[] = [], decision?: PolicyDecision): Array<{ source: SearchSource | string; score: number; reason: string }> {
   const candidates = [...new Set([...intent.sourcePriors.map((prior) => prior.source), ...intent.sourceHints, 'web', 'realtime-web', 'github', 'scholar', 'memory'])];
   return candidates.map((source) => ({
     source,
-    score: sourceScoreFor(source, intent, reliability),
-    reason: intent.sourcePriors.find((prior) => prior.source === source)?.reason ?? (source === 'realtime-web' ? 'freshness coverage' : source === 'scholar' ? 'citation coverage' : 'general coverage'),
+    score: sourceScoreFor(source, intent, reliability, rules, decision),
+    reason: [
+      intent.sourcePriors.find((prior) => prior.source === source)?.reason ?? (source === 'realtime-web' ? 'freshness coverage' : source === 'scholar' ? 'citation coverage' : 'general coverage'),
+      ruleBoostFor(source, intent, rules, decision) > 0 ? 'policy-rule-boost' : '',
+    ].filter(Boolean).join('+'),
   })).sort((left, right) => right.score - left.score);
 }

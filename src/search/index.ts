@@ -2,7 +2,7 @@ import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile } f
 import { buildSourceRanking, scoreEvidenceTrust } from './trust.ts';
 import { buildEvidenceGraph, buildQueries, deriveHopPlan } from './reasoning.ts';
 import { forecastNextSignals } from './forecast.ts';
-import { chooseStrategy, DEFAULT_STATE_PATH, SearchPolicyStore } from './policy.ts';
+import { chooseStrategy, DEFAULT_STATE_PATH, evaluatePolicy, SearchPolicyStore } from './policy.ts';
 import { understandSearchIntent, understandSearchIntentWithNlu, type SemanticNluProvider } from './nlu.ts';
 import { clamp } from './utils.ts';
 
@@ -10,6 +10,7 @@ export * from './types.ts';
 export * from './nlu.ts';
 export * from './trust.ts';
 export * from './reasoning.ts';
+export * from './knowledge-graph.ts';
 export * from './forecast.ts';
 export * from './policy.ts';
 
@@ -36,27 +37,44 @@ export class SearchSession {
 
   private buildPlan(intent: ReturnType<typeof understandSearchIntent>, context: Record<string, unknown>, results: SearchResult[] = [], learn = false): SearchPlan {
     this.state = this.store.load();
-    const strategy = chooseStrategy(intent, this.state);
-    const queries = buildQueries(intent, strategy);
-    const sourceRanking = buildSourceRanking(intent, this.state.sourceReliability);
+    const initialForecasts = forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context);
+    const policyDecision = evaluatePolicy(intent, this.state, initialForecasts.map((signal) => signal.latentNeed.label));
+    const effectiveIntent = policyDecision.maxHopBudget ? { ...intent, hopBudget: Math.min(intent.hopBudget, policyDecision.maxHopBudget) } : intent;
+    const strategy = chooseStrategy(effectiveIntent, this.state);
+    const queries = buildQueries(effectiveIntent, strategy);
+    const sourceRanking = buildSourceRanking(effectiveIntent, this.state.sourceReliability, this.state.rules, policyDecision);
     const trustNotes = buildTrustNotes(intent, sourceRanking);
-    const predictedSignals = forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context);
-    const trustedResults = scoreEvidenceTrust(intent, results, this.state.sourceReliability);
-    const evidenceGraph = buildEvidenceGraph(intent, queries, trustedResults, strategy, this.state.sourceReliability);
-    const hopPlan = deriveHopPlan(intent, strategy, trustedResults);
+    const trustedResults = scoreEvidenceTrust(intent, results, this.state.sourceReliability, policyDecision);
+    const evidenceGraph = buildEvidenceGraph(effectiveIntent, queries, trustedResults, strategy, this.state.sourceReliability, policyDecision);
+    const predictedSignals = forecastNextSignals(effectiveIntent, this.state, { ...(this.options.behaviorSeed ?? context), evidenceGraph });
+    const hopPlan = deriveHopPlan(effectiveIntent, strategy, trustedResults);
     if (learn) {
       const score = clamp(evidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + strategy.lastScore * 0.2);
       this.learn(intent, strategy, trustedResults, score);
     }
-    return { intent, strategy, queries, sourceRanking, hopPlan, trustNotes, predictedSignals, evidenceGraph };
+    return { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, `policy=${policyDecision.matchedRules.join('|') || 'none'}`], predictedSignals, evidenceGraph };
   }
 
   plan(objective: string, context: Record<string, unknown> = {}): SearchPlan {
+    if (this.options.nluProvider) return this.planSemanticSyncFallback(objective, context);
     return this.buildPlan(understandSearchIntent(objective, context), context);
+  }
+
+  private planSemanticSyncFallback(objective: string, context: Record<string, unknown>): SearchPlan {
+    return this.buildPlan(understandSearchIntent(objective, { ...context, providerNluAvailable: true }), context);
   }
 
   async planSemantic(objective: string, context: Record<string, unknown> = {}): Promise<SearchPlan> {
     return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider), context);
+  }
+
+  async planAuto(objective: string, context: Record<string, unknown> = {}): Promise<SearchPlan> {
+    const heuristic = understandSearchIntent(objective, context);
+    this.state = this.store.load();
+    const forecast = forecastNextSignals(heuristic, this.state, this.options.behaviorSeed ?? context);
+    const policy = evaluatePolicy(heuristic, this.state, forecast.map((signal) => signal.latentNeed.label));
+    const intent = policy.preferProviderNlu ? await understandSearchIntentWithNlu(objective, context, this.options.nluProvider) : heuristic;
+    return this.buildPlan(intent, context);
   }
 
   fuse(intent: ReturnType<typeof understandSearchIntent>, results: SearchResult[], strategy = chooseStrategy(intent, this.state)) {
@@ -87,11 +105,21 @@ export class SearchSession {
   }
 
   run(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): SearchPlan {
+    if (this.options.nluProvider) return this.buildPlan(understandSearchIntent(objective, { ...context, providerNluAvailable: true }), context, results, true);
     return this.buildPlan(understandSearchIntent(objective, context), context, results, true);
   }
 
   async runSemantic(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): Promise<SearchPlan> {
     return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider), context, results, true);
+  }
+
+  async runAuto(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): Promise<SearchPlan> {
+    const heuristic = understandSearchIntent(objective, context);
+    this.state = this.store.load();
+    const forecast = forecastNextSignals(heuristic, this.state, this.options.behaviorSeed ?? context);
+    const policy = evaluatePolicy(heuristic, this.state, forecast.map((signal) => signal.latentNeed.label));
+    const intent = policy.preferProviderNlu ? await understandSearchIntentWithNlu(objective, context, this.options.nluProvider) : heuristic;
+    return this.buildPlan(intent, context, results, true);
   }
 
   rewritePolicyFromFeedback(feedback: Parameters<SearchPolicyStore['rewriteFromFeedback']>[0]) {

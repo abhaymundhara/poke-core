@@ -1,5 +1,5 @@
 import { resolve } from 'node:path';
-import type { SearchFocus, SearchIntent, SearchOutcome, SearchPolicyRule, SearchPolicyState, SearchSignalForecast, SearchSource, SearchSourceReliability, SearchStrategyProfile } from './types.ts';
+import type { PolicyDecision, SearchFocus, SearchIntent, SearchOutcome, SearchPolicyRule, SearchPolicyState, SearchSignalForecast, SearchSource, SearchSourceReliability, SearchStrategyProfile } from './types.ts';
 import { clamp, nowMs, readJson, writeJson } from './utils.ts';
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.poke-core', 'search-policy.json');
@@ -102,6 +102,33 @@ export function chooseStrategy(intent: SearchIntent, policy: SearchPolicyState):
   const scored = policy.strategies.map((strategy) => ({ strategy, score: scoreStrategy(intent, strategy, policy) * (0.7 + strategy.lastScore * 0.3) }));
   scored.sort((left, right) => right.score - left.score);
   return scored[0]?.strategy ?? defaultPolicy().strategies[0];
+}
+
+function ruleMatches(rule: SearchPolicyRule, intent: SearchIntent, latentLabels: string[] = []): boolean {
+  if (!rule.enabled) return false;
+  if (rule.when?.focus && !rule.when.focus.includes(intent.focus)) return false;
+  if (rule.when?.freshness && !rule.when.freshness.includes(intent.freshness)) return false;
+  if (rule.when?.sources && !rule.when.sources.some((source) => intent.sourceHints.includes(source as SearchSource) || intent.entities.some((entity) => entity.toLowerCase().includes(String(source).toLowerCase())))) return false;
+  if (rule.when?.latentNeed && !latentLabels.includes(rule.when.latentNeed) && !intent.topics.includes(rule.when.latentNeed)) return false;
+  return true;
+}
+
+export function evaluatePolicy(intent: SearchIntent, policy: SearchPolicyState, latentLabels: string[] = []): PolicyDecision {
+  const decision: PolicyDecision = { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] };
+  for (const rule of policy.rules) {
+    if (!ruleMatches(rule, intent, latentLabels)) continue;
+    decision.matchedRules.push(rule.id);
+    if (rule.maxHopBudget !== undefined) decision.maxHopBudget = Math.min(decision.maxHopBudget ?? rule.maxHopBudget, rule.maxHopBudget);
+    if (rule.minTrustScore !== undefined) decision.minTrustScore = Math.max(decision.minTrustScore ?? 0, rule.minTrustScore);
+    for (const [source, weight] of Object.entries(rule.sourceWeights ?? {})) decision.sourceBoosts[source] = (decision.sourceBoosts[source] ?? 0) + Number(weight) - 1;
+    for (const action of rule.actions ?? []) {
+      if (action.type === 'boost-source') decision.sourceBoosts[action.value] = (decision.sourceBoosts[action.value] ?? 0) + action.weight;
+      if (action.type === 'require-corroboration') decision.requireCorroboration = true;
+      if (action.type === 'prefer-provider-nlu') decision.preferProviderNlu = true;
+      if (action.type === 'cap-hop-budget') decision.maxHopBudget = Math.min(decision.maxHopBudget ?? Number(action.value), Number(action.value));
+    }
+  }
+  return decision;
 }
 
 function validateRules(rules: SearchPolicyRule[]): string[] {
