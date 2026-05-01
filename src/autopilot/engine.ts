@@ -201,6 +201,7 @@ export class AutopilotEngine {
 
   private seed(): void {
     for (const subscription of defaultSubscriptions(this.objective, this.harnessState, this.context)) this.subscriptions.push(subscription);
+    this.seedContextSubscriptions();
     this.seedObservations();
     this.seedSignals();
     this.auditTrail.push('seed:subscriptions');
@@ -218,6 +219,23 @@ export class AutopilotEngine {
       throttleMs: 0,
       onWake: (wake) => this.onWake(wake),
     });
+  }
+
+  private seedContextSubscriptions(): void {
+    if (!Array.isArray(this.context.subscriptions)) return;
+    for (const item of this.context.subscriptions) {
+      if (typeof item === 'object' && item !== null) {
+        const record = item as Record<string, unknown>;
+        this.subscribe(createSubscription({
+          source: (normalizeText(record.source) as AutopilotSignalSource) || 'system',
+          topic: normalizeText(record.topic) || 'context-subscription',
+          match: asArray(record.match).map(normalizeText).filter(Boolean),
+          enabled: record.enabled === undefined ? true : Boolean(record.enabled),
+          debounceMs: asNumber(record.debounceMs, 250),
+          throttleMs: asNumber(record.throttleMs, 1_500),
+        }));
+      }
+    }
   }
 
   private seedObservations(): void {
