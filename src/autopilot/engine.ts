@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createObservation, createSignal, createSubscription, signalKey, type AutopilotObservation, type AutopilotSignal, type AutopilotSignalSource, type AutopilotSubscription, type AutopilotWake } from './events';
 import { AutopilotSchedulerWorker, type SchedulerSnapshot } from './scheduler';
+import { AutopilotLiveDaemon, type LiveDaemonSnapshot } from './live-signals';
 
 export type AutopilotTrigger = {
   id: string;
@@ -36,6 +37,12 @@ export type AutopilotLiveState = {
   nextWakeAt: string | null;
   debounceWindowMs: number;
   throttleWindowMs: number;
+  liveWebResults: number;
+  liveWebFreshness: number;
+  forecastedSignals: number;
+  externalEvents: number;
+  searchStrategy: string | null;
+  lastPollAt: string | null;
 };
 
 export type AutopilotCycle = {
@@ -179,6 +186,8 @@ function signalFromObjective(source: AutopilotSignalSource, objective: string, h
 
 export class AutopilotEngine {
   private readonly scheduler: AutopilotSchedulerWorker;
+  private readonly liveDaemon: AutopilotLiveDaemon;
+  private lastLiveSnapshot: LiveDaemonSnapshot | null = null;
   private readonly subscriptions: AutopilotSubscription[] = [];
   private readonly observations: AutopilotObservation[] = [];
   private readonly signals: AutopilotSignal[] = [];
@@ -196,6 +205,7 @@ export class AutopilotEngine {
     private readonly clock: () => number = () => Date.now(),
   ) {
     this.scheduler = new AutopilotSchedulerWorker(this.clock);
+    this.liveDaemon = new AutopilotLiveDaemon({ objective: this.objective, harnessState: this.harnessState, context: this.context, clock: this.clock, enableLiveSignals: Boolean(this.context.liveSignals ?? this.context.liveDaemon ?? this.context.searchSignals), policyPath: typeof this.context.searchPolicyPath === 'string' ? this.context.searchPolicyPath : undefined });
     this.seed();
   }
 
@@ -361,8 +371,25 @@ export class AutopilotEngine {
     }, {});
   }
 
+  private pollLiveSources(): void {
+    if (!(Boolean(this.context.liveSignals ?? this.context.liveDaemon ?? this.context.searchSignals))) return;
+    const snapshot = this.liveDaemon.pollOnce();
+    this.lastLiveSnapshot = snapshot;
+    for (const signal of snapshot.web.signals) this.ingestSignal(signal);
+    for (const signal of snapshot.platform.signals) this.ingestSignal(signal);
+    for (const observation of snapshot.web.observations) this.observations.push(observation);
+    for (const observation of snapshot.platform.observations) this.observations.push(observation);
+    this.auditTrail.push(`live-poll:web:${snapshot.web.results.length}`);
+    this.auditTrail.push(`live-poll:platform:${snapshot.platform.events.length}`);
+    this.auditTrail.push(`live-strategy:${snapshot.strategy}`);
+  }
+
   private buildLiveState(loopReason: string): AutopilotLiveState {
     const scheduler = this.scheduler.snapshot();
+    const liveWebResults = this.lastLiveSnapshot?.web.results.length ?? 0;
+    const liveWebFreshness = this.lastLiveSnapshot?.web.results.length ? Math.max(...this.lastLiveSnapshot.web.results.map((result) => result.freshness), 0) : 0;
+    const externalEvents = this.lastLiveSnapshot?.platform.events.length ?? 0;
+    const forecastedSignals = this.lastLiveSnapshot?.web.forecast.length ?? 0;
     return {
       mode: 'event-driven',
       status: this.status,
@@ -376,6 +403,12 @@ export class AutopilotEngine {
       nextWakeAt: scheduler.nextWakeAt ? new Date(scheduler.nextWakeAt).toISOString() : null,
       debounceWindowMs: Math.max(...this.signals.map((signal) => signal.debounceMs), 0),
       throttleWindowMs: Math.max(...this.signals.map((signal) => signal.throttleMs), 0),
+      liveWebResults,
+      liveWebFreshness,
+      forecastedSignals,
+      externalEvents,
+      searchStrategy: this.lastLiveSnapshot?.strategy ?? null,
+      lastPollAt: this.lastLiveSnapshot ? new Date(this.clock()).toISOString() : null,
     };
   }
 
@@ -405,6 +438,9 @@ export class AutopilotEngine {
     if (snapshot.signalIntensity > 0.35 || this.signals.length > 3 || hasBrowserSubscription || /signal|telemetry|monitor|anomaly|trend/i.test(this.objective)) {
       triggers.push(buildTrigger('signal-observer', 'signal intensity suggests the loop should re-run without a user nudge', 90, 'observe signals, summarize drift, and refresh the working set', 'system', 'signal', 'debounce'));
     }
+    if (this.lastLiveSnapshot?.web.predictedSignals?.length) {
+      triggers.push(buildTrigger('search-forecast', 'predictive search signals are available and should be refreshed', 45, 'refresh live search plans, source reliability, and the next signal forecast', 'browser', 'search', 'debounce'));
+    }
 
     if (this.status === 'paused' && schedulerSnapshot.pendingCount > 0) {
       triggers.push(buildTrigger('auto-resume', 'pending wake requests exist while the loop is paused', 5, 'resume the loop immediately after the next wake arrives', 'system', 'resume', 'immediate'));
@@ -428,6 +464,7 @@ export class AutopilotEngine {
     if (snapshot.calendarConflicts > 0) checkIns.push(buildCheckIn('calendar-review', 180, 'calendar', 're-check the schedule and confirm conflict-free windows', 'calendar'));
     if (snapshot.staleTransactional > 0) checkIns.push(buildCheckIn('transactional-cleanup', 720, 'browser', 'review whether transactional artifacts are still worth keeping', 'browser'));
     if (snapshot.signalIntensity > 0.35 || this.signals.length > 3) checkIns.push(buildCheckIn('signal-observation', 90, 'browser', 're-scan the latest signals and capture trend drift', 'browser'));
+    if (this.lastLiveSnapshot?.web.forecast.length) checkIns.push(buildCheckIn('search-forecast-review', 45, 'browser', 'review the predicted search signals and expected next hops', 'browser'));
     if (this.status === 'paused') checkIns.push(buildCheckIn('resume-observation', 5, 'in-app', 'wake the loop when the next pending signal clears', 'system'));
     return checkIns.slice(0, 6);
   }
@@ -441,6 +478,7 @@ export class AutopilotEngine {
       snapshot.signalIntensity > 0.35 || this.signals.length > 3 ? 'watch the signal surface' : '',
       liveState.status === 'paused' ? 'auto-resume on the next wake' : '',
       liveState.pendingSignals > 0 ? 'flush queued wakes without duplication' : '',
+      liveState.forecastedSignals > 0 ? 'prepare for the next predicted live signal' : '',
     ];
     return unique(priorities);
   }
@@ -448,6 +486,7 @@ export class AutopilotEngine {
   private buildNextLoopHint(liveState: AutopilotLiveState, context: Record<string, unknown>): string {
     if (typeof context.hint === 'string' && context.hint.trim()) return context.hint.trim();
     if (liveState.nextWakeAt) return `wake again at ${liveState.nextWakeAt} after the scheduler flushes`;
+    if (liveState.forecastedSignals > 0 && liveState.searchStrategy) return `use ${liveState.searchStrategy} and refresh the next ${liveState.forecastedSignals} live signal forecast(s)`;
     return 're-run on the next live signal and keep the event queue compact';
   }
 
@@ -476,6 +515,7 @@ export class AutopilotEngine {
   tick(loopReason = 'tick'): AutopilotCycle {
     this.loopCount += 1;
     this.lastTickAt = this.clock();
+    this.pollLiveSources();
     this.maybeAutoResume();
     this.scheduler.flushDue(this.clock());
     return this.snapshot(loopReason);

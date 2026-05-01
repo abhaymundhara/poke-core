@@ -1,5 +1,6 @@
 import { AutopilotEngine } from './engine';
 import { createSignal } from './events';
+import { createSearchSession, buildSearchIntent } from '../search/index.ts';
 
 export type AutopilotBenchmarkCaseResult = {
   name: string;
@@ -201,6 +202,26 @@ function runCrossSourceCoverageCase(): AutopilotBenchmarkCaseResult {
   };
 }
 
+function runPredictiveSearchCase(): AutopilotBenchmarkCaseResult {
+  const clock = createClock();
+  const engine = new AutopilotEngine('predict the next live signals and search strategy', { relationshipWeight: 0.42, openThreads: 2, calendarConflicts: 1, signalIntensity: 0.7 }, { liveSignals: true, platformEvents: [{ source: 'github', owner: 'abhaymundhara', repo: 'poke-core', kind: 'issue', number: 42, title: 'search gap', url: 'https://github.com/abhaymundhara/poke-core/issues/42', updatedAt: '2026-05-01T00:00:00.000Z', freshness: 0.94 }] }, clock.now);
+  const snapshot = engine.tick('predictive-search');
+  const forecastedSignals = snapshot.liveState.forecastedSignals > 0;
+  const strategyVisible = typeof snapshot.liveState.searchStrategy === 'string' && snapshot.liveState.searchStrategy.length > 0;
+  const score = [scoreRatio(forecastedSignals, 0.6), scoreRatio(strategyVisible, 0.4)].reduce((sum, value) => sum + value, 0);
+  return { name: 'predictive-search', score, passed: score >= 0.9, metrics: { forecastedSignals: snapshot.liveState.forecastedSignals, strategy: snapshot.liveState.searchStrategy ?? 'none', liveWebResults: snapshot.liveState.liveWebResults, externalEvents: snapshot.liveState.externalEvents }, notes: snapshot.auditTrail };
+}
+
+function runSearchPolicyPersistenceCase(): AutopilotBenchmarkCaseResult {
+  const first = createSearchSession();
+  const second = createSearchSession();
+  const intent = buildSearchIntent('learn better search strategies and trustworthiness over time', { live: true, sources: ['realtime-web', 'web'] });
+  const plan = first.run(intent.objective, { live: true, sources: intent.sourceHints }, [{ title: 'authoritative source', url: 'https://example.com/source', snippet: 'evidence-backed result', source: 'web', trust: 0.88, freshness: 0.8, score: 0.9 }]);
+  const persisted = second.choose(intent.objective, { live: true, sources: intent.sourceHints });
+  const score = [scoreRatio(plan.evidenceGraph.confidence > 0.4, 0.35), scoreRatio(persisted.id.length > 0, 0.35), scoreRatio(second.policy.strategies.some((strategy) => strategy.uses > 0), 0.3)].reduce((sum, value) => sum + value, 0);
+  return { name: 'search-policy-persistence', score, passed: score >= 0.9, metrics: { strategy: persisted.name, confidence: plan.evidenceGraph.confidence, uses: second.policy.strategies.find((strategy) => strategy.id === persisted.id)?.uses ?? 0 }, notes: [plan.evidenceGraph.summary] };
+}
+
 export function runAutopilotBenchmark() {
   const results = [
     runWakeOnSignalCase(),
@@ -208,6 +229,8 @@ export function runAutopilotBenchmark() {
     runAutoResumeCase(),
     runLiveObservationCase(),
     runCrossSourceCoverageCase(),
+    runPredictiveSearchCase(),
+    runSearchPolicyPersistenceCase(),
   ];
   const scores = results.map((result) => result.score);
   const summary: AutopilotBenchmarkSummary = {
@@ -226,6 +249,8 @@ function standardKeyFor(name: string): keyof AutopilotAudit['standards'] {
   if (name === 'debounce-collapse') return 'debounceCollapse';
   if (name === 'auto-resume') return 'autoResume';
   if (name === 'live-observation') return 'liveObservation';
+  if (name === 'predictive-search') return 'predictiveSearch';
+  if (name === 'search-policy-persistence') return 'searchPolicyPersistence';
   return 'crossSourceCoverage';
 }
 
@@ -236,6 +261,8 @@ export function runAutopilotAudit(): AutopilotAudit {
     autoResume: 0.9,
     liveObservation: 0.85,
     crossSourceCoverage: 0.9,
+    predictiveSearch: 0.9,
+    searchPolicyPersistence: 0.9,
   };
   const benchmark = runAutopilotBenchmark();
   const gaps = benchmark.results.filter((result) => result.score < standards[standardKeyFor(result.name)]).map((result) => result.name);

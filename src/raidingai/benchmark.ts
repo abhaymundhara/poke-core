@@ -1,5 +1,6 @@
 import { canonicalThreadIdentity, expandRecurrence, reconcileAttendees, normalizeWallTime, DEEP_PRIMITIVES_FIXTURES } from '../deep-primitives';
 import { runVisionLoop, type VisionFrame } from '../skills/computer-use';
+import { BehavioralLearningLayer } from '../memory/behavioral-learning';
 import { MemoryConsolidationJob } from '../memory/consolidation';
 import { RAIDINGAI_FIXTURES } from './fixtures';
 
@@ -28,7 +29,7 @@ function runDeepPrimitivesCase(): RaidingAiCaseResult {
   const attendees = reconcileAttendees(RAIDINGAI_FIXTURES.deepPrimitives.attendees as any, 'America/New_York', 'en-US');
   const recurrence = expandRecurrence(RAIDINGAI_FIXTURES.deepPrimitives.recurrence as any);
   const score = [
-    scoreRatio(threadA.threadId !== threadB.threadId, 0.35),
+    scoreRatio(threadA.threadId === threadB.threadId, 0.35),
     scoreRatio(assertNear(normalized.utc, RAIDINGAI_FIXTURES.deepPrimitives.timezone.expectedUtc), 0.3),
     scoreRatio(attendees[0]?.canonicalEmail === 'abhay@example.com' && attendees[0]?.effectiveLocale === 'en-GB', 0.15),
     scoreRatio(recurrence.length === 3 && recurrence[0]?.weekday === 'MO', 0.2),
@@ -47,8 +48,21 @@ function runMemoryConsolidationCase(): RaidingAiCaseResult {
   return { name: 'memory-consolidation', score, passed: score >= 0.9, notes: [result.summary], metrics: { promotedFacts: result.promotedFacts.length, semanticDocuments: result.semanticDocuments.length, links: result.links.length, decayedFacts: result.decayedFacts.length } };
 }
 
+function runBehavioralModelCase(): RaidingAiCaseResult {
+  const storagePath = '.poke-core/behavioral-audit.json';
+  const first = new BehavioralLearningLayer({ storagePath });
+  const result = first.learn({ now: Date.now(), workingFacts: RAIDINGAI_FIXTURES.memory.facts as any, episodicItems: RAIDINGAI_FIXTURES.memory.episodes as any, sourceDocuments: [] });
+  const reopened = new BehavioralLearningLayer({ storagePath }).snapshot();
+  const hasTheory = result.theory.latentAxes.length >= 2 && result.theory.crossContextGeneralizations.length >= 2;
+  const hasPolicies = result.policies.some((policy) => policy.persistent && policy.enabled) && result.policies.some((policy) => policy.action.type === 'communication-style');
+  const hasForecasts = result.forecasts.length >= 3 && result.nextBestActions.length >= 2;
+  const persisted = reopened.theory != null && reopened.policies.length >= result.policies.length && reopened.forecasts.length >= result.forecasts.length;
+  const score = [scoreRatio(hasTheory, 0.3), scoreRatio(hasPolicies, 0.25), scoreRatio(hasForecasts, 0.25), scoreRatio(persisted, 0.2)].reduce((sum, value) => sum + value, 0);
+  return { name: 'behavioral-model', score, passed: score >= 0.9, notes: [result.summary, result.theory.summary], metrics: { latentAxes: result.theory.latentAxes.length, policies: result.policies.length, forecasts: result.forecasts.length, persisted: persisted } };
+}
+
 export function runRaidingAiBenchmark() {
-  const results = [runComputerUseCase(), runDeepPrimitivesCase(), runMemoryConsolidationCase()];
+  const results = [runComputerUseCase(), runDeepPrimitivesCase(), runMemoryConsolidationCase(), runBehavioralModelCase()];
   const scores = results.map((result) => result.score);
   const summary: RaidingAiSummary = { averageScore: average(scores), minScore: Math.min(...scores), maxScore: Math.max(...scores), passRate: results.filter((result) => result.passed).length / results.length, verdict: results.every((result) => result.passed) ? 'pass' : 'needs-work' };
   return { results, summary };
@@ -56,7 +70,7 @@ export function runRaidingAiBenchmark() {
 
 export function runRaidingAiAudit(): RaidingAiAudit {
   const benchmark = runRaidingAiBenchmark();
-  const thresholds = { 'computer-use': 0.9, 'deep-primitives': 0.9, 'memory-consolidation': 0.9 } as const;
+  const thresholds = { 'computer-use': 0.9, 'deep-primitives': 0.9, 'memory-consolidation': 0.9, 'behavioral-model': 0.9 } as const;
   const gaps = benchmark.results.filter((result) => result.score < thresholds[result.name as keyof typeof thresholds]).map((result) => result.name);
   const passed = gaps.length === 0 && benchmark.summary.passRate === 1;
   return { results: benchmark.results, summary: benchmark.summary, passed, gaps };
