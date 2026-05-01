@@ -1,4 +1,4 @@
-import { AutopilotEngine, buildAutopilotCycle } from './engine';
+import { AutopilotEngine } from './engine';
 import { createSignal } from './events';
 
 export type AutopilotBenchmarkCaseResult = {
@@ -214,6 +214,14 @@ export function runAutopilotBenchmark() {
   return { results, summary };
 }
 
+function standardKeyFor(name: string): keyof AutopilotAudit['standards'] {
+  if (name === 'wake-on-signal') return 'wakeOnSignal';
+  if (name === 'debounce-collapse') return 'debounceCollapse';
+  if (name === 'auto-resume') return 'autoResume';
+  if (name === 'live-observation') return 'liveObservation';
+  return 'crossSourceCoverage';
+}
+
 export function runAutopilotAudit(): AutopilotAudit {
   const standards = {
     wakeOnSignal: 0.9,
@@ -223,17 +231,7 @@ export function runAutopilotAudit(): AutopilotAudit {
     crossSourceCoverage: 0.9,
   };
   const benchmark = runAutopilotBenchmark();
-  const gaps = benchmark.results.filter((result) => result.score < standards[
-    result.name === 'wake-on-signal'
-      ? 'wakeOnSignal'
-      : result.name === 'debounce-collapse'
-        ? 'debounceCollapse'
-        : result.name === 'auto-resume'
-          ? 'autoResume'
-          : result.name === 'live-observation'
-            ? 'liveObservation'
-            : 'crossSourceCoverage'
-  ]).map((result) => result.name);
+  const gaps = benchmark.results.filter((result) => result.score < standards[standardKeyFor(result.name)]).map((result) => result.name);
   const passed = gaps.length === 0 && benchmark.summary.passRate === 1;
   return { standards, results: benchmark.results, summary: benchmark.summary, passed, gaps };
 }
