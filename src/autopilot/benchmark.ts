@@ -162,6 +162,13 @@ function runCrossSourceCoverageCase(): AutopilotBenchmarkCaseResult {
     'pull email, calendar, browser, filesystem, and integration signals into one loop',
     { relationshipWeight: 0.52, openThreads: 2, calendarConflicts: 1, staleTransactional: 1, signalIntensity: 0.65 },
     {
+      subscriptions: [
+        { source: 'email', topic: 'inbox-watch', match: ['thread', 'reply'] },
+        { source: 'calendar', topic: 'schedule-watch', match: ['meeting', 'availability'] },
+        { source: 'browser', topic: 'surface-watch', match: ['page', 'click'] },
+        { source: 'filesystem', topic: 'path-watch', match: ['file', 'path'] },
+        { source: 'integration', topic: 'issue-watch', match: ['issue', 'repo'] },
+      ],
       signals: [
         { source: 'email', key: 'reply', reason: 'email signal' },
         { source: 'calendar', key: 'meeting', reason: 'calendar signal' },
@@ -178,7 +185,7 @@ function runCrossSourceCoverageCase(): AutopilotBenchmarkCaseResult {
   const diverseSubscriptions = new Set(snapshot.subscriptions.map((subscription) => subscription.source)).size;
   const score = average([
     scoreRatio(uniqueSources >= 5, 0.5),
-    scoreRatio(diverseSubscriptions >= 4, 0.3),
+    scoreRatio(diverseSubscriptions >= 5, 0.3),
     scoreRatio(snapshot.backgroundTriggers.some((trigger) => trigger.name === 'signal-observer'), 0.2),
   ]);
   return {
