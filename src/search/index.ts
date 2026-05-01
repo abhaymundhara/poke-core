@@ -1,107 +1,133 @@
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile } from './types.ts';
+import { buildSourceRanking, scoreEvidenceTrust } from './trust.ts';
+import { buildEvidenceGraph, buildQueries, deriveHopPlan } from './reasoning.ts';
+import { forecastNextSignals } from './forecast.ts';
+import { chooseStrategy, DEFAULT_STATE_PATH, SearchPolicyStore } from './policy.ts';
+import { understandSearchIntent, understandSearchIntentWithNlu, type SemanticNluProvider } from './nlu.ts';
+import { clamp } from './utils.ts';
 
-export type SearchSource = 'web' | 'realtime-web' | 'scholar' | 'github' | 'memory' | 'email' | 'calendar' | 'filesystem' | 'integration';
-export type SearchFreshness = 'historical' | 'recent' | 'live';
-export type SearchFocus = 'semantic' | 'trust' | 'multi-hop' | 'factual' | 'diagnostic' | 'exploratory';
+export * from './types.ts';
+export * from './nlu.ts';
+export * from './trust.ts';
+export * from './reasoning.ts';
+export * from './forecast.ts';
+export * from './policy.ts';
 
-export type SearchIntent = {
-  objective: string;
-  normalizedObjective: string;
-  semanticQuery: string;
-  entities: string[];
-  topics: string[];
-  sourceHints: SearchSource[];
-  freshness: SearchFreshness;
-  focus: SearchFocus;
-  hopBudget: number;
-  trustMode: 'official-first' | 'diverse' | 'broad';
-  querySeeds: string[];
-  evidenceTerms: string[];
-  sessionKey: string;
-};
-
-export type SearchResult = {
-  title: string;
-  url: string;
-  snippet: string;
-  source: SearchSource;
-  publishedAt?: string | null;
-  trust?: number;
-  freshness?: number;
-  score?: number;
-};
-
-export type SearchEvidenceNode = { id: string; label: string; type: 'query' | 'result' | 'source' | 'claim'; weight: number; metadata: Record<string, unknown> };
-export type SearchEvidenceEdge = { from: string; to: string; relation: 'supports' | 'refines' | 'contradicts' | 'routes' | 'derived-from'; weight: number };
-export type SearchEvidenceGraph = { nodes: SearchEvidenceNode[]; edges: SearchEvidenceEdge[]; queries: string[]; summary: string; confidence: number };
-export type SearchStrategyProfile = { id: string; name: string; description: string; sourceWeights: Record<SearchSource, number>; hopBias: number; freshnessBias: number; trustBias: number; semanticBias: number; uses: number; successes: number; failures: number; lastScore: number; lastUsedAt: number | null };
-export type SearchSourceReliability = { source: SearchSource | string; score: number; uses: number; successes: number; failures: number; lastObservedAt: number | null; notes: string[] };
-export type SearchOutcome = { sessionKey: string; strategyId: string; query: string; source?: SearchSource | string; score: number; useful?: boolean; hopsUsed?: number; resultCount?: number; relevantCount?: number; notes?: string[] };
-export type SearchSignalForecast = { source: SearchSource | string; topic: string; confidence: number; reason: string; suggestedQueries: string[]; priority: number };
-export type SearchPolicyState = { version: 1; updatedAt: number; strategies: SearchStrategyProfile[]; sourceReliability: Record<string, SearchSourceReliability>; queryProfiles: Record<string, { count: number; lastScore: number; lastUpdatedAt: number; averageScore: number; focus: SearchFocus; sourceHints: SearchSource[] }>; forecasts: SearchSignalForecast[] };
-export type SearchPlan = { intent: SearchIntent; strategy: SearchStrategyProfile; queries: string[]; sourceRanking: Array<{ source: SearchSource | string; score: number; reason: string }>; hopPlan: string[]; trustNotes: string[]; predictedSignals: SearchSignalForecast[]; evidenceGraph: SearchEvidenceGraph };
-
-const DEFAULT_STATE_PATH = resolve(process.cwd(), '.poke-core', 'search-policy.json');
-const BEHAVIOR_PATHS = [resolve(process.cwd(), '.poke-core', 'behavioral-state.json'), resolve(process.cwd(), '.poke-core', 'behavioral-audit.json'), resolve(process.cwd(), '.poke-core', 'manual-behavioral-audit.json')];
-
-function nowMs(): number { return Date.now(); }
-function normalize(text: string): string { return text.toLowerCase().trim().replace(/[^a-z0-9@._:-]+/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, ''); }
-function uniq(values: string[]): string[] { return [...new Set(values.map((value) => value.trim()).filter(Boolean))]; }
-function clamp(value: number, min = 0, max = 1): number { return Math.max(min, Math.min(max, value)); }
-function average(values: number[]): number { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0; }
-function ensureDir(path: string): void { const dir = dirname(path); if (!existsSync(dir)) mkdirSync(dir, { recursive: true }); }
-function readJson<T>(path: string, fallback: T): T { try { if (!existsSync(path)) return fallback; return JSON.parse(readFileSync(path, 'utf8')) as T; } catch { return fallback; } }
-function writeJson(path: string, value: unknown): void { ensureDir(path); writeFileSync(path, JSON.stringify(value, null, 2)); }
-function stableHash(value: string): string { return createHash('sha1').update(value).digest('hex').slice(0, 12); }
-function words(text: string): string[] { return text.toLowerCase().match(/[a-z0-9@._:-]{2,}/g) ?? []; }
-function hostname(url: string): string { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } }
-function extractEntities(text: string): string[] { const matches = text.match(/(?:[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+|[A-Z]{2,}(?:-[A-Z0-9]+)?|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|https?:\/\/\S+|\b[a-z0-9_.-]+\/[a-z0-9_.-]+\b)/gi) ?? []; return uniq(matches.map((value) => value.replace(/[),.;]+$/g, ''))).slice(0, 8); }
-function detectFreshness(text: string): SearchFreshness { return /(live|latest|current|today|now|recent|breaking|fresh|new)/i.test(text) ? 'live' : /(recent|update|trend|this week|this month)/i.test(text) ? 'recent' : 'historical'; }
-function detectFocus(text: string): SearchFocus { if (/(why|cause|root|diagnos|trace|debug|fix|failure|issue)/i.test(text)) return 'diagnostic'; if (/(trust|verify|reliable|official|source|citation|evidence)/i.test(text)) return 'trust'; if (/(multi-hop|chain|deep|fuse|combine|correlat|synthesize)/i.test(text)) return 'multi-hop'; if (/(what|who|where|when|how|definition|explain)/i.test(text)) return 'semantic'; if (/(discover|explore|brainstorm|survey)/i.test(text)) return 'exploratory'; return 'factual'; }
-function detectSourceHints(text: string): SearchSource[] { const lower = text.toLowerCase(); const hints: SearchSource[] = []; if (/(github|repo|issue|pr|pull request|commit|code)/.test(lower)) hints.push('github'); if (/(paper|study|journal|citation|scholar|arxiv)/.test(lower)) hints.push('scholar'); if (/(email|thread|inbox|message|reply)/.test(lower)) hints.push('email'); if (/(calendar|meeting|schedule|availability)/.test(lower)) hints.push('calendar'); if (/(file|filesystem|folder|directory|path|diff)/.test(lower)) hints.push('filesystem'); if (/(integration|notion|linear|todoist|slack|vercel)/.test(lower)) hints.push('integration'); if (/(memory|profile|preference|behavior|style)/.test(lower)) hints.push('memory'); if (/(live|latest|current|breaking|now|today)/.test(lower)) hints.unshift('realtime-web'); return uniq(hints.length ? hints : ['web'] as SearchSource[]); }
-function hopBudgetFor(text: string): number { const base = 1 + Math.min(3, (text.split(/\b(and|or|with|via|through|between|from|to)\b/i).length - 1)); if (/(why|how|diagnos|chain|fuse|compare|relationship|trust)/i.test(text)) return Math.max(base, 3); return Math.min(4, base); }
-function buildSemanticQuery(text: string, entities: string[]): string { const tokens = words(text).filter((value) => !/^(the|and|for|with|from|that|this|into|about|need|want|please|help)$/i.test(value)); const seed = uniq([...entities.slice(0, 4), ...tokens.slice(0, 8)]); return seed.join(' ').trim() || text.trim(); }
-function strategyTemplate(id: string, name: string, description: string, sourceWeights: Partial<Record<SearchSource, number>>, hopBias: number, freshnessBias: number, trustBias: number, semanticBias: number): SearchStrategyProfile { return { id, name, description, sourceWeights: { web: 1, 'realtime-web': 1, scholar: 0.9, github: 0.9, memory: 0.7, email: 0.6, calendar: 0.6, filesystem: 0.7, integration: 0.8, ...sourceWeights }, hopBias, freshnessBias, trustBias, semanticBias, uses: 0, successes: 0, failures: 0, lastScore: 0.5, lastUsedAt: null }; }
-function defaultPolicy(): SearchPolicyState { return { version: 1, updatedAt: nowMs(), strategies: [strategyTemplate('semantic-first', 'semantic-first', 'favor concise semantic expansion', { web: 1.1, 'realtime-web': 0.9 }, 0.8, 0.7, 0.6, 1.2), strategyTemplate('trust-first', 'trust-first', 'favor authoritative sources and citations', { scholar: 1.2, github: 1.1, web: 0.8, 'realtime-web': 0.7 }, 0.6, 0.5, 1.3, 0.9), strategyTemplate('multi-hop', 'multi-hop', 'chain query hops and fuse evidence', { web: 1.0, 'realtime-web': 1.0, github: 0.8, scholar: 0.8 }, 1.4, 0.8, 0.8, 1.0), strategyTemplate('freshness-first', 'freshness-first', 'favor latest results and live signals', { 'realtime-web': 1.3, web: 0.9, memory: 0.4 }, 0.7, 1.3, 0.7, 0.9), strategyTemplate('blend', 'blend', 'blend trust, freshness, and semantic recall', { web: 1.0, 'realtime-web': 1.0, scholar: 1.0, github: 1.0, memory: 0.9, email: 0.8, calendar: 0.8, filesystem: 0.8, integration: 0.9 }, 1.0, 1.0, 1.0, 1.0)], sourceReliability: { web: { source: 'web', score: 0.72, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, 'realtime-web': { source: 'realtime-web', score: 0.78, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, scholar: { source: 'scholar', score: 0.84, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, github: { source: 'github', score: 0.86, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, memory: { source: 'memory', score: 0.66, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, email: { source: 'email', score: 0.62, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, calendar: { source: 'calendar', score: 0.62, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, filesystem: { source: 'filesystem', score: 0.68, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }, integration: { source: 'integration', score: 0.74, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] } }, queryProfiles: {}, forecasts: [] }; }
-function loadPolicy(path = DEFAULT_STATE_PATH): SearchPolicyState { return readJson<SearchPolicyState>(path, defaultPolicy()); }
-function savePolicy(state: SearchPolicyState, path = DEFAULT_STATE_PATH): void { state.updatedAt = nowMs(); writeJson(path, state); }
-function scoreStrategy(intent: SearchIntent, strategy: SearchStrategyProfile, policy: SearchPolicyState): number { const sourceScore = intent.sourceHints.reduce((sum, source) => sum + (strategy.sourceWeights[source] ?? 0.5), 0) / Math.max(1, intent.sourceHints.length); const freshnessBoost = intent.freshness === 'live' ? strategy.freshnessBias * 1.2 : intent.freshness === 'recent' ? strategy.freshnessBias : strategy.freshnessBias * 0.7; const trustBoost = intent.trustMode === 'official-first' ? strategy.trustBias * 1.25 : intent.trustMode === 'diverse' ? strategy.trustBias : strategy.trustBias * 0.85; const hopBoost = Math.min(1.4, 0.7 + intent.hopBudget * 0.15) * strategy.hopBias; const semanticBoost = strategy.semanticBias * (intent.focus === 'semantic' ? 1.1 : 1); const profile = policy.queryProfiles[intent.sessionKey]; const historicalBoost = profile ? 0.8 + profile.averageScore * 0.4 : 1; return sourceScore * freshnessBoost * trustBoost * hopBoost * semanticBoost * historicalBoost; }
-function chooseStrategy(intent: SearchIntent, policy: SearchPolicyState): SearchStrategyProfile { const scored = policy.strategies.map((strategy) => ({ strategy, score: scoreStrategy(intent, strategy, policy) * (0.7 + strategy.lastScore * 0.3) })); scored.sort((left, right) => right.score - left.score); return scored[0]?.strategy ?? policy.strategies[0] ?? strategyTemplate('blend', 'blend', 'blend strategy', {}, 1, 1, 1, 1); }
-function sourceScoreFor(source: SearchSource | string, intent: SearchIntent, policy: SearchPolicyState): number { const reliability = policy.sourceReliability[source]?.score ?? 0.6; const hintBonus = intent.sourceHints.includes(source as SearchSource) ? 0.3 : 0; const freshnessBonus = source === 'realtime-web' && intent.freshness === 'live' ? 0.4 : source === 'scholar' && intent.focus === 'trust' ? 0.25 : 0; return reliability + hintBonus + freshnessBonus; }
-function buildSourceRanking(intent: SearchIntent, policy: SearchPolicyState): Array<{ source: SearchSource | string; score: number; reason: string }> { const candidates = uniq([...intent.sourceHints, 'web', 'realtime-web', 'github', 'scholar', 'memory'] as SearchSource[]); return candidates.map((source) => ({ source, score: sourceScoreFor(source, intent, policy), reason: intent.sourceHints.includes(source as SearchSource) ? 'explicit source hint' : source === 'realtime-web' && intent.freshness === 'live' ? 'freshness match' : source === 'scholar' ? 'authoritative citations' : 'general coverage' })).sort((left, right) => right.score - left.score); }
-function buildQueries(intent: SearchIntent, strategy: SearchStrategyProfile): string[] { const seeds = uniq([intent.semanticQuery, ...intent.querySeeds, ...intent.entities.map((entity) => `${entity} ${intent.topics[0] ?? ''}`.trim()), ...(intent.sourceHints.includes('github') ? intent.entities.map((entity) => `repo:${entity}`) : []), ...(intent.sourceHints.includes('scholar') ? intent.entities.map((entity) => `${entity} site:scholar.google.com`) : [])]); const queries = seeds.filter(Boolean).slice(0, 5); if (strategy.id === 'multi-hop' && intent.entities.length > 0) queries.push(`${intent.entities[0]} ${intent.topics[0] ?? intent.objective} evidence`); return uniq(queries).slice(0, 5); }
-function buildTrustNotes(intent: SearchIntent, policy: SearchPolicyState, sourceRanking: Array<{ source: SearchSource | string; score: number; reason: string }>): string[] { const notes = [`trust-mode=${intent.trustMode}`, `freshness=${intent.freshness}`, `hop-budget=${intent.hopBudget}`]; for (const entry of sourceRanking.slice(0, 3)) { const reliability = policy.sourceReliability[entry.source]?.score ?? entry.score; notes.push(`${entry.source}:${reliability.toFixed(2)}:${entry.reason}`); } return notes; }
-function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], policy: SearchPolicyState, strategy: SearchStrategyProfile): SearchEvidenceGraph { const nodes: SearchEvidenceNode[] = []; const edges: SearchEvidenceEdge[] = []; const queryIds = queries.map((query, index) => { const id = `query-${index}-${stableHash(query)}`; nodes.push({ id, label: query, type: 'query', weight: 1, metadata: { query, intent: intent.sessionKey } }); return id; }); const resultIds = results.map((result, index) => { const id = `result-${index}-${stableHash(result.url || result.title)}`; const sourceScore = policy.sourceReliability[result.source]?.score ?? result.trust ?? 0.6; const trust = clamp((result.trust ?? sourceScore) * 0.7 + (result.freshness ?? (intent.freshness === 'live' ? 0.9 : 0.6)) * 0.3); nodes.push({ id, label: result.title, type: 'result', weight: trust, metadata: { url: result.url, source: result.source, snippet: result.snippet, trust, freshness: result.freshness ?? null } }); return id; }); for (const queryId of queryIds) for (const resultId of resultIds) edges.push({ from: queryId, to: resultId, relation: 'supports', weight: 0.4 + strategy.semanticBias * 0.1 }); for (let i = 1; i < resultIds.length; i += 1) edges.push({ from: resultIds[i - 1], to: resultIds[i], relation: 'derived-from', weight: 0.35 + strategy.hopBias * 0.1 }); const resultTrust = results.length > 0 ? average(results.map((result) => clamp((result.trust ?? 0.6) * 0.7 + (result.freshness ?? 0.6) * 0.3))) : 0.2; const confidence = clamp((resultTrust * 0.6) + (Math.min(1, queries.length / 4) * 0.2) + (strategy.trustBias * 0.2)); return { nodes, edges, queries, summary: `${queries.length} query seeds, ${results.length} results, strategy=${strategy.name}`, confidence }; }
-function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProfile, results: SearchResult[]): string[] { const hopPlan: string[] = []; hopPlan.push(intent.semanticQuery); for (const result of results.slice(0, Math.max(1, intent.hopBudget - 1))) { const domain = hostname(result.url); const entities = extractEntities(`${result.title} ${result.snippet}`).filter((entity) => normalize(entity) !== normalize(intent.objective)).slice(0, 3); const hop = uniq([entities.join(' '), domain ? `site:${domain}` : '', intent.freshness === 'live' ? 'fresh evidence' : '', intent.trustMode === 'official-first' ? 'official source' : '', result.source === 'github' ? 'repository evidence' : result.source === 'scholar' ? 'citations' : 'web evidence']).filter(Boolean).join(' ').trim(); if (hop) hopPlan.push(hop); } if (strategy.id === 'multi-hop' && intent.entities.length > 1) hopPlan.push(`${intent.entities.slice(0, 2).join(' ')} cross-source synthesis`); return uniq(hopPlan).slice(0, 5); }
-function loadBehaviorObservations(): Array<Record<string, unknown>> { const candidates = BEHAVIOR_PATHS.map((path) => readJson<Record<string, unknown> | null>(path, null)).filter(Boolean) as Record<string, unknown>[]; const latest = candidates.find((entry) => Array.isArray(entry.observations)) as { observations?: unknown[] } | undefined; return Array.isArray(latest?.observations) ? latest.observations.filter((value): value is Record<string, unknown> => Boolean(value) && typeof value === 'object') : []; }
-function forecastNextSignals(intent: SearchIntent, policy: SearchPolicyState, behaviorSeed?: Record<string, unknown>): SearchSignalForecast[] { const observations = behaviorSeed?.observations && Array.isArray(behaviorSeed.observations) ? behaviorSeed.observations as Record<string, unknown>[] : loadBehaviorObservations(); const counts = new Map<string, number>(); const sourceCounts = new Map<string, number>(); for (const observation of observations) { const category = String(observation.category ?? observation.subject ?? 'signal'); const source = String(observation.source ?? 'memory'); counts.set(category, (counts.get(category) ?? 0) + 1); sourceCounts.set(source, (sourceCounts.get(source) ?? 0) + 1); } const topCategories = [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 5); const predictions: SearchSignalForecast[] = topCategories.map(([category, count], index) => { const source: SearchSource | string = /calendar|schedule/.test(category) ? 'calendar' : /relationship|email|thread|reply/.test(category) ? 'email' : /browser|web|search|signal/.test(category) ? 'browser' : /github|repo|issue|commit/.test(category) ? 'github' : /file|path|filesystem/.test(category) ? 'filesystem' : 'memory'; const confidence = clamp(0.45 + count * 0.09 + (policy.sourceReliability[source]?.score ?? 0.6) * 0.2 + (intent.freshness === 'live' ? 0.08 : 0)); const topic = category.replace(/[:_-]+/g, ' '); const suggestedQueries = uniq([`${intent.objective} ${topic}`, `${topic} ${intent.entities[0] ?? ''}`.trim(), intent.semanticQuery]).slice(0, 3); return { source, topic, confidence, reason: `behavioral frequency=${count} source=${sourceCounts.get(source) ?? 0}`, suggestedQueries, priority: clamp(1 - index * 0.15 + confidence * 0.1) }; }); if (predictions.length === 0) predictions.push({ source: intent.sourceHints[0] ?? 'web', topic: intent.topics[0] ?? intent.focus, confidence: 0.52, reason: 'fallback forecast from objective', suggestedQueries: uniq([intent.semanticQuery, ...intent.querySeeds]).slice(0, 3), priority: 0.65 }); const adjusted = predictions.map((prediction) => ({ ...prediction, confidence: clamp(prediction.confidence + (policy.sourceReliability[prediction.source]?.score ?? 0.6) * 0.1), priority: clamp(prediction.priority + (intent.freshness === 'live' ? 0.08 : 0)) })); return adjusted.sort((left, right) => right.priority - left.priority).slice(0, 5); }
-
-export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent { const normalizedObjective = objective.trim(); const contextText = JSON.stringify(context); const combined = `${normalizedObjective} ${contextText}`.trim(); const entities = uniq([...extractEntities(combined), ...(Array.isArray(context.entities) ? (context.entities as unknown[]).map(String) : [])]); const topics = uniq([...(combined.match(/\b(?:web search|live signals|search policy|source reliability|multi-hop|trustworthiness|semantic nlu|behavior|forecast|reasoning)\b/gi) ?? []).map((value) => value.toLowerCase()), ...words(combined).filter((word) => !entities.some((entity) => normalize(entity).includes(word)))].map((value) => value.replace(/\b(?:the|a|an|and|or|to|of|for|with|from)\b/g, '').trim())).filter(Boolean).slice(0, 8); const freshness = detectFreshness(combined); const focus = detectFocus(combined); const sourceHints = detectSourceHints(combined); const hopBudget = Math.max(1, hopBudgetFor(combined)); const trustMode = /(official|verify|reliable|trust|citation|source)/i.test(combined) ? 'official-first' : /(compare|mix|blend|diverse|cross-source)/i.test(combined) ? 'diverse' : 'broad'; const semanticQuery = buildSemanticQuery(normalizedObjective, entities); const querySeeds = uniq([semanticQuery, ...entities.map((entity) => `${entity} ${topics[0] ?? ''}`.trim()), ...(topics.length > 0 ? topics.map((topic) => `${topic} ${entities[0] ?? ''}`.trim()) : [])]).slice(0, 5); const sessionKey = stableHash(`${semanticQuery}|${sourceHints.join(',')}|${freshness}|${focus}|${hopBudget}|${trustMode}`); return { objective: normalizedObjective, normalizedObjective, semanticQuery, entities, topics, sourceHints, freshness, focus, hopBudget, trustMode, querySeeds, evidenceTerms: uniq([...entities, ...topics, ...words(combined)]).slice(0, 12), sessionKey }; }
-
-export class SearchPolicyStore {
-  constructor(private readonly statePath = DEFAULT_STATE_PATH) {}
-  load(): SearchPolicyState { return readJson<SearchPolicyState>(this.statePath, defaultPolicy()); }
-  save(state: SearchPolicyState): void { savePolicy(state, this.statePath); }
-  reset(): SearchPolicyState { const state = defaultPolicy(); this.save(state); return state; }
-  updateOutcome(outcome: SearchOutcome): SearchPolicyState { const state = this.load(); const strategy = state.strategies.find((entry) => entry.id === outcome.strategyId) ?? state.strategies[0]; const useful = outcome.useful ?? outcome.score >= 0.7; if (strategy) { strategy.uses += 1; strategy.lastUsedAt = nowMs(); strategy.lastScore = strategy.lastScore * 0.75 + outcome.score * 0.25; if (useful) strategy.successes += 1; else strategy.failures += 1; } const source = outcome.source ? String(outcome.source) : 'web'; const reliability = state.sourceReliability[source] ?? (state.sourceReliability[source] = { source, score: 0.6, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] }); reliability.uses += 1; reliability.lastObservedAt = nowMs(); if (useful) { reliability.successes += 1; reliability.score = clamp(reliability.score * 0.9 + outcome.score * 0.1); } else { reliability.failures += 1; reliability.score = clamp(reliability.score * 0.96 - 0.03); } const profile = state.queryProfiles[outcome.sessionKey] ?? { count: 0, lastScore: 0, lastUpdatedAt: nowMs(), averageScore: 0, focus: 'factual', sourceHints: [] }; profile.count += 1; profile.lastScore = outcome.score; profile.lastUpdatedAt = nowMs(); profile.averageScore = profile.averageScore === 0 ? outcome.score : profile.averageScore * 0.7 + outcome.score * 0.3; state.queryProfiles[outcome.sessionKey] = profile; state.updatedAt = nowMs(); this.save(state); return state; }
+function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan['sourceRanking']): string[] {
+  return [
+    `trust-mode=${intent.trustMode}`,
+    `freshness=${intent.freshness}`,
+    `hop-budget=${intent.hopBudget}`,
+    `nlu=${intent.nlu.provider}:${intent.nlu.confidence.toFixed(2)} fallback=${intent.nlu.fallbackUsed}`,
+    ...sourceRanking.slice(0, 3).map((entry) => `${entry.source}:${entry.score.toFixed(2)}:${entry.reason}`),
+  ];
 }
 
 export class SearchSession {
   private readonly store: SearchPolicyStore;
-  private state: SearchPolicyState;
-  constructor(private readonly options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number } = {}) { this.store = new SearchPolicyStore(options.policyPath); this.state = this.store.load(); }
-  get policy(): SearchPolicyState { return this.state; }
-  plan(objective: string, context: Record<string, unknown> = {}): SearchPlan { const intent = understandSearchIntent(objective, context); this.state = this.store.load(); const strategy = chooseStrategy(intent, this.state); const queries = buildQueries(intent, strategy); const sourceRanking = buildSourceRanking(intent, this.state); const trustNotes = buildTrustNotes(intent, this.state, sourceRanking); const predictedSignals = forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context); const evidenceGraph = buildEvidenceGraph(intent, queries, [], this.state, strategy); const hopPlan = deriveHopPlan(intent, strategy, [], this.state); return { intent, strategy, queries, sourceRanking, hopPlan, trustNotes, predictedSignals, evidenceGraph }; }
-  fuse(intent: SearchIntent, results: SearchResult[], strategy = chooseStrategy(intent, this.state)): SearchEvidenceGraph { const queries = buildQueries(intent, strategy); return buildEvidenceGraph(intent, queries, results, this.state, strategy); }
-  recordOutcome(outcome: SearchOutcome): SearchPolicyState { this.state = this.store.updateOutcome(outcome); return this.state; }
-  learn(intent: SearchIntent, strategy: SearchStrategyProfile, results: SearchResult[], score = 0.5): SearchPolicyState { const source = results[0]?.source ?? intent.sourceHints[0] ?? 'web'; return this.recordOutcome({ sessionKey: intent.sessionKey, strategyId: strategy.id, query: intent.semanticQuery, source, score, useful: score >= 0.7, hopsUsed: Math.max(1, intent.hopBudget), resultCount: results.length, relevantCount: results.filter((result) => (result.score ?? result.trust ?? 0.5) >= 0.7).length, notes: [] }); }
-  forecast(objective: string, context: Record<string, unknown> = {}): SearchSignalForecast[] { const intent = understandSearchIntent(objective, context); return forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context); }
-  choose(objective: string, context: Record<string, unknown> = {}): SearchStrategyProfile { const intent = understandSearchIntent(objective, context); this.state = this.store.load(); return chooseStrategy(intent, this.state); }
-  run(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): SearchPlan { const intent = understandSearchIntent(objective, context); this.state = this.store.load(); const strategy = chooseStrategy(intent, this.state); const queries = buildQueries(intent, strategy); const sourceRanking = buildSourceRanking(intent, this.state); const trustNotes = buildTrustNotes(intent, this.state, sourceRanking); const predictedSignals = forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context); const evidenceGraph = buildEvidenceGraph(intent, queries, results, this.state, strategy); const hopPlan = deriveHopPlan(intent, strategy, results, this.state); const score = clamp(evidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + (strategy.lastScore * 0.2)); this.learn(intent, strategy, results, score); return { intent, strategy, queries, sourceRanking, hopPlan, trustNotes, predictedSignals, evidenceGraph }; }
+  private state;
+
+  constructor(private readonly options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider } = {}) {
+    this.store = new SearchPolicyStore(options.policyPath);
+    this.state = this.store.load();
+  }
+
+  get policy() { return this.state; }
+
+  private buildPlan(intent: ReturnType<typeof understandSearchIntent>, context: Record<string, unknown>, results: SearchResult[] = [], learn = false): SearchPlan {
+    this.state = this.store.load();
+    const strategy = chooseStrategy(intent, this.state);
+    const queries = buildQueries(intent, strategy);
+    const sourceRanking = buildSourceRanking(intent, this.state.sourceReliability);
+    const trustNotes = buildTrustNotes(intent, sourceRanking);
+    const predictedSignals = forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context);
+    const trustedResults = scoreEvidenceTrust(intent, results, this.state.sourceReliability);
+    const evidenceGraph = buildEvidenceGraph(intent, queries, trustedResults, strategy, this.state.sourceReliability);
+    const hopPlan = deriveHopPlan(intent, strategy, trustedResults);
+    if (learn) {
+      const score = clamp(evidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + strategy.lastScore * 0.2);
+      this.learn(intent, strategy, trustedResults, score);
+    }
+    return { intent, strategy, queries, sourceRanking, hopPlan, trustNotes, predictedSignals, evidenceGraph };
+  }
+
+  plan(objective: string, context: Record<string, unknown> = {}): SearchPlan {
+    return this.buildPlan(understandSearchIntent(objective, context), context);
+  }
+
+  async planSemantic(objective: string, context: Record<string, unknown> = {}): Promise<SearchPlan> {
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider), context);
+  }
+
+  fuse(intent: ReturnType<typeof understandSearchIntent>, results: SearchResult[], strategy = chooseStrategy(intent, this.state)) {
+    const queries = buildQueries(intent, strategy);
+    const trusted = scoreEvidenceTrust(intent, results, this.state.sourceReliability);
+    return buildEvidenceGraph(intent, queries, trusted, strategy, this.state.sourceReliability);
+  }
+
+  recordOutcome(outcome: SearchOutcome) {
+    this.state = this.store.updateOutcome(outcome);
+    return this.state;
+  }
+
+  learn(intent: ReturnType<typeof understandSearchIntent>, strategy: SearchStrategyProfile, results: SearchResult[], score = 0.5) {
+    const source = results[0]?.source ?? intent.sourceHints[0] ?? 'web';
+    return this.recordOutcome({ sessionKey: intent.sessionKey, strategyId: strategy.id, query: intent.semanticQuery, source, score, useful: score >= 0.7, hopsUsed: Math.max(1, intent.hopBudget), resultCount: results.length, relevantCount: results.filter((result) => (result.score ?? result.trust ?? 0.5) >= 0.7).length, notes: [] });
+  }
+
+  forecast(objective: string, context: Record<string, unknown> = {}) {
+    const intent = understandSearchIntent(objective, context);
+    return forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context);
+  }
+
+  choose(objective: string, context: Record<string, unknown> = {}) {
+    const intent = understandSearchIntent(objective, context);
+    this.state = this.store.load();
+    return chooseStrategy(intent, this.state);
+  }
+
+  run(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): SearchPlan {
+    return this.buildPlan(understandSearchIntent(objective, context), context, results, true);
+  }
+
+  async runSemantic(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): Promise<SearchPlan> {
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider), context, results, true);
+  }
+
+  rewritePolicyFromFeedback(feedback: Parameters<SearchPolicyStore['rewriteFromFeedback']>[0]) {
+    this.state = this.store.rewriteFromFeedback(feedback);
+    return this.state;
+  }
+
+  async rewritePolicyFromFeedbackSemantic(feedback: Parameters<SearchPolicyStore['rewriteFromFeedbackSemantic']>[0], provider?: Parameters<SearchPolicyStore['rewriteFromFeedbackSemantic']>[1]) {
+    this.state = await this.store.rewriteFromFeedbackSemantic(feedback, provider);
+    return this.state;
+  }
+
+  rollbackPolicy(version?: number) {
+    this.state = this.store.rollback(version);
+    return this.state;
+  }
 }
 
-export function createSearchSession(options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number } = {}): SearchSession { return new SearchSession(options); }
-export function buildSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent { return understandSearchIntent(objective, context); }
-export function formatSearchAudit(): string { const session = createSearchSession(); const cases = [ session.run('understand a live web query with semantic nlu and trust weighting', { live: true, sources: ['realtime-web', 'web'] }, [{ title: 'Semantic retrieval', url: 'https://example.com/semantic', snippet: 'semantic retrieval and trust ranking', source: 'web', trust: 0.81, freshness: 0.7, score: 0.78 }]), session.run('learn which sources are most reliable over time', { trust: true }, [{ title: 'Source reliability', url: 'https://example.com/reliability', snippet: 'authoritative evidence improves ranking', source: 'scholar', trust: 0.9, freshness: 0.55, score: 0.92 }]), session.run('chain results into multi-hop evidence fusion', { multiHop: true, entities: ['Poke Core', 'autopilot'] }, [{ title: 'Hop 1', url: 'https://github.com/abhaymundhara/poke-core', snippet: 'repository evidence', source: 'github', trust: 0.93, freshness: 0.72, score: 0.9 }, { title: 'Hop 2', url: 'https://scholar.google.com', snippet: 'citation trail', source: 'scholar', trust: 0.88, freshness: 0.62, score: 0.84 }]), ]; const lines = [ `cases=${cases.length}`, ...cases.map((plan) => `strategy=${plan.strategy.name} queries=${plan.queries.length} hops=${plan.hopPlan.length} confidence=${plan.evidenceGraph.confidence.toFixed(3)} forecast=${plan.predictedSignals.map((signal) => `${signal.source}:${signal.topic}`).join('|')}`) ]; return lines.join('\n'); }
+export function createSearchSession(options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider } = {}): SearchSession {
+  return new SearchSession(options);
+}
+
+export function buildSearchIntent(objective: string, context: Record<string, unknown> = {}) {
+  return understandSearchIntent(objective, context);
+}
+
+export async function buildSemanticSearchIntent(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider) {
+  return understandSearchIntentWithNlu(objective, context, provider);
+}
+
+export function formatSearchAudit(): string {
+  const session = createSearchSession({ policyPath: DEFAULT_STATE_PATH });
+  const cases = [
+    session.run('understand a live web query with semantic nlu and trust weighting', { live: true, sources: ['realtime-web', 'web'] }, [{ title: 'Semantic retrieval', url: 'https://example.com/semantic', snippet: 'semantic retrieval and trust ranking are supported by source evidence', source: 'web', trust: 0.81, freshness: 0.7, score: 0.78 }]),
+    session.run('learn which sources are most reliable over time', { trust: true }, [{ title: 'Source reliability', url: 'https://example.edu/reliability', snippet: 'authoritative evidence improves ranking and cites primary sources', source: 'scholar', trust: 0.9, freshness: 0.55, score: 0.92 }]),
+    session.run('chain results into multi-hop evidence fusion and contradiction checks', { multiHop: true, entities: ['Poke Core', 'autopilot'] }, [{ title: 'Hop 1', url: 'https://github.com/abhaymundhara/poke-core', snippet: 'repository evidence supports the autopilot search policy', source: 'github', trust: 0.93, freshness: 0.72, score: 0.9 }, { title: 'Hop 2', url: 'https://scholar.example/evidence', snippet: 'citation trail supports claim-level verification', source: 'scholar', trust: 0.88, freshness: 0.62, score: 0.84 }]),
+  ];
+  return [`cases=${cases.length}`, ...cases.map((plan) => `strategy=${plan.strategy.name} queries=${plan.queries.length} hops=${plan.hopPlan.length} claims=${plan.evidenceGraph.claims.length} conflicts=${plan.evidenceGraph.conflicts.length} confidence=${plan.evidenceGraph.confidence.toFixed(3)} forecast=${plan.predictedSignals.map((signal) => `${signal.source}:${signal.topic}`).join('|')}`)].join('\n');
+}
