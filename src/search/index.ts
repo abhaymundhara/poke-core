@@ -99,6 +99,11 @@ export class SearchSession {
     return this.state;
   }
 
+  async rewritePolicyFromFeedbackSemantic(feedback: Parameters<SearchPolicyStore['rewriteFromFeedbackSemantic']>[0], provider?: Parameters<SearchPolicyStore['rewriteFromFeedbackSemantic']>[1]) {
+    this.state = await this.store.rewriteFromFeedbackSemantic(feedback, provider);
+    return this.state;
+  }
+
   rollbackPolicy(version?: number) {
     this.state = this.store.rollback(version);
     return this.state;

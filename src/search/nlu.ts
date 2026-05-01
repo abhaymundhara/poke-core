@@ -1,4 +1,4 @@
-import type { SearchConstraint, SearchFocus, SearchFreshness, SearchIntent, SearchSource, SourcePrior, TrustMode } from './types.ts';
+import type { IntentAmbiguity, SearchConstraint, SearchFocus, SearchFreshness, SearchIntent, SearchSource, SemanticFrame, SourcePrior, TrustMode } from './types.ts';
 import { normalize, stableHash, uniq, words, clamp } from './utils.ts';
 
 export type SemanticNluOutput = {
@@ -7,6 +7,9 @@ export type SemanticNluOutput = {
   topics: string[];
   constraints: SearchConstraint[];
   sourcePriors: SourcePrior[];
+  semanticFrames: SemanticFrame[];
+  decomposedQuestions: string[];
+  ambiguities: IntentAmbiguity[];
   freshness: SearchFreshness;
   focus: SearchFocus;
   hopBudget: number;
@@ -29,6 +32,9 @@ export const SEMANTIC_NLU_SCHEMA = {
     topics: { type: 'array', items: { type: 'string' } },
     constraints: { type: 'array' },
     sourcePriors: { type: 'array' },
+    semanticFrames: { type: 'array' },
+    decomposedQuestions: { type: 'array', items: { type: 'string' } },
+    ambiguities: { type: 'array' },
     freshness: { enum: ['historical', 'recent', 'live'] },
     focus: { enum: ['semantic', 'trust', 'multi-hop', 'factual', 'diagnostic', 'exploratory'] },
     hopBudget: { type: 'integer', minimum: 1, maximum: 6 },
@@ -101,6 +107,30 @@ function sourcePriorsFor(hints: SearchSource[], freshness: SearchFreshness, focu
   }).sort((left, right) => right.weight - left.weight);
 }
 
+function semanticFramesFor(objective: string, entities: string[], topics: string[], focus: SearchFocus): SemanticFrame[] {
+  const objectiveWords = words(objective);
+  const slots: Record<string, string[]> = {
+    entities: entities.slice(0, 8),
+    topics: topics.slice(0, 8),
+    actions: objectiveWords.filter((word) => /^(verify|compare|find|explain|diagnose|monitor|forecast|rewrite|prove|trace)$/.test(word)).slice(0, 6),
+  };
+  const primary = focus === 'diagnostic' ? 'causal-diagnosis' : focus === 'trust' ? 'evidence-verification' : focus === 'multi-hop' ? 'compositional-research' : 'information-seeking';
+  return [{ name: primary, description: `Semantic frame inferred for ${focus} search objective`, confidence: 0.58, slots }];
+}
+
+function decomposedQuestionsFor(objective: string, entities: string[], topics: string[], focus: SearchFocus): string[] {
+  const subject = entities[0] ?? topics[0] ?? objective;
+  const questions = [`What evidence directly answers: ${objective}?`];
+  if (focus === 'trust' || focus === 'multi-hop') questions.push(`Which independent sources corroborate ${subject}?`);
+  if (focus === 'diagnostic' || focus === 'multi-hop') questions.push(`What claims about ${subject} conflict or require reconciliation?`);
+  return questions.slice(0, 4);
+}
+
+function ambiguitiesFor(objective: string, entities: string[], topics: string[]): IntentAmbiguity[] {
+  if (entities.length > 0 || topics.length > 2) return [];
+  return [{ issue: 'underspecified-subject', candidates: [objective], resolutionHint: 'prefer broad exploratory retrieval until evidence narrows the subject', confidence: 0.52 }];
+}
+
 export function heuristicSemanticNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
   const normalizedObjective = objective.trim();
   const combined = `${normalizedObjective} ${JSON.stringify(context)}`.trim();
@@ -119,6 +149,9 @@ export function heuristicSemanticNlu(objective: string, context: Record<string, 
     topics,
     constraints: detectConstraints(combined),
     sourcePriors: sourcePriorsFor(sourceHints, freshness, focus),
+    semanticFrames: semanticFramesFor(normalizedObjective, entities, topics, focus),
+    decomposedQuestions: decomposedQuestionsFor(normalizedObjective, entities, topics, focus),
+    ambiguities: ambiguitiesFor(normalizedObjective, entities, topics),
     freshness,
     focus,
     hopBudget: hopBudgetFor(combined, focus),
@@ -153,6 +186,28 @@ function asSourcePrior(value: unknown): SourcePrior | null {
   return { source: record.source, weight: clamp(weight), reason: record.reason };
 }
 
+function asSemanticFrame(value: unknown): SemanticFrame | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const confidence = finiteNumber(record.confidence);
+  if (typeof record.name !== 'string' || typeof record.description !== 'string' || confidence === null) return null;
+  const slots = record.slots && typeof record.slots === 'object' && !Array.isArray(record.slots) ? record.slots as Record<string, unknown> : {};
+  return {
+    name: record.name,
+    description: record.description,
+    confidence: clamp(confidence),
+    slots: Object.fromEntries(Object.entries(slots).map(([key, value]) => [key, Array.isArray(value) ? value.map(String) : [String(value)]])),
+  };
+}
+
+function asAmbiguity(value: unknown): IntentAmbiguity | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const confidence = finiteNumber(record.confidence);
+  if (typeof record.issue !== 'string' || typeof record.resolutionHint !== 'string' || confidence === null) return null;
+  return { issue: record.issue, candidates: Array.isArray(record.candidates) ? record.candidates.map(String) : [], resolutionHint: record.resolutionHint, confidence: clamp(confidence) };
+}
+
 function asNluOutput(value: unknown): SemanticNluOutput | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
@@ -168,13 +223,18 @@ function asNluOutput(value: unknown): SemanticNluOutput | null {
   if (hopBudget === null || confidence === null) return null;
   const constraints = Array.isArray(record.constraints) ? record.constraints.map(asConstraint) : [];
   const sourcePriors = Array.isArray(record.sourcePriors) ? record.sourcePriors.map(asSourcePrior) : [];
-  if (constraints.some((entry) => entry === null) || sourcePriors.some((entry) => entry === null)) return null;
+  const semanticFrames = Array.isArray(record.semanticFrames) ? record.semanticFrames.map(asSemanticFrame) : [];
+  const ambiguities = Array.isArray(record.ambiguities) ? record.ambiguities.map(asAmbiguity) : [];
+  if (constraints.some((entry) => entry === null) || sourcePriors.some((entry) => entry === null) || semanticFrames.some((entry) => entry === null) || ambiguities.some((entry) => entry === null)) return null;
   return {
     semanticQuery: record.semanticQuery,
     entities: Array.isArray(record.entities) ? record.entities.map(String).slice(0, 20) : [],
     topics: Array.isArray(record.topics) ? record.topics.map(String).slice(0, 20) : [],
     constraints: constraints.filter((entry): entry is SearchConstraint => entry !== null).slice(0, 20),
     sourcePriors: sourcePriors.filter((entry): entry is SourcePrior => entry !== null).slice(0, 20),
+    semanticFrames: semanticFrames.filter((entry): entry is SemanticFrame => entry !== null).slice(0, 8),
+    decomposedQuestions: Array.isArray(record.decomposedQuestions) ? record.decomposedQuestions.map(String).slice(0, 8) : [],
+    ambiguities: ambiguities.filter((entry): entry is IntentAmbiguity => entry !== null).slice(0, 8),
     freshness,
     focus,
     hopBudget: Math.max(1, Math.min(6, Math.round(hopBudget))),
@@ -206,6 +266,9 @@ export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, pr
     querySeeds,
     evidenceTerms,
     sessionKey,
+    semanticFrames: nlu.semanticFrames,
+    decomposedQuestions: nlu.decomposedQuestions,
+    ambiguities: nlu.ambiguities,
     nlu: { provider, confidence: nlu.confidence, fallbackUsed, warnings: nlu.warnings ?? [] },
   };
 }

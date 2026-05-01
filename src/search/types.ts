@@ -16,6 +16,20 @@ export type SourcePrior = {
   reason: string;
 };
 
+export type SemanticFrame = {
+  name: string;
+  description: string;
+  confidence: number;
+  slots: Record<string, string[]>;
+};
+
+export type IntentAmbiguity = {
+  issue: string;
+  candidates: string[];
+  resolutionHint: string;
+  confidence: number;
+};
+
 export type SearchIntent = {
   objective: string;
   normalizedObjective: string;
@@ -32,6 +46,9 @@ export type SearchIntent = {
   querySeeds: string[];
   evidenceTerms: string[];
   sessionKey: string;
+  semanticFrames: SemanticFrame[];
+  decomposedQuestions: string[];
+  ambiguities: IntentAmbiguity[];
   nlu: {
     provider: string;
     confidence: number;
@@ -59,11 +76,21 @@ export type TrustScoreBreakdown = {
   recency: number;
   corroboration: number;
   domainReliability: number;
+  expertise: number;
+  independence: number;
+  uncertainty: number;
 };
 
 export type TrustedEvidence = SearchResult & {
   trustScore: number;
   trustBreakdown: TrustScoreBreakdown;
+  reliability: {
+    mean: number;
+    variance: number;
+    sampleSize: number;
+    failureModes: string[];
+    epistemicClass: 'primary' | 'expert' | 'institutional' | 'community' | 'unknown';
+  };
   provenance: {
     domain: string;
     source: SearchSource | string;
@@ -83,8 +110,16 @@ export type SearchEvidenceNode = {
 export type SearchEvidenceEdge = {
   from: string;
   to: string;
-  relation: 'supports' | 'refines' | 'contradicts' | 'routes' | 'derived-from' | 'corroborates' | 'claims';
+  relation: 'supports' | 'refines' | 'contradicts' | 'routes' | 'derived-from' | 'corroborates' | 'claims' | 'entails' | 'rebuts';
   weight: number;
+};
+
+export type ClaimAssessment = {
+  premise: string;
+  hypothesis: string;
+  relation: 'entails' | 'contradicts' | 'unknown';
+  confidence: number;
+  rationale: string;
 };
 
 export type VerifiedClaim = {
@@ -94,6 +129,7 @@ export type VerifiedClaim = {
   supportedBy: string[];
   contradictedBy: string[];
   verdict: 'supported' | 'contested' | 'unsupported';
+  assessments: ClaimAssessment[];
 };
 
 export type EvidenceConflict = {
@@ -160,6 +196,12 @@ export type SearchSignalForecast = {
   reason: string;
   suggestedQueries: string[];
   priority: number;
+  latentNeed: {
+    label: string;
+    features: Record<string, number>;
+    horizon: 'immediate' | 'near-term' | 'later';
+    intervention: string;
+  };
 };
 
 export type SearchPolicyRule = {
@@ -169,6 +211,8 @@ export type SearchPolicyRule = {
   sourceWeights?: Partial<Record<SearchSource, number>>;
   maxHopBudget?: number;
   minTrustScore?: number;
+  when?: { focus?: SearchFocus[]; freshness?: SearchFreshness[]; sources?: Array<SearchSource | string>; latentNeed?: string };
+  actions?: Array<{ type: 'boost-source' | 'cap-hop-budget' | 'require-corroboration' | 'prefer-provider-nlu'; value: string; weight: number }>;
   guardrails: string[];
 };
 

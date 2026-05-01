@@ -36,6 +36,38 @@ function provenanceScore(domain: string, source: SearchSource | string): number 
   return clamp(sourceBase + (official ? 0.14 : 0) - (lowQuality ? 0.16 : 0));
 }
 
+function expertiseScore(result: SearchResult, domain: string): number {
+  const text = `${result.author ?? ''} ${result.title} ${result.snippet}`;
+  if (result.source === 'scholar' || /\.edu$/i.test(domain) || /\b(doi|journal|study|researcher|professor|lab)\b/i.test(text)) return 0.86;
+  if (result.source === 'github' || /\b(maintainer|release|commit|repository|docs)\b/i.test(text)) return 0.82;
+  if (OFFICIAL_DOMAINS.some((pattern) => pattern.test(domain))) return 0.78;
+  return 0.52;
+}
+
+function independenceScore(result: SearchResult, all: SearchResult[]): number {
+  const domains = new Set(all.map((entry) => hostname(entry.url)).filter(Boolean));
+  const sameDomainCount = all.filter((entry) => hostname(entry.url) === hostname(result.url)).length;
+  return clamp(0.45 + Math.min(0.28, domains.size * 0.05) - Math.max(0, sameDomainCount - 1) * 0.08);
+}
+
+function reliabilityDistribution(result: SearchResult, breakdown: TrustScoreBreakdown, reliability: Record<string, SearchSourceReliability>) {
+  const domain = hostname(result.url);
+  const record = reliability[result.source] ?? reliability[domain];
+  const sampleSize = Math.max(1, record?.uses ?? 1);
+  const failures = record?.failures ?? 0;
+  const successes = record?.successes ?? 0;
+  const mean = clamp((breakdown.provenance + breakdown.domainReliability + breakdown.expertise + breakdown.independence) / 4);
+  const variance = clamp((mean * (1 - mean)) / (sampleSize + 2) + failures / Math.max(4, successes + failures + 4) * 0.08);
+  const failureModes = [
+    ...(breakdown.recency < 0.35 ? ['stale'] : []),
+    ...(breakdown.independence < 0.45 ? ['not-independent'] : []),
+    ...(breakdown.evidenceQuality < 0.45 ? ['thin-evidence'] : []),
+    ...(LOW_QUALITY_DOMAINS.some((pattern) => pattern.test(domain)) ? ['low-accountability-platform'] : []),
+  ];
+  const epistemicClass = result.source === 'scholar' ? 'expert' : result.source === 'github' || OFFICIAL_DOMAINS.some((pattern) => pattern.test(domain)) ? 'primary' : result.source === 'email' || result.source === 'calendar' || result.source === 'integration' ? 'institutional' : result.source === 'web' ? 'community' : 'unknown';
+  return { mean, variance, sampleSize, failureModes, epistemicClass } as const;
+}
+
 function corroborationScore(result: SearchResult, all: SearchResult[]): number {
   const resultTerms = new Set(words(`${result.title} ${result.snippet} ${(result.claims ?? []).join(' ')}`));
   const overlaps = all.filter((other) => other !== result).map((other) => {
@@ -51,21 +83,31 @@ export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[]
     const domain = hostname(result.url);
     const official = OFFICIAL_DOMAINS.some((pattern) => pattern.test(domain));
     const primary = official || result.source === 'github' || result.source === 'scholar';
-    const breakdown: TrustScoreBreakdown = {
+    const partial = {
       evidenceQuality: evidenceQuality(intent, result),
       provenance: provenanceScore(domain, result.source),
       recency: recencyScore(intent, result),
       corroboration: corroborationScore(result, results),
       domainReliability: reliability[result.source]?.score ?? reliability[domain]?.score ?? result.trust ?? 0.62,
+      expertise: expertiseScore(result, domain),
+      independence: independenceScore(result, results),
+    };
+    const reliabilityShape = reliabilityDistribution(result, { ...partial, uncertainty: 0 }, reliability);
+    const breakdown: TrustScoreBreakdown = {
+      ...partial,
+      uncertainty: reliabilityShape.variance,
     };
     const trustScore = clamp(
-      breakdown.evidenceQuality * 0.26 +
-      breakdown.provenance * 0.24 +
-      breakdown.recency * 0.16 +
-      breakdown.corroboration * 0.18 +
-      breakdown.domainReliability * 0.16,
+      breakdown.evidenceQuality * 0.2 +
+      breakdown.provenance * 0.18 +
+      breakdown.recency * 0.12 +
+      breakdown.corroboration * 0.16 +
+      breakdown.domainReliability * 0.12 +
+      breakdown.expertise * 0.12 +
+      breakdown.independence * 0.08 -
+      breakdown.uncertainty * 0.1,
     );
-    return { ...result, trustScore, trustBreakdown: breakdown, trust: trustScore, provenance: { domain, source: result.source, official, primary } };
+    return { ...result, trustScore, trustBreakdown: breakdown, trust: trustScore, reliability: reliabilityShape, provenance: { domain, source: result.source, official, primary } };
   }).sort((left, right) => right.trustScore - left.trustScore);
 }
 

@@ -15,6 +15,9 @@ const provider: SemanticNluProvider = {
       topics: ['source trust', 'multi-hop reasoning'],
       constraints: [{ field: 'quality', operator: 'must', value: 'official sources', confidence: 0.9 }],
       sourcePriors: [{ source: 'github', weight: 0.9, reason: 'repository evidence' }, { source: 'scholar', weight: 0.78, reason: 'epistemic reliability' }],
+      semanticFrames: [{ name: 'evidence-verification', description: 'Verify implementation claims against source evidence.', confidence: 0.91, slots: { action: ['verify'], object: ['semantic search behavior'] } }],
+      decomposedQuestions: ['What implementation claims are made?', 'Which sources support or rebut each claim?'],
+      ambiguities: [],
       freshness: 'recent',
       focus: 'multi-hop',
       hopBudget: 4,
@@ -29,6 +32,8 @@ assert.equal(intent.nlu.provider, 'eval-llm');
 assert.equal(intent.nlu.fallbackUsed, false);
 assert.equal(intent.hopBudget, 4);
 assert.ok(intent.constraints.some((constraint) => constraint.value === 'official sources'));
+assert.ok(intent.semanticFrames.some((frame) => frame.name === 'evidence-verification'));
+assert.ok(intent.decomposedQuestions.length >= 2);
 
 const invalidIntent = await buildSemanticSearchIntent('bad provider should not corrupt planning', {}, {
   name: 'invalid-eval-llm',
@@ -71,8 +76,11 @@ const plan = await session.runSemantic('Verify latest poke-core semantic search 
 assert.ok(plan.sourceRanking[0].score >= plan.sourceRanking.at(-1)!.score);
 assert.ok(plan.evidenceGraph.claims.length >= 2);
 assert.ok(plan.evidenceGraph.conflicts.length >= 1);
+assert.ok(plan.evidenceGraph.claims.some((claim) => claim.assessments.some((assessment) => assessment.relation !== 'unknown')));
 assert.ok(plan.evidenceGraph.confidence > 0.45);
 assert.ok(plan.predictedSignals.some((signal) => signal.topic === 'search policy'));
+assert.ok(plan.predictedSignals.some((signal) => signal.latentNeed.features.frequency >= 2));
+assert.ok(plan.evidenceGraph.nodes.some((node) => node.type === 'result' && typeof node.metadata.breakdown === 'object'));
 
 const store = new SearchPolicyStore(policyPath);
 const before = store.load().version;
@@ -82,8 +90,22 @@ assert.equal(rewritten.version, before + 1);
 assert.equal(rewritten.auditLog.at(-1)?.accepted, true);
 assert.equal(rewritten.sourceReliability.github.score, 0.92);
 
+const synthesized = await store.rewriteFromFeedbackSemantic({
+  summary: 'semantic intent was misread and contradiction handling was weak',
+  successfulSources: ['github'],
+  failedSources: ['web'],
+  latentNeeds: ['search policy'],
+}, {
+  name: 'eval-policy-rewriter',
+  async synthesize() {
+    return { rules: [{ id: 'provider-semantic-rule', description: 'Prefer provider semantic frames and corroborated github evidence.', enabled: true, when: { latentNeed: 'search policy' }, actions: [{ type: 'prefer-provider-nlu', value: 'semantic-frame-required', weight: 0.4 }, { type: 'require-corroboration', value: 'github-plus-independent', weight: 0.3 }], guardrails: ['fallback-required', 'audit-required'] }] };
+  },
+});
+assert.ok(synthesized.rules.some((rule) => rule.id === 'provider-semantic-rule'));
+assert.equal(synthesized.auditLog.at(-1)?.accepted, true);
+
 const rejected = store.rewriteFromFeedback({ summary: 'eval rejected rewrite', rules: [{ ...validRule, id: 'bad-rule', maxHopBudget: 99 }] });
-assert.equal(rejected.version, rewritten.version);
+assert.equal(rejected.version, synthesized.version);
 assert.equal(rejected.auditLog.at(-1)?.accepted, false);
 
 const rolledBack = store.rollback(1);

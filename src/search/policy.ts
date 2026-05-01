@@ -6,6 +6,23 @@ export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.poke-core', 'search-p
 
 type PolicySnapshot = Omit<SearchPolicyState, 'history'>;
 
+export type PolicyRewriteProvider = {
+  name: string;
+  synthesize(input: { feedback: SearchPolicyFeedback; current: SearchPolicyState; guardrails: string[] }): Promise<unknown>;
+};
+
+export type SearchPolicyFeedback = {
+  summary: string;
+  failedQueries?: string[];
+  successfulSources?: Array<SearchSource | string>;
+  failedSources?: Array<SearchSource | string>;
+  latentNeeds?: string[];
+  desiredBehavior?: string;
+  rules?: SearchPolicyRule[];
+  sourceReliability?: Record<string, number>;
+  forecasts?: SearchSignalForecast[];
+};
+
 function snapshotPolicy(state: SearchPolicyState): PolicySnapshot {
   const { history: _history, ...snapshot } = state;
   return snapshot;
@@ -94,8 +111,57 @@ function validateRules(rules: SearchPolicyRule[]): string[] {
     if (rule.maxHopBudget !== undefined && (rule.maxHopBudget < 1 || rule.maxHopBudget > 6)) violations.push(`invalid-hop-budget:${rule.id}`);
     if (rule.minTrustScore !== undefined && (rule.minTrustScore < 0 || rule.minTrustScore > 1)) violations.push(`invalid-min-trust:${rule.id}`);
     if (rule.guardrails.includes('disable-audit')) violations.push(`forbidden-guardrail:${rule.id}`);
+    for (const action of rule.actions ?? []) {
+      if (!Number.isFinite(action.weight) || action.weight < -1 || action.weight > 1) violations.push(`invalid-action-weight:${rule.id}`);
+    }
   }
   return violations;
+}
+
+function rulesFromFeedback(feedback: SearchPolicyFeedback): SearchPolicyRule[] {
+  const rules: SearchPolicyRule[] = [];
+  for (const source of feedback.successfulSources ?? []) {
+    rules.push({
+      id: `learn-boost-${String(source).replace(/[^a-z0-9-]+/gi, '-').toLowerCase()}`,
+      description: `Boost ${source} when session feedback marks it as successful evidence.`,
+      enabled: true,
+      when: { sources: [source], latentNeed: feedback.latentNeeds?.[0] },
+      actions: [{ type: 'boost-source', value: String(source), weight: 0.16 }],
+      sourceWeights: typeof source === 'string' ? { [source]: 1.12 } as Partial<Record<SearchSource, number>> : undefined,
+      guardrails: ['bounded-hop-budget', 'audit-required'],
+    });
+  }
+  if (/contradict|conflict|wrong|unverified|hallucinat/i.test(feedback.summary) || feedback.failedSources?.length) {
+    rules.push({
+      id: 'require-corroboration-on-risk',
+      description: 'Require corroboration when feedback reports contradictions or unreliable source behavior.',
+      enabled: true,
+      minTrustScore: 0.68,
+      actions: [{ type: 'require-corroboration', value: 'independent-source', weight: 0.24 }],
+      guardrails: ['no-disable-audit', 'bounded-hop-budget'],
+    });
+  }
+  if (/semantic|intent|misread|ambiguous/i.test(feedback.summary)) {
+    rules.push({
+      id: 'prefer-provider-nlu-on-ambiguity',
+      description: 'Use provider-backed semantic NLU for ambiguous or previously misread objectives.',
+      enabled: true,
+      when: { latentNeed: feedback.latentNeeds?.[0] },
+      actions: [{ type: 'prefer-provider-nlu', value: 'semantic-frame-required', weight: 0.3 }],
+      guardrails: ['fallback-required', 'audit-required'],
+    });
+  }
+  return rules;
+}
+
+function asFeedback(value: SearchPolicyFeedback | { summary: string; rules?: SearchPolicyRule[]; sourceReliability?: Record<string, number>; forecasts?: SearchSignalForecast[] }): SearchPolicyFeedback {
+  return value;
+}
+
+function asSynthesizedRules(value: unknown): SearchPolicyRule[] | null {
+  const candidate = value && typeof value === 'object' && 'rules' in value ? (value as { rules?: unknown }).rules : value;
+  if (!Array.isArray(candidate)) return null;
+  return candidate.filter((entry): entry is SearchPolicyRule => Boolean(entry) && typeof entry === 'object' && typeof (entry as SearchPolicyRule).id === 'string' && typeof (entry as SearchPolicyRule).description === 'string');
 }
 
 export class SearchPolicyStore {
@@ -128,12 +194,14 @@ export class SearchPolicyStore {
     this.save(state);
     return state;
   }
-  rewriteFromFeedback(feedback: { summary: string; rules?: SearchPolicyRule[]; sourceReliability?: Record<string, number>; forecasts?: SearchSignalForecast[] }): SearchPolicyState {
+  rewriteFromFeedback(feedbackInput: SearchPolicyFeedback): SearchPolicyState {
+    const feedback = asFeedback(feedbackInput);
     const state = this.load();
     const next: SearchPolicyState = JSON.parse(JSON.stringify(state));
     const snapshot = snapshotPolicy(state);
     next.version = state.version + 1;
-    if (feedback.rules) next.rules = feedback.rules;
+    const synthesized = feedback.rules ?? rulesFromFeedback(feedback);
+    if (synthesized.length > 0) next.rules = synthesized;
     for (const [source, score] of Object.entries(feedback.sourceReliability ?? {})) {
       const entry = next.sourceReliability[source] ?? (next.sourceReliability[source] = { source, score: 0.6, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] });
       entry.score = clamp(score);
@@ -150,6 +218,16 @@ export class SearchPolicyStore {
     next.history = [...state.history, { version: state.version, state: snapshot }].slice(-20);
     this.save(next);
     return next;
+  }
+  async rewriteFromFeedbackSemantic(feedback: SearchPolicyFeedback, provider?: PolicyRewriteProvider): Promise<SearchPolicyState> {
+    if (!provider) return this.rewriteFromFeedback(feedback);
+    const current = this.load();
+    try {
+      const generated = asSynthesizedRules(await provider.synthesize({ feedback, current, guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] }));
+      return this.rewriteFromFeedback({ ...feedback, rules: generated ?? rulesFromFeedback(feedback) });
+    } catch {
+      return this.rewriteFromFeedback(feedback);
+    }
   }
   rollback(targetVersion?: number): SearchPolicyState {
     const state = this.load();

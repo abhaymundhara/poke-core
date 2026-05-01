@@ -1,4 +1,4 @@
-import type { EvidenceConflict, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
+import type { ClaimAssessment, EvidenceConflict, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
 import { average, clamp, stableHash, words } from './utils.ts';
 import { scoreEvidenceTrust } from './trust.ts';
 
@@ -12,6 +12,20 @@ function contradicts(left: string, right: string): boolean {
   const r = right.toLowerCase();
   const negations = [['is', 'is not'], ['supports', 'does not support'], ['can', 'cannot'], ['will', 'will not'], ['true', 'false'], ['passed', 'failed']];
   return negations.some(([positive, negative]) => (l.includes(positive) && r.includes(negative)) || (l.includes(negative) && r.includes(positive)));
+}
+
+function entails(left: string, right: string): boolean {
+  const shared = similarity(left, right);
+  if (shared > 0.62) return true;
+  const l = left.toLowerCase();
+  const r = right.toLowerCase();
+  return words(r).filter((word) => words(l).includes(word)).length >= Math.max(4, Math.ceil(words(r).length * 0.55));
+}
+
+function assessClaim(premise: string, hypothesis: string, sourceConfidence: number): ClaimAssessment {
+  if (contradicts(premise, hypothesis)) return { premise, hypothesis, relation: 'contradicts', confidence: clamp(0.52 + sourceConfidence * 0.35 + similarity(premise, hypothesis) * 0.2), rationale: 'negated predicate or opposing modal detected across comparable claims' };
+  if (entails(premise, hypothesis)) return { premise, hypothesis, relation: 'entails', confidence: clamp(0.48 + sourceConfidence * 0.38 + similarity(premise, hypothesis) * 0.22), rationale: 'premise has high semantic overlap with the hypothesis and no detected rebuttal' };
+  return { premise, hypothesis, relation: 'unknown', confidence: clamp(0.25 + similarity(premise, hypothesis) * 0.35), rationale: 'premise is related but does not decide the claim' };
 }
 
 function similarity(left: string, right: string): number {
@@ -48,7 +62,7 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
   const trusted = scoreEvidenceTrust(intent, results, reliability);
   const nodes: SearchEvidenceNode[] = [];
   const edges: SearchEvidenceEdge[] = [];
-  const claimIndex = new Map<string, { text: string; support: TrustedEvidence[]; contradiction: TrustedEvidence[] }>();
+  const claimIndex = new Map<string, { text: string; support: TrustedEvidence[]; contradiction: TrustedEvidence[]; assessments: ClaimAssessment[] }>();
 
   const queryIds = queries.map((query, index) => {
     const id = `query-${index}-${stableHash(query)}`;
@@ -65,9 +79,12 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
       if (!nodes.some((node) => node.id === claimId)) nodes.push({ id: claimId, label: text, type: 'claim', weight: result.trustScore, metadata: { text } });
       edges.push({ from: resultId, to: claimId, relation: 'claims', weight: result.trustScore });
       const key = [...claimIndex.keys()].find((claim) => similarity(claim, text) > 0.42) ?? text;
-      const entry = claimIndex.get(key) ?? { text: key, support: [], contradiction: [] };
-      if (contradicts(key, text)) entry.contradiction.push(result);
-      else entry.support.push(result);
+      const entry = claimIndex.get(key) ?? { text: key, support: [], contradiction: [], assessments: [] };
+      const assessment = assessClaim(text, key, result.trustScore);
+      entry.assessments.push(assessment);
+      if (assessment.relation === 'contradicts') entry.contradiction.push(result);
+      else if (assessment.relation === 'entails') entry.support.push(result);
+      else if (similarity(key, text) > 0.42) entry.support.push(result);
       claimIndex.set(key, entry);
     }
   }
@@ -76,8 +93,11 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
   const conflicts: EvidenceConflict[] = [];
   for (const entry of claimIndex.values()) {
     for (const other of claimIndex.values()) {
-      if (entry === other || !contradicts(entry.text, other.text)) continue;
-      entry.contradiction.push(...other.support);
+      if (entry === other) continue;
+      const assessment = assessClaim(other.text, entry.text, average(other.support.map((item) => item.trustScore)));
+      if (assessment.relation !== 'unknown') entry.assessments.push(assessment);
+      if (assessment.relation === 'contradicts') entry.contradiction.push(...other.support);
+      if (assessment.relation === 'entails') entry.support.push(...other.support);
     }
     const supportIds = entry.support.map((item) => item.url || item.title);
     const contradictionIds = entry.contradiction.map((item) => item.url || item.title);
@@ -85,10 +105,12 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
     const contradiction = average(entry.contradiction.map((item) => item.trustScore));
     const confidence = clamp(support * 0.82 - contradiction * 0.48 + Math.min(0.16, entry.support.length * 0.04));
     const verdict: VerifiedClaim['verdict'] = contradictionIds.length > 0 && contradiction > support * 0.65 ? 'contested' : supportIds.length > 0 ? 'supported' : 'unsupported';
-    claims.push({ id: `claim-${stableHash(entry.text)}`, text: entry.text, confidence, supportedBy: supportIds, contradictedBy: contradictionIds, verdict });
+    claims.push({ id: `claim-${stableHash(entry.text)}`, text: entry.text, confidence, supportedBy: supportIds, contradictedBy: contradictionIds, verdict, assessments: entry.assessments });
     if (contradictionIds.length > 0) {
       conflicts.push({ claim: entry.text, supporting: supportIds, contradicting: contradictionIds, resolution: support >= contradiction ? 'prefer higher-trust corroborated support' : 'prefer higher-trust contradiction', confidence: clamp(Math.abs(support - contradiction)) });
       nodes.push({ id: `conflict-${stableHash(entry.text)}`, label: entry.text, type: 'conflict', weight: clamp(Math.abs(support - contradiction)), metadata: { support, contradiction } });
+      for (const supportId of supportIds) edges.push({ from: supportId, to: `conflict-${stableHash(entry.text)}`, relation: 'entails', weight: support });
+      for (const contradictionId of contradictionIds) edges.push({ from: contradictionId, to: `conflict-${stableHash(entry.text)}`, relation: 'rebuts', weight: contradiction });
     }
   }
 
