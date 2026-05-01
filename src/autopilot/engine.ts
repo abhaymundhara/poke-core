@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { createObservation, createSignal, createSubscription, signalKey, type AutopilotObservation, type AutopilotSignal, type AutopilotSignalSource, type AutopilotSubscription, type AutopilotWake } from './events';
 import { AutopilotSchedulerWorker, type SchedulerSnapshot } from './scheduler';
+import { AutopilotLiveDaemon, type GithubWatch, type LiveDaemonSnapshot, type LiveWebSignalBundle, type PlatformSignalBundle } from './live-signals';
 
 export type AutopilotTrigger = {
   id: string;
@@ -36,6 +37,11 @@ export type AutopilotLiveState = {
   nextWakeAt: string | null;
   debounceWindowMs: number;
   throttleWindowMs: number;
+  liveWebResults: number;
+  liveWebFreshness: number;
+  externalEvents: number;
+  daemonRunning: boolean;
+  lastExternalPollAt: string | null;
 };
 
 export type AutopilotCycle = {
@@ -53,6 +59,9 @@ export type AutopilotCycle = {
   priorities: string[];
   nextLoopHint: string;
   liveState: AutopilotLiveState;
+  liveWeb: LiveWebSignalBundle | null;
+  platformSignals: PlatformSignalBundle | null;
+  daemon: LiveDaemonSnapshot;
   subscriptions: AutopilotSubscription[];
   observations: AutopilotObservation[];
   scheduler: SchedulerSnapshot;
@@ -179,6 +188,7 @@ function signalFromObjective(source: AutopilotSignalSource, objective: string, h
 
 export class AutopilotEngine {
   private readonly scheduler: AutopilotSchedulerWorker;
+  private readonly liveDaemon: AutopilotLiveDaemon;
   private readonly subscriptions: AutopilotSubscription[] = [];
   private readonly observations: AutopilotObservation[] = [];
   private readonly signals: AutopilotSignal[] = [];
@@ -188,6 +198,9 @@ export class AutopilotEngine {
   private lastTickAt: number | null = null;
   private lastResumeAt: number | null = null;
   private lastWakeReason: string | null = null;
+  private lastLiveWeb: LiveWebSignalBundle | null = null;
+  private lastPlatformSignals: PlatformSignalBundle | null = null;
+  private liveDaemonStarted = false;
 
   constructor(
     private readonly objective: string,
@@ -196,7 +209,28 @@ export class AutopilotEngine {
     private readonly clock: () => number = () => Date.now(),
   ) {
     this.scheduler = new AutopilotSchedulerWorker(this.clock);
+    this.liveDaemon = new AutopilotLiveDaemon({
+      clock: this.clock,
+      query: this.resolveLiveQuery(),
+      githubWatches: this.resolveGithubWatches(),
+      onSignal: (signal) => this.ingestSignal(signal),
+      onObservation: (observation) => {
+        this.observations.push(observation);
+        this.auditTrail.push(`live-observation:${observation.source}:${observation.key}`);
+      },
+      onEvent: (event) => {
+        this.auditTrail.push(`live-event:${event.owner}/${event.repo}:${event.kind}:${event.number}`);
+      },
+      onWake: (reason, payload) => {
+        this.lastWakeReason = reason;
+        this.lastResumeAt = this.clock();
+        this.status = 'running';
+        this.auditTrail.push(`live-wake:${reason}`);
+        this.auditTrail.push(`live-wake-payload:${JSON.stringify(payload)}`);
+      },
+    }, asNumber(this.context.daemonIntervalMs, 15_000));
     this.seed();
+    if (this.context.liveDaemon !== false) this.startDaemon(asNumber(this.context.daemonIntervalMs, 15_000));
   }
 
   private seed(): void {
@@ -219,6 +253,50 @@ export class AutopilotEngine {
       throttleMs: 0,
       onWake: (wake) => this.onWake(wake),
     });
+  }
+
+  private resolveLiveQuery(): string {
+    const liveQuery = typeof this.context.liveQuery === 'string' && this.context.liveQuery.trim().length > 0 ? this.context.liveQuery.trim() : '';
+    if (liveQuery) return liveQuery;
+    if (typeof this.context.query === 'string' && this.context.query.trim().length > 0) return this.context.query.trim();
+    return this.objective;
+  }
+
+  private resolveGithubWatches(): GithubWatch[] {
+    const configured = Array.isArray(this.context.githubWatches) ? this.context.githubWatches : Array.isArray(this.context.liveWatches) ? this.context.liveWatches : [];
+    const watches = configured
+      .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+      .map((item) => ({
+        owner: normalizeText(item.owner) || 'microsoft',
+        repo: normalizeText(item.repo) || 'TypeScript',
+        labels: asArray(item.labels).map(normalizeText).filter(Boolean),
+        since: typeof item.since === 'string' ? item.since : undefined,
+        state: normalizeText(item.state).toUpperCase() === 'CLOSED' ? 'CLOSED' : normalizeText(item.state).toUpperCase() === 'ALL' ? 'ALL' : 'OPEN',
+        perPage: asNumber(item.perPage, 5),
+      })) as GithubWatch[];
+    if (watches.length > 0) return watches;
+    return [{ owner: 'microsoft', repo: 'TypeScript', state: 'OPEN', perPage: 3 }];
+  }
+
+  startDaemon(intervalMs = asNumber(this.context.daemonIntervalMs, 15_000)): void {
+    this.liveDaemon.start(intervalMs);
+    this.liveDaemonStarted = true;
+    this.auditTrail.push(`daemon:start:${intervalMs}`);
+  }
+
+  stopDaemon(): void {
+    this.liveDaemon.stop();
+    this.liveDaemonStarted = false;
+    this.auditTrail.push('daemon:stop');
+  }
+
+  async pollLiveSources(): Promise<{ web: LiveWebSignalBundle; platform: PlatformSignalBundle }> {
+    const result = await this.liveDaemon.pollOnce();
+    this.lastLiveWeb = result.web;
+    this.lastPlatformSignals = result.platform;
+    this.auditTrail.push(`live-poll:web:${result.web.results.length}`);
+    this.auditTrail.push(`live-poll:platform:${result.platform.events.length}`);
+    return { web: result.web, platform: result.platform };
   }
 
   private seedContextSubscriptions(): void {
@@ -376,6 +454,11 @@ export class AutopilotEngine {
       nextWakeAt: scheduler.nextWakeAt ? new Date(scheduler.nextWakeAt).toISOString() : null,
       debounceWindowMs: Math.max(...this.signals.map((signal) => signal.debounceMs), 0),
       throttleWindowMs: Math.max(...this.signals.map((signal) => signal.throttleMs), 0),
+      liveWebResults: this.lastLiveWeb?.results.length ?? 0,
+      liveWebFreshness: this.lastLiveWeb?.freshnessScore ?? 0,
+      externalEvents: this.lastPlatformSignals?.events.length ?? 0,
+      daemonRunning: this.liveDaemonStarted,
+      lastExternalPollAt: this.lastLiveWeb?.searchedAt ? new Date(this.lastLiveWeb.searchedAt).toISOString() : null,
     };
   }
 
@@ -406,6 +489,14 @@ export class AutopilotEngine {
       triggers.push(buildTrigger('signal-observer', 'signal intensity suggests the loop should re-run without a user nudge', 90, 'observe signals, summarize drift, and refresh the working set', 'system', 'signal', 'debounce'));
     }
 
+    if ((this.lastLiveWeb?.results.length ?? 0) > 0) {
+      triggers.push(buildTrigger('live-web-refresh', 'fresh live web results should be rechecked before they age out', 30, 'refresh live web search results and crawl the freshest pages', 'browser', 'live-web', 'debounce'));
+    }
+
+    if ((this.lastPlatformSignals?.events.length ?? 0) > 0) {
+      triggers.push(buildTrigger('platform-event-watch', 'external platform events were ingested and should keep waking the loop', 20, 'poll external platforms for new issue and pull-request events', 'integration', 'platform', 'debounce'));
+    }
+
     if (this.status === 'paused' && schedulerSnapshot.pendingCount > 0) {
       triggers.push(buildTrigger('auto-resume', 'pending wake requests exist while the loop is paused', 5, 'resume the loop immediately after the next wake arrives', 'system', 'resume', 'immediate'));
     }
@@ -428,6 +519,8 @@ export class AutopilotEngine {
     if (snapshot.calendarConflicts > 0) checkIns.push(buildCheckIn('calendar-review', 180, 'calendar', 're-check the schedule and confirm conflict-free windows', 'calendar'));
     if (snapshot.staleTransactional > 0) checkIns.push(buildCheckIn('transactional-cleanup', 720, 'browser', 'review whether transactional artifacts are still worth keeping', 'browser'));
     if (snapshot.signalIntensity > 0.35 || this.signals.length > 3) checkIns.push(buildCheckIn('signal-observation', 90, 'browser', 're-scan the latest signals and capture trend drift', 'browser'));
+    if ((this.lastLiveWeb?.results.length ?? 0) > 0) checkIns.push(buildCheckIn('live-web-review', 30, 'browser', 'review the latest web evidence and keep freshness-aware results current', 'browser'));
+    if ((this.lastPlatformSignals?.events.length ?? 0) > 0) checkIns.push(buildCheckIn('platform-event-review', 20, 'browser', 'revisit external platform changes and continue the wake cycle', 'integration'));
     if (this.status === 'paused') checkIns.push(buildCheckIn('resume-observation', 5, 'in-app', 'wake the loop when the next pending signal clears', 'system'));
     return checkIns.slice(0, 6);
   }
@@ -464,6 +557,9 @@ export class AutopilotEngine {
       priorities: this.derivePriorities(snapshot, liveState),
       nextLoopHint: this.buildNextLoopHint(liveState, this.context),
       liveState,
+      liveWeb: this.lastLiveWeb,
+      platformSignals: this.lastPlatformSignals,
+      daemon: this.liveDaemon.snapshot(),
       subscriptions: [...this.subscriptions].filter((subscription) => subscription.enabled),
       observations: [...this.observations].slice(-8),
       scheduler,
@@ -473,16 +569,17 @@ export class AutopilotEngine {
     };
   }
 
-  tick(loopReason = 'tick'): AutopilotCycle {
+  async tick(loopReason = 'tick'): Promise<AutopilotCycle> {
     this.loopCount += 1;
     this.lastTickAt = this.clock();
+    if (this.liveDaemonStarted) await this.pollLiveSources();
     this.maybeAutoResume();
     this.scheduler.flushDue(this.clock());
     return this.snapshot(loopReason);
   }
 }
 
-export function buildAutopilotCycle(objective: string, harnessState: Record<string, unknown> = {}, context: Record<string, unknown> = {}): AutopilotCycle {
+export async function buildAutopilotCycle(objective: string, harnessState: Record<string, unknown> = {}, context: Record<string, unknown> = {}): Promise<AutopilotCycle> {
   const engine = new AutopilotEngine(objective, harnessState, context);
-  return engine.tick('bootstrap');
+  return await engine.tick('bootstrap');
 }
