@@ -14,4 +14,5 @@ export * from './graph/index.ts';
 export * from './runtime/index.ts';
 export * from './adapters/index.ts';
 export * from './autopilot/index.ts';
+export * from './search/index.ts';
 export * from './raidingai/index.ts';

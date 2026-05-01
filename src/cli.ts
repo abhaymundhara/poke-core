@@ -7,6 +7,7 @@ import { AutopilotSkill, BrowserSkill, ComputerUseSkill, GroundingSkill, Harness
 import { buildPlan } from './planner';
 import { formatRetrievalBenchmark } from './rag';
 import { formatAutopilotAudit, formatAutopilotBenchmark } from './autopilot';
+import { formatSearchAudit } from './search';
 import { formatRaidingAiAudit, formatRaidingAiBenchmark } from './raidingai';
 
 type Args = { _: string[]; [k: string]: string | boolean | undefined };
@@ -45,7 +46,7 @@ try {
     console.log(JSON.stringify(orchestrator.skillCatalog, null, 2));
   } else if (cmd === 'bench') {
     const suite = args._[1] ?? 'all';
-    const allowedSuites = ['rag', 'autopilot', 'raidingai', 'all'];
+    const allowedSuites = ['rag', 'autopilot', 'search', 'raidingai', 'all'];
     if (!allowedSuites.includes(suite)) {
       console.error(`Error: Invalid suite "${suite}". Valid options are: ${allowedSuites.join(', ')}`);
       process.exit(1);
@@ -56,6 +57,8 @@ try {
       console.log(formatAutopilotBenchmark());
       console.log('');
       console.log(formatAutopilotAudit());
+    } else if (suite === 'search') {
+      console.log(formatSearchAudit());
     } else if (suite === 'raidingai') {
       console.log(formatRaidingAiBenchmark());
       console.log('');
@@ -66,6 +69,8 @@ try {
       console.log(formatAutopilotBenchmark());
       console.log('');
       console.log(formatAutopilotAudit());
+      console.log('');
+      console.log(formatSearchAudit());
       console.log('');
       console.log(formatRaidingAiBenchmark());
       console.log('');

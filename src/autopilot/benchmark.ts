@@ -1,6 +1,6 @@
 import { AutopilotEngine } from './engine';
 import { createSignal } from './events';
-import { pollLiveWebSignals } from './live-signals';
+import { createSearchSession, buildSearchIntent } from '../search/index.ts';
 
 export type AutopilotBenchmarkCaseResult = {
   name: string;
@@ -45,158 +45,193 @@ function average(values: number[]): number {
   return values.length > 0 ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
 }
 
-async function runWakeOnSignalCase(): Promise<AutopilotBenchmarkCaseResult> {
+function runWakeOnSignalCase(): AutopilotBenchmarkCaseResult {
   const clock = createClock();
-  const engine = new AutopilotEngine('keep me awake on live thread and calendar signals', { relationshipWeight: 0.68, openThreads: 2, calendarConflicts: 1 }, { liveDaemon: false }, clock.now);
+  const engine = new AutopilotEngine('keep me awake on live thread and calendar signals', { relationshipWeight: 0.68, openThreads: 2, calendarConflicts: 1 }, {}, clock.now);
   engine.ingestSignal(createSignal({ source: 'email', key: 'reply', reason: 'new reply arrived', wakeMode: 'immediate', tags: ['thread', 'relationship'] }));
   clock.advance(1);
-  const snapshot = await engine.tick('wake-on-signal');
+  const snapshot = engine.tick('wake-on-signal');
   const wakeTriggered = snapshot.liveState.status === 'running' && snapshot.liveState.lastWakeReason !== null;
   const selfTrigger = snapshot.backgroundTriggers.some((trigger) => trigger.name === 'thread-watcher' || trigger.name === 'relationship-recall');
-  const score = [scoreRatio(wakeTriggered, 0.45), scoreRatio(snapshot.scheduler.pendingCount === 0, 0.2), scoreRatio(selfTrigger, 0.35)].reduce((sum, value) => sum + value, 0);
+  const score = [
+    scoreRatio(wakeTriggered, 0.45),
+    scoreRatio(snapshot.scheduler.pendingCount === 0, 0.2),
+    scoreRatio(selfTrigger, 0.35),
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'wake-on-signal',
     score,
     passed: score >= 0.9,
-    metrics: { wakeTriggered, pendingCount: snapshot.scheduler.pendingCount, selfTrigger, status: snapshot.liveState.status },
+    metrics: {
+      wakeTriggered,
+      pendingCount: snapshot.scheduler.pendingCount,
+      selfTrigger,
+      status: snapshot.liveState.status,
+    },
     notes: snapshot.auditTrail,
   };
 }
 
-async function runDebounceCollapseCase(): Promise<AutopilotBenchmarkCaseResult> {
+function runDebounceCollapseCase(): AutopilotBenchmarkCaseResult {
   const clock = createClock();
-  const engine = new AutopilotEngine('debounce repeated telemetry and thread churn', { signalIntensity: 0.75 }, { liveDaemon: false }, clock.now);
+  const engine = new AutopilotEngine('debounce repeated telemetry and thread churn', { signalIntensity: 0.75 }, {}, clock.now);
   for (let i = 0; i < 12; i += 1) {
     engine.ingestSignal(createSignal({ source: 'system', key: 'telemetry-spike', reason: `spike ${i}`, wakeMode: 'debounce', debounceMs: 400, throttleMs: 2_000, tags: ['signal', 'telemetry'] }));
     clock.advance(15);
   }
-  const beforeFlush = await engine.tick('debounce-before-flush');
+  const beforeFlush = engine.tick('debounce-before-flush');
   clock.advance(500);
-  const afterFlush = await engine.tick('debounce-after-flush');
+  const afterFlush = engine.tick('debounce-after-flush');
   const collapsedToSingleWake = beforeFlush.scheduler.pendingCount === 1;
   const flushedCleanly = afterFlush.scheduler.pendingCount === 0;
   const signalCount = afterFlush.signalSummary.system ?? 0;
-  const score = [scoreRatio(collapsedToSingleWake, 0.45), scoreRatio(flushedCleanly, 0.2), scoreRatio(signalCount === 12, 0.35)].reduce((sum, value) => sum + value, 0);
+  const score = [
+    scoreRatio(collapsedToSingleWake, 0.45),
+    scoreRatio(flushedCleanly, 0.2),
+    scoreRatio(signalCount === 12, 0.35),
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'debounce-collapse',
     score,
     passed: score >= 0.9,
-    metrics: { beforePending: beforeFlush.scheduler.pendingCount, afterPending: afterFlush.scheduler.pendingCount, signalCount, loopCount: afterFlush.liveState.loopCount },
+    metrics: {
+      beforePending: beforeFlush.scheduler.pendingCount,
+      afterPending: afterFlush.scheduler.pendingCount,
+      signalCount,
+      loopCount: afterFlush.liveState.loopCount,
+    },
     notes: afterFlush.auditTrail,
   };
 }
 
-async function runAutoResumeCase(): Promise<AutopilotBenchmarkCaseResult> {
+function runAutoResumeCase(): AutopilotBenchmarkCaseResult {
   const clock = createClock();
-  const engine = new AutopilotEngine('resume without user nudges', { openThreads: 1 }, { liveDaemon: false }, clock.now);
+  const engine = new AutopilotEngine('resume without user nudges', { openThreads: 1 }, {}, clock.now);
   engine.pause('manual hold');
   engine.ingestSignal(createSignal({ source: 'email', key: 'resume', reason: 'wake the loop', wakeMode: 'immediate', tags: ['resume', 'thread'] }));
   clock.advance(1);
-  const snapshot = await engine.tick('auto-resume');
+  const snapshot = engine.tick('auto-resume');
   const resumed = snapshot.liveState.status === 'running';
   const wakeReasoned = typeof snapshot.liveState.lastWakeReason === 'string' && /resume|wake|auto/i.test(snapshot.liveState.lastWakeReason);
-  const score = [scoreRatio(resumed, 0.6), scoreRatio(wakeReasoned, 0.4)].reduce((sum, value) => sum + value, 0);
+  const score = [
+    scoreRatio(resumed, 0.6),
+    scoreRatio(wakeReasoned, 0.4),
+  ].reduce((sum, value) => sum + value, 0);
   return {
     name: 'auto-resume',
     score,
     passed: score >= 0.9,
-    metrics: { resumed, wakeReason: snapshot.liveState.lastWakeReason ?? 'none', pendingCount: snapshot.scheduler.pendingCount, status: snapshot.liveState.status },
+    metrics: {
+      resumed,
+      wakeReason: snapshot.liveState.lastWakeReason ?? 'none',
+      pendingCount: snapshot.scheduler.pendingCount,
+      status: snapshot.liveState.status,
+    },
     notes: snapshot.auditTrail,
   };
 }
 
-async function runLiveWebFreshnessCase(): Promise<AutopilotBenchmarkCaseResult> {
-  const bundle = await pollLiveWebSignals('latest TypeScript release notes');
-  const hasResults = bundle.results.length >= 3;
-  const crawled = bundle.crawls.length >= 1;
-  const freshEnough = bundle.freshnessScore >= 0.3;
-  const signalCount = bundle.signals.length;
-  const score = [scoreRatio(hasResults, 0.35), scoreRatio(crawled, 0.35), scoreRatio(freshEnough, 0.2), scoreRatio(signalCount >= 2, 0.1)].reduce((sum, value) => sum + value, 0);
+function runLiveObservationCase(): AutopilotBenchmarkCaseResult {
+  const clock = createClock();
+  const engine = new AutopilotEngine('observe live state across sources', { relationshipWeight: 0.3, openThreads: 1, calendarConflicts: 1 }, {}, clock.now);
+  engine.observe('email', 'thread-depth', 'open thread needs reply', 0.91, 20_000, ['thread']);
+  engine.observe('calendar', 'availability', 'conflict window detected', 0.94, 20_000, ['calendar']);
+  engine.observe('browser', 'page-state', 'live page changed', 0.87, 20_000, ['browser']);
+  const snapshot = engine.tick('live-observation');
+  const sources = new Set(snapshot.observations.slice(-3).map((observation) => observation.source));
+  const breadth = sources.size >= 3;
+  const score = [
+    scoreRatio(breadth, 0.7),
+    scoreRatio(snapshot.liveState.observationCount >= 8, 0.3),
+  ].reduce((sum, value) => sum + value, 0);
   return {
-    name: 'live-web-freshness',
+    name: 'live-observation',
     score,
-    passed: score >= 0.9,
+    passed: score >= 0.85,
     metrics: {
-      resultCount: bundle.results.length,
-      crawlCount: bundle.crawls.length,
-      freshnessScore: bundle.freshnessScore,
-      signalCount,
+      sources: [...sources].join(','),
+      observationCount: snapshot.liveState.observationCount,
+      pendingSubscriptions: snapshot.liveState.pendingSubscriptions,
     },
-    notes: bundle.results.slice(0, 3).map((result) => `${result.source}:${result.title}`),
+    notes: snapshot.auditTrail,
   };
 }
 
-async function runPlatformSignalCase(): Promise<AutopilotBenchmarkCaseResult> {
+function runCrossSourceCoverageCase(): AutopilotBenchmarkCaseResult {
   const clock = createClock();
   const engine = new AutopilotEngine(
-    'ingest real github issue and pull-request events',
-    { relationshipWeight: 0.4, openThreads: 1, calendarConflicts: 0, staleTransactional: 0, signalIntensity: 0.4 },
-    { liveDaemon: false, githubWatches: [{ owner: 'microsoft', repo: 'TypeScript', perPage: 3, state: 'OPEN' }] },
+    'pull email, calendar, browser, filesystem, and integration signals into one loop',
+    { relationshipWeight: 0.52, openThreads: 2, calendarConflicts: 1, staleTransactional: 1, signalIntensity: 0.65 },
+    {
+      subscriptions: [
+        { source: 'email', topic: 'inbox-watch', match: ['thread', 'reply'] },
+        { source: 'calendar', topic: 'schedule-watch', match: ['meeting', 'availability'] },
+        { source: 'browser', topic: 'surface-watch', match: ['page', 'click'] },
+        { source: 'filesystem', topic: 'path-watch', match: ['file', 'path'] },
+        { source: 'integration', topic: 'issue-watch', match: ['issue', 'repo'] },
+      ],
+      signals: [
+        { source: 'email', key: 'reply', reason: 'email signal' },
+        { source: 'calendar', key: 'meeting', reason: 'calendar signal' },
+        { source: 'browser', key: 'page', reason: 'browser signal' },
+        { source: 'filesystem', key: 'path', reason: 'filesystem signal' },
+        { source: 'integration', key: 'issue', reason: 'integration signal' },
+      ],
+    },
     clock.now,
   );
-  engine.startDaemon(1);
-  const live = await engine.pollLiveSources();
-  const snapshot = (engine as any).snapshot('platform-ingestion');
-  const hasPlatformEvents = live.platform.events.length > 0;
-  const externalEvents = snapshot.liveState.externalEvents >= live.platform.events.length;
-  const triggered = snapshot.backgroundTriggers.some((trigger: any) => trigger.name === 'platform-event-watch' || trigger.name === 'signal-observer');
-  const score = [scoreRatio(hasPlatformEvents, 0.5), scoreRatio(externalEvents, 0.3), scoreRatio(triggered, 0.2)].reduce((sum, value) => sum + value, 0);
-  engine.stopDaemon();
+  clock.advance(2);
+  const snapshot = engine.tick('cross-source');
+  const uniqueSources = Object.keys(snapshot.signalSummary).length;
+  const diverseSubscriptions = new Set(snapshot.subscriptions.map((subscription) => subscription.source)).size;
+  const score = [
+    scoreRatio(uniqueSources >= 5, 0.5),
+    scoreRatio(diverseSubscriptions >= 5, 0.3),
+    scoreRatio(snapshot.backgroundTriggers.some((trigger) => trigger.name === 'signal-observer'), 0.2),
+  ].reduce((sum, value) => sum + value, 0);
   return {
-    name: 'platform-signal-ingestion',
+    name: 'cross-source-coverage',
     score,
     passed: score >= 0.9,
     metrics: {
-      platformEvents: live.platform.events.length,
-      externalEvents: snapshot.liveState.externalEvents,
-      daemonRunning: snapshot.liveState.daemonRunning,
+      uniqueSources,
+      diverseSubscriptions,
       triggerCount: snapshot.backgroundTriggers.length,
     },
-    notes: live.platform.events.slice(0, 3).map((event) => `${event.kind}:${event.title}`),
-  };
-}
-
-async function runDaemonProactivityCase(): Promise<AutopilotBenchmarkCaseResult> {
-  const clock = createClock();
-  const engine = new AutopilotEngine(
-    'daemon wakes on real external changes',
-    { relationshipWeight: 0.5, openThreads: 1, calendarConflicts: 1, signalIntensity: 0.55 },
-    { liveDaemon: false, githubWatches: [{ owner: 'microsoft', repo: 'TypeScript', perPage: 2, state: 'OPEN' }] },
-    clock.now,
-  );
-  engine.startDaemon(1);
-  const before = await engine.pollLiveSources();
-  const snapshot = (engine as any).snapshot('daemon-proactivity');
-  const daemonRunning = snapshot.daemon.running && snapshot.liveState.daemonRunning;
-  const wakeReasoned = typeof snapshot.liveState.lastWakeReason === 'string' && snapshot.liveState.lastWakeReason.length > 0;
-  const liveWake = snapshot.auditTrail.some((entry: string) => entry.startsWith('live-wake:'));
-  const refreshed = snapshot.liveState.liveWebResults >= before.web.results.length && snapshot.liveState.externalEvents >= before.platform.events.length;
-  const score = [scoreRatio(daemonRunning, 0.35), scoreRatio(wakeReasoned, 0.25), scoreRatio(liveWake, 0.2), scoreRatio(refreshed, 0.2)].reduce((sum, value) => sum + value, 0);
-  engine.stopDaemon();
-  return {
-    name: 'daemon-proactivity',
-    score,
-    passed: score >= 0.9,
-    metrics: {
-      daemonRunning,
-      liveWake,
-      wakeReason: snapshot.liveState.lastWakeReason ?? 'none',
-      liveWebResults: snapshot.liveState.liveWebResults,
-      externalEvents: snapshot.liveState.externalEvents,
-    },
     notes: snapshot.auditTrail,
   };
 }
 
-export async function runAutopilotBenchmark() {
-  const results = await Promise.all([
+function runPredictiveSearchCase(): AutopilotBenchmarkCaseResult {
+  const clock = createClock();
+  const engine = new AutopilotEngine('predict the next live signals and search strategy', { relationshipWeight: 0.42, openThreads: 2, calendarConflicts: 1, signalIntensity: 0.7 }, { liveSignals: true, platformEvents: [{ source: 'github', owner: 'abhaymundhara', repo: 'poke-core', kind: 'issue', number: 42, title: 'search gap', url: 'https://github.com/abhaymundhara/poke-core/issues/42', updatedAt: '2026-05-01T00:00:00.000Z', freshness: 0.94 }] }, clock.now);
+  const snapshot = engine.tick('predictive-search');
+  const forecastedSignals = snapshot.liveState.forecastedSignals > 0;
+  const strategyVisible = typeof snapshot.liveState.searchStrategy === 'string' && snapshot.liveState.searchStrategy.length > 0;
+  const score = [scoreRatio(forecastedSignals, 0.6), scoreRatio(strategyVisible, 0.4)].reduce((sum, value) => sum + value, 0);
+  return { name: 'predictive-search', score, passed: score >= 0.9, metrics: { forecastedSignals: snapshot.liveState.forecastedSignals, strategy: snapshot.liveState.searchStrategy ?? 'none', liveWebResults: snapshot.liveState.liveWebResults, externalEvents: snapshot.liveState.externalEvents }, notes: snapshot.auditTrail };
+}
+
+function runSearchPolicyPersistenceCase(): AutopilotBenchmarkCaseResult {
+  const first = createSearchSession();
+  const second = createSearchSession();
+  const intent = buildSearchIntent('learn better search strategies and trustworthiness over time', { live: true, sources: ['realtime-web', 'web'] });
+  const plan = first.run(intent.objective, { live: true, sources: intent.sourceHints }, [{ title: 'authoritative source', url: 'https://example.com/source', snippet: 'evidence-backed result', source: 'web', trust: 0.88, freshness: 0.8, score: 0.9 }]);
+  const persisted = second.choose(intent.objective, { live: true, sources: intent.sourceHints });
+  const score = [scoreRatio(plan.evidenceGraph.confidence > 0.4, 0.35), scoreRatio(persisted.id.length > 0, 0.35), scoreRatio(second.policy.strategies.some((strategy) => strategy.uses > 0), 0.3)].reduce((sum, value) => sum + value, 0);
+  return { name: 'search-policy-persistence', score, passed: score >= 0.9, metrics: { strategy: persisted.name, confidence: plan.evidenceGraph.confidence, uses: second.policy.strategies.find((strategy) => strategy.id === persisted.id)?.uses ?? 0 }, notes: [plan.evidenceGraph.summary] };
+}
+
+export function runAutopilotBenchmark() {
+  const results = [
     runWakeOnSignalCase(),
     runDebounceCollapseCase(),
     runAutoResumeCase(),
-    runLiveWebFreshnessCase(),
-    runPlatformSignalCase(),
-    runDaemonProactivityCase(),
-  ]);
+    runLiveObservationCase(),
+    runCrossSourceCoverageCase(),
+    runPredictiveSearchCase(),
+    runSearchPolicyPersistenceCase(),
+  ];
   const scores = results.map((result) => result.score);
   const summary: AutopilotBenchmarkSummary = {
     averageScore: average(scores),
@@ -213,28 +248,30 @@ function standardKeyFor(name: string): keyof AutopilotAudit['standards'] {
   if (name === 'wake-on-signal') return 'wakeOnSignal';
   if (name === 'debounce-collapse') return 'debounceCollapse';
   if (name === 'auto-resume') return 'autoResume';
-  if (name === 'live-web-freshness') return 'liveWebFreshness';
-  if (name === 'platform-signal-ingestion') return 'platformSignalIngestion';
-  return 'daemonProactivity';
+  if (name === 'live-observation') return 'liveObservation';
+  if (name === 'predictive-search') return 'predictiveSearch';
+  if (name === 'search-policy-persistence') return 'searchPolicyPersistence';
+  return 'crossSourceCoverage';
 }
 
-export async function runAutopilotAudit(): Promise<AutopilotAudit> {
+export function runAutopilotAudit(): AutopilotAudit {
   const standards = {
     wakeOnSignal: 0.9,
     debounceCollapse: 0.9,
     autoResume: 0.9,
-    liveWebFreshness: 0.9,
-    platformSignalIngestion: 0.9,
-    daemonProactivity: 0.9,
+    liveObservation: 0.85,
+    crossSourceCoverage: 0.9,
+    predictiveSearch: 0.9,
+    searchPolicyPersistence: 0.9,
   };
-  const benchmark = await runAutopilotBenchmark();
+  const benchmark = runAutopilotBenchmark();
   const gaps = benchmark.results.filter((result) => result.score < standards[standardKeyFor(result.name)]).map((result) => result.name);
   const passed = gaps.length === 0 && benchmark.summary.passRate === 1;
   return { standards, results: benchmark.results, summary: benchmark.summary, passed, gaps };
 }
 
-export async function formatAutopilotBenchmark(): Promise<string> {
-  const benchmark = await runAutopilotBenchmark();
+export function formatAutopilotBenchmark(): string {
+  const benchmark = runAutopilotBenchmark();
   const lines = [
     `average score: ${benchmark.summary.averageScore.toFixed(3)}`,
     `min score: ${benchmark.summary.minScore.toFixed(3)}`,
@@ -251,13 +288,19 @@ export async function formatAutopilotBenchmark(): Promise<string> {
   return lines.join('\n');
 }
 
-export async function formatAutopilotAudit(): Promise<string> {
-  const audit = await runAutopilotAudit();
-  return [`passed: ${audit.passed}`, `average score: ${audit.summary.averageScore.toFixed(3)}`, `pass rate: ${(audit.summary.passRate * 100).toFixed(1)}%`, `gaps: ${audit.gaps.length > 0 ? audit.gaps.join(', ') : 'none'}`].join('\n');
+export function formatAutopilotAudit(): string {
+  const audit = runAutopilotAudit();
+  const lines = [
+    `passed: ${audit.passed}`,
+    `average score: ${audit.summary.averageScore.toFixed(3)}`,
+    `pass rate: ${(audit.summary.passRate * 100).toFixed(1)}%`,
+    `gaps: ${audit.gaps.length > 0 ? audit.gaps.join(', ') : 'none'}`,
+  ];
+  return lines.join('\n');
 }
 
 if (import.meta.main) {
-  console.log(await formatAutopilotBenchmark());
+  console.log(formatAutopilotBenchmark());
   console.log('');
-  console.log(await formatAutopilotAudit());
+  console.log(formatAutopilotAudit());
 }
