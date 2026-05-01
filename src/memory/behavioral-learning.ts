@@ -1,4 +1,7 @@
 import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { buildBehavioralModel, type BehaviorForecast, type BehaviorPolicy, type UserBehaviorTheory } from './behavioral-theory';
 import type { ChunkRecord, MemoryDocument } from '../rag/types';
 import type { EpisodicMemoryItem } from './episodic-memory';
 import type { MemoryFact } from './working-memory';
@@ -43,6 +46,7 @@ export type BehavioralPattern = {
 export type BehavioralLearningInput = {
   now?: number;
   clock?: { now(): number };
+  storagePath?: string;
   workingFacts: MemoryFact[];
   episodicItems: EpisodicMemoryItem[];
   sourceDocuments?: MemoryDocument[];
@@ -54,6 +58,10 @@ export type BehavioralLearningResult = {
   semanticDocuments: MemoryDocument[];
   semanticChunks: ChunkRecord[];
   patterns: BehavioralPattern[];
+  theory: UserBehaviorTheory;
+  policies: BehaviorPolicy[];
+  forecasts: BehaviorForecast[];
+  nextBestActions: string[];
   summary: string;
 };
 
@@ -74,6 +82,16 @@ type SubjectBucket = {
   category: BehavioralCategory;
   subject: string;
   values: Map<string, ObservationBucket>;
+};
+
+type BehavioralModelSnapshot = {
+  observations: BehavioralObservation[];
+  learnedFacts: LearnedBehaviorFact[];
+  lastPatterns: BehavioralPattern[];
+  theory: UserBehaviorTheory | null;
+  policies: BehaviorPolicy[];
+  forecasts: BehaviorForecast[];
+  sessionCount: number;
 };
 
 const STOPWORDS = new Set(['the', 'a', 'an', 'to', 'and', 'or', 'of', 'for', 'with', 'in', 'on', 'at', 'via', 'from', 'use', 'keep', 'make', 'do', 'be', 'is', 'are', 'was', 'were']);
@@ -244,10 +262,6 @@ function inferBehavioralObservationsFromEpisode(item: EpisodicMemoryItem): Behav
   return observations;
 }
 
-function observationKey(obs: BehavioralObservation): string {
-  return [obs.category, normalizeKey(obs.subject), normalizeKey(obs.value)].join('|');
-}
-
 function bucketObservation(subjectBuckets: Map<string, SubjectBucket>, observation: BehavioralObservation): void {
   const subjectKey = [observation.category, normalizeKey(observation.subject)].join('|');
   const bucket = subjectBuckets.get(subjectKey) ?? { category: observation.category, subject: canonicalPhrase(observation.subject), values: new Map() };
@@ -315,10 +329,70 @@ function scorePattern(bucket: ObservationBucket, subjectBucket: SubjectBucket, n
   return Number(Math.min(1, (meanConfidence * 0.35 + recencyBoost * 0.2 + densityBoost + Math.min(1, sourceCount / 2) * 0.15 + Math.min(1, evidenceCount / 4) * 0.1) * contradictionPenalty).toFixed(3));
 }
 
+function serializeSnapshot(snapshot: BehavioralModelSnapshot): string {
+  return JSON.stringify(snapshot);
+}
+
+function deserializeSnapshot(payload: string): BehavioralModelSnapshot | null {
+  try {
+    const parsed = JSON.parse(payload) as BehavioralModelSnapshot;
+    if (!parsed || typeof parsed !== 'object') return null;
+    return {
+      observations: Array.isArray(parsed.observations) ? parsed.observations as BehavioralObservation[] : [],
+      learnedFacts: Array.isArray(parsed.learnedFacts) ? parsed.learnedFacts as LearnedBehaviorFact[] : [],
+      lastPatterns: Array.isArray(parsed.lastPatterns) ? parsed.lastPatterns as BehavioralPattern[] : [],
+      theory: parsed.theory ?? null,
+      policies: Array.isArray(parsed.policies) ? parsed.policies as BehaviorPolicy[] : [],
+      forecasts: Array.isArray(parsed.forecasts) ? parsed.forecasts as BehaviorForecast[] : [],
+      sessionCount: typeof parsed.sessionCount === 'number' ? parsed.sessionCount : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export class BehavioralLearningLayer {
+  private readonly snapshotPath: string;
   private readonly observations: BehavioralObservation[] = [];
   private readonly learnedFacts = new Map<string, LearnedBehaviorFact>();
   private lastPatterns: BehavioralPattern[] = [];
+  private lastTheory: UserBehaviorTheory | null = null;
+  private lastPolicies: BehaviorPolicy[] = [];
+  private lastForecasts: BehaviorForecast[] = [];
+  private sessionCount = 0;
+
+  constructor(options: { storagePath?: string } = {}) {
+    const defaultPath = resolve(process.cwd(), '.poke-core', 'behavioral-state.json');
+    this.snapshotPath = resolve(options.storagePath ?? defaultPath);
+    this.restore();
+  }
+
+  private restore(): void {
+    if (!existsSync(this.snapshotPath)) return;
+    const snapshot = deserializeSnapshot(readFileSync(this.snapshotPath, 'utf8'));
+    if (!snapshot) return;
+    this.observations.push(...snapshot.observations);
+    for (const fact of snapshot.learnedFacts) this.learnedFacts.set(fact.key, fact);
+    this.lastPatterns = snapshot.lastPatterns;
+    this.lastTheory = snapshot.theory;
+    this.lastPolicies = snapshot.policies;
+    this.lastForecasts = snapshot.forecasts;
+    this.sessionCount = snapshot.sessionCount;
+  }
+
+  private persist(): void {
+    const snapshot: BehavioralModelSnapshot = {
+      observations: this.observations,
+      learnedFacts: [...this.learnedFacts.values()],
+      lastPatterns: this.lastPatterns,
+      theory: this.lastTheory,
+      policies: this.lastPolicies,
+      forecasts: this.lastForecasts,
+      sessionCount: this.sessionCount,
+    };
+    mkdirSync(dirname(this.snapshotPath), { recursive: true });
+    writeFileSync(this.snapshotPath, serializeSnapshot(snapshot), 'utf8');
+  }
 
   observe(observation: BehavioralObservation): BehavioralObservation {
     const normalized: BehavioralObservation = {
@@ -343,6 +417,7 @@ export class BehavioralLearningLayer {
 
   learn(input: BehavioralLearningInput): BehavioralLearningResult {
     const now = input.now ?? input.clock?.now() ?? Date.now();
+    this.sessionCount += 1;
     const observations = [
       ...this.observeFacts(input.workingFacts),
       ...this.observeEpisodes(input.episodicItems),
@@ -387,12 +462,9 @@ export class BehavioralLearningLayer {
     this.lastPatterns = patterns;
 
     for (const subjectBucket of grouped.values()) {
-      const values = [...subjectBucket.values.values()];
-      const best = selectBestValue(values);
+      const best = selectBestValue([...subjectBucket.values.values()]);
       const score = scorePattern(best, subjectBucket, now);
-      const evidenceCount = best.evidence.size;
-      const sourceCount = best.sources.size;
-      if (score < 0.55 && evidenceCount < 2 && sourceCount < 2) continue;
+      if (score < 0.55 && best.evidence.size < 2 && best.sources.size < 2) continue;
       const fact = buildPromotedFact(subjectBucket.subject, subjectBucket.category, best.value, best, now);
       const current = this.learnedFacts.get(fact.key);
       if (!current || current.confidence <= fact.confidence || current.lastObservedAt <= fact.lastObservedAt) {
@@ -401,6 +473,18 @@ export class BehavioralLearningLayer {
     }
 
     const retained = [...this.learnedFacts.values()].sort((left, right) => right.confidence - left.confidence || right.lastObservedAt - left.lastObservedAt);
+    const theoryBundle = buildBehavioralModel({
+      now,
+      observations: this.observations,
+      facts: retained,
+      patterns,
+      episodes: input.episodicItems,
+      sourceDocuments: input.sourceDocuments,
+      priorTheory: this.lastTheory,
+    });
+    this.lastTheory = { ...theoryBundle.theory, sessionCount: Math.max(theoryBundle.theory.sessionCount, this.sessionCount) };
+    this.lastPolicies = theoryBundle.policies;
+    this.lastForecasts = theoryBundle.forecasts;
 
     const semanticDocuments: MemoryDocument[] = retained.map((fact) => ({
       id: stableId('user-model', [fact.key, fact.value]),
@@ -444,15 +528,37 @@ export class BehavioralLearningLayer {
       }));
     });
 
-    const summary = `${retained.length} behavioral facts promoted from ${this.observations.length} observations across ${grouped.size} learned patterns`;
-    return { observations, promotedFacts: retained, semanticDocuments, semanticChunks, patterns, summary };
+    this.persist();
+    const summary = `${retained.length} behavioral facts promoted from ${this.observations.length} observations across ${grouped.size} learned patterns; ${theoryBundle.summary}`;
+    return {
+      observations,
+      promotedFacts: retained,
+      semanticDocuments,
+      semanticChunks,
+      patterns,
+      theory: this.lastTheory,
+      policies: this.lastPolicies,
+      forecasts: this.lastForecasts,
+      nextBestActions: theoryBundle.nextBestActions,
+      summary,
+    };
   }
 
-  snapshot(): { observations: BehavioralObservation[]; promotedFacts: LearnedBehaviorFact[]; patterns: BehavioralPattern[] } {
+  evaluate(context: Record<string, unknown>): { policies: BehaviorPolicy[]; nextBestActions: string[]; forecasts: BehaviorForecast[] } {
+    const policies = evaluateBehaviorPolicies(context, this.lastPolicies);
+    const nextBestActions = policies.map((policy) => policy.action.value);
+    return { policies, nextBestActions, forecasts: this.lastForecasts };
+  }
+
+  snapshot(): { observations: BehavioralObservation[]; promotedFacts: LearnedBehaviorFact[]; patterns: BehavioralPattern[]; theory: UserBehaviorTheory | null; policies: BehaviorPolicy[]; forecasts: BehaviorForecast[]; sessionCount: number } {
     return {
       observations: [...this.observations],
       promotedFacts: [...this.learnedFacts.values()],
       patterns: [...this.lastPatterns],
+      theory: this.lastTheory,
+      policies: [...this.lastPolicies],
+      forecasts: [...this.lastForecasts],
+      sessionCount: this.sessionCount,
     };
   }
 }
