@@ -77,10 +77,19 @@ assert.ok(plan.sourceRanking[0].score >= plan.sourceRanking.at(-1)!.score);
 assert.ok(plan.evidenceGraph.claims.length >= 2);
 assert.ok(plan.evidenceGraph.conflicts.length >= 1);
 assert.ok(plan.evidenceGraph.claims.some((claim) => claim.assessments.some((assessment) => assessment.relation !== 'unknown')));
+assert.ok(plan.evidenceGraph.entities.length >= 1);
+assert.ok(plan.evidenceGraph.communities.length >= 1);
+assert.ok(plan.evidenceGraph.exploration.length >= 2);
+assert.ok(plan.evidenceGraph.nodes.some((node) => node.type === 'entity'));
+assert.ok(plan.evidenceGraph.nodes.some((node) => node.type === 'community'));
+assert.ok(plan.evidenceGraph.nodes.some((node) => node.type === 'exploration'));
+assert.ok(plan.evidenceGraph.exploration.some((step) => step.frontier.length > 0 && step.path.length > 0));
+assert.notEqual(plan.evidenceGraph.synthesis.stance, 'insufficient');
 assert.ok(plan.evidenceGraph.confidence > 0.45);
 assert.ok(plan.predictedSignals.some((signal) => signal.topic === 'search policy'));
 assert.ok(plan.predictedSignals.some((signal) => signal.latentNeed.features.frequency >= 2));
 assert.ok(plan.evidenceGraph.nodes.some((node) => node.type === 'result' && typeof node.metadata.breakdown === 'object'));
+assert.ok(plan.evidenceGraph.nodes.some((node) => node.type === 'result' && (node.metadata.breakdown as { uncertainty?: number }).uncertainty !== undefined));
 
 const store = new SearchPolicyStore(policyPath);
 const before = store.load().version;
@@ -98,11 +107,25 @@ const synthesized = await store.rewriteFromFeedbackSemantic({
 }, {
   name: 'eval-policy-rewriter',
   async synthesize() {
-    return { rules: [{ id: 'provider-semantic-rule', description: 'Prefer provider semantic frames and corroborated github evidence.', enabled: true, when: { latentNeed: 'search policy' }, actions: [{ type: 'prefer-provider-nlu', value: 'semantic-frame-required', weight: 0.4 }, { type: 'require-corroboration', value: 'github-plus-independent', weight: 0.3 }], guardrails: ['fallback-required', 'audit-required'] }] };
+    return { rules: [{ id: 'provider-semantic-rule', description: 'Prefer provider semantic frames and corroborated github evidence.', enabled: true, minTrustScore: 0.7, when: { latentNeed: 'search policy' }, actions: [{ type: 'prefer-provider-nlu', value: 'semantic-frame-required', weight: 0.4 }, { type: 'require-corroboration', value: 'github-plus-independent', weight: 0.3 }, { type: 'boost-source', value: 'github', weight: 0.2 }], guardrails: ['fallback-required', 'audit-required'] }] };
   },
 });
 assert.ok(synthesized.rules.some((rule) => rule.id === 'provider-semantic-rule'));
 assert.equal(synthesized.auditLog.at(-1)?.accepted, true);
+const policyPlan = createSearchSession({ policyPath }).plan('github search policy evidence', { entities: ['github'] });
+assert.ok(policyPlan.sourceRanking.some((entry) => entry.source === 'github' && entry.reason.includes('policy-rule-boost')));
+const unrelatedPolicyPlan = createSearchSession({ policyPath }).plan('calendar availability conflict', { entities: ['calendar'] });
+assert.ok(!unrelatedPolicyPlan.sourceRanking.some((entry) => entry.source === 'github' && entry.reason.includes('policy-rule-boost')));
+const autoNluPlan = await createSearchSession({ policyPath, nluProvider: provider, behaviorSeed: { trajectory: [{ topic: 'search policy', source: 'github', outcome: 'success' }] } }).planAuto('github search policy evidence', { entities: ['github'] });
+assert.equal(autoNluPlan.intent.nlu.provider, 'eval-llm');
+const corroborationPlan = createSearchSession({ policyPath }).run('semantic search policy with one source must remain unresolved when corroboration is required', { trajectory: [{ topic: 'search policy', source: 'github', outcome: 'success' }] }, [
+  { title: 'Only repository', url: 'https://github.com/abhaymundhara/poke-core', snippet: 'semantic search policy is implemented', source: 'github', claims: ['semantic search policy is implemented'], trust: 0.9, freshness: 0.9 },
+]);
+assert.ok(corroborationPlan.evidenceGraph.claims.some((claim) => claim.verdict === 'unsupported'));
+const minTrustPlan = createSearchSession({ policyPath }).run('github search policy evidence drops weak web source', { trajectory: [{ topic: 'search policy', source: 'github', outcome: 'success' }] }, [
+  { title: 'Weak web source', url: 'https://example.com/weak', snippet: 'semantic search policy is implemented', source: 'web', claims: ['semantic search policy is implemented'], trust: 0.1, freshness: 0.1 },
+]);
+assert.equal(minTrustPlan.evidenceGraph.nodes.filter((node) => node.type === 'result').length, 0);
 
 const rejected = store.rewriteFromFeedback({ summary: 'eval rejected rewrite', rules: [{ ...validRule, id: 'bad-rule', maxHopBudget: 99 }] });
 assert.equal(rejected.version, synthesized.version);

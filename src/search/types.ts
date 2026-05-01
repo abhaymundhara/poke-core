@@ -102,9 +102,49 @@ export type TrustedEvidence = SearchResult & {
 export type SearchEvidenceNode = {
   id: string;
   label: string;
-  type: 'query' | 'result' | 'source' | 'claim' | 'conflict';
+  type: 'query' | 'result' | 'source' | 'claim' | 'conflict' | 'entity' | 'community' | 'exploration';
   weight: number;
   metadata: Record<string, unknown>;
+};
+
+export type CanonicalEntity = {
+  id: string;
+  label: string;
+  mentions: string[];
+  confidence: number;
+  nil: boolean;
+  sourceIds: string[];
+};
+
+export type EvidenceCommunity = {
+  id: string;
+  label: string;
+  entityIds: string[];
+  claimIds: string[];
+  sourceIds: string[];
+  summary: string;
+  confidence: number;
+};
+
+export type ExplorationStep = {
+  id: string;
+  question: string;
+  entityIds: string[];
+  evidenceIds: string[];
+  inferredClaims: string[];
+  unresolved: string[];
+  confidence: number;
+  frontier: string[];
+  path: Array<{ from: string; to: string; relation: string; weight: number }>;
+};
+
+export type EvidenceSynthesis = {
+  answerable: boolean;
+  stance: 'confirmed' | 'contested' | 'insufficient';
+  confidence: number;
+  primaryClaims: string[];
+  rejectedClaims: string[];
+  reasoningTrace: string[];
 };
 
 export type SearchEvidenceEdge = {
@@ -144,8 +184,12 @@ export type SearchEvidenceGraph = {
   nodes: SearchEvidenceNode[];
   edges: SearchEvidenceEdge[];
   queries: string[];
+  entities: CanonicalEntity[];
+  communities: EvidenceCommunity[];
+  exploration: ExplorationStep[];
   claims: VerifiedClaim[];
   conflicts: EvidenceConflict[];
+  synthesis: EvidenceSynthesis;
   summary: string;
   confidence: number;
 };
@@ -214,6 +258,16 @@ export type SearchPolicyRule = {
   when?: { focus?: SearchFocus[]; freshness?: SearchFreshness[]; sources?: Array<SearchSource | string>; latentNeed?: string };
   actions?: Array<{ type: 'boost-source' | 'cap-hop-budget' | 'require-corroboration' | 'prefer-provider-nlu'; value: string; weight: number }>;
   guardrails: string[];
+  learnedFrom?: { outcomeCount: number; failureCount: number; lastFailure?: string };
+};
+
+export type PolicyDecision = {
+  maxHopBudget?: number;
+  minTrustScore?: number;
+  requireCorroboration: boolean;
+  preferProviderNlu: boolean;
+  sourceBoosts: Record<string, number>;
+  matchedRules: string[];
 };
 
 export type SearchPolicyState = {

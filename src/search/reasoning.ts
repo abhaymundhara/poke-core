@@ -1,6 +1,7 @@
-import type { ClaimAssessment, EvidenceConflict, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
+import type { ClaimAssessment, EvidenceConflict, PolicyDecision, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
 import { average, clamp, stableHash, words } from './utils.ts';
 import { scoreEvidenceTrust } from './trust.ts';
+import { addKnowledgeGraphNodes, canonicalizeEntities, chainOfExploration, detectEvidenceCommunities, synthesizeEvidence } from './knowledge-graph.ts';
 
 function claimTexts(result: SearchResult): string[] {
   if (result.claims?.length) return result.claims;
@@ -58,7 +59,7 @@ export function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProf
   return [...new Set(hopPlan)].slice(0, Math.max(2, intent.hopBudget + 1));
 }
 
-export function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], strategy: SearchStrategyProfile, reliability = {}): SearchEvidenceGraph {
+export function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], strategy: SearchStrategyProfile, reliability = {}, policy: PolicyDecision = { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] }): SearchEvidenceGraph {
   const trusted = scoreEvidenceTrust(intent, results, reliability);
   const nodes: SearchEvidenceNode[] = [];
   const edges: SearchEvidenceEdge[] = [];
@@ -99,18 +100,20 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
       if (assessment.relation === 'contradicts') entry.contradiction.push(...other.support);
       if (assessment.relation === 'entails') entry.support.push(...other.support);
     }
-    const supportIds = entry.support.map((item) => item.url || item.title);
-    const contradictionIds = entry.contradiction.map((item) => item.url || item.title);
+    const supportIds = [...new Set(entry.support.map((item) => item.url || item.title))];
+    const contradictionIds = [...new Set(entry.contradiction.map((item) => item.url || item.title))];
     const support = average(entry.support.map((item) => item.trustScore));
     const contradiction = average(entry.contradiction.map((item) => item.trustScore));
-    const confidence = clamp(support * 0.82 - contradiction * 0.48 + Math.min(0.16, entry.support.length * 0.04));
-    const verdict: VerifiedClaim['verdict'] = contradictionIds.length > 0 && contradiction > support * 0.65 ? 'contested' : supportIds.length > 0 ? 'supported' : 'unsupported';
-    claims.push({ id: `claim-${stableHash(entry.text)}`, text: entry.text, confidence, supportedBy: supportIds, contradictedBy: contradictionIds, verdict, assessments: entry.assessments });
+    const independentSupport = new Set(entry.support.map((item) => item.provenance.domain || item.source)).size;
+    const corroborationMet = !policy.requireCorroboration || independentSupport >= 2;
+    const confidence = clamp(support * 0.82 - contradiction * 0.48 + Math.min(0.16, entry.support.length * 0.04) - (corroborationMet ? 0 : 0.18));
+    const verdict: VerifiedClaim['verdict'] = contradictionIds.length > 0 && contradiction > support * 0.65 ? 'contested' : supportIds.length > 0 && corroborationMet ? 'supported' : 'unsupported';
+    const claimId = `claim-${stableHash(entry.text)}`;
+    claims.push({ id: claimId, text: entry.text, confidence, supportedBy: supportIds, contradictedBy: contradictionIds, verdict, assessments: entry.assessments });
     if (contradictionIds.length > 0) {
       conflicts.push({ claim: entry.text, supporting: supportIds, contradicting: contradictionIds, resolution: support >= contradiction ? 'prefer higher-trust corroborated support' : 'prefer higher-trust contradiction', confidence: clamp(Math.abs(support - contradiction)) });
       nodes.push({ id: `conflict-${stableHash(entry.text)}`, label: entry.text, type: 'conflict', weight: clamp(Math.abs(support - contradiction)), metadata: { support, contradiction } });
-      for (const supportId of supportIds) edges.push({ from: supportId, to: `conflict-${stableHash(entry.text)}`, relation: 'entails', weight: support });
-      for (const contradictionId of contradictionIds) edges.push({ from: contradictionId, to: `conflict-${stableHash(entry.text)}`, relation: 'rebuts', weight: contradiction });
+      edges.push({ from: claimId, to: `conflict-${stableHash(entry.text)}`, relation: verdict === 'contested' ? 'contradicts' : 'supports', weight: confidence });
     }
   }
 
@@ -120,6 +123,11 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
     edges.push({ from: left, to: right, relation: similarity(trusted[i - 1].snippet, trusted[i].snippet) > 0.32 ? 'corroborates' : 'derived-from', weight: clamp(0.28 + strategy.hopBias * 0.1) });
   }
 
-  const confidence = clamp(average(claims.map((claim) => claim.confidence)) * 0.52 + average(trusted.map((item) => item.trustScore)) * 0.34 + Math.min(1, queries.length / 5) * 0.14 - conflicts.length * 0.05);
-  return { nodes, edges, queries, claims, conflicts, summary: `${queries.length} query seeds, ${results.length} results, ${claims.length} claims, conflicts=${conflicts.length}, strategy=${strategy.name}`, confidence };
+  const entities = canonicalizeEntities(intent, trusted);
+  const communities = detectEvidenceCommunities(entities, claims, trusted);
+  addKnowledgeGraphNodes(nodes, edges, entities, communities);
+  const exploration = chainOfExploration(intent, entities, claims, communities, nodes, edges);
+  const synthesis = synthesizeEvidence(claims, conflicts, exploration);
+  const confidence = clamp(synthesis.confidence * 0.46 + average(claims.map((claim) => claim.confidence)) * 0.26 + average(trusted.map((item) => item.trustScore)) * 0.2 + Math.min(1, queries.length / 5) * 0.08 - conflicts.length * 0.04);
+  return { nodes, edges, queries, entities, communities, exploration, claims, conflicts, synthesis: { ...synthesis, confidence }, summary: `${queries.length} query seeds, ${results.length} results, ${claims.length} claims, communities=${communities.length}, conflicts=${conflicts.length}, stance=${synthesis.stance}, strategy=${strategy.name}`, confidence };
 }
