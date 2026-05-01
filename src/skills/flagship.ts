@@ -1,5 +1,6 @@
 import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
 import type { SkillAdapter } from './types';
+import { buildAutopilotCycle } from '../autopilot/engine';
 
 function normalizeText(value: unknown): string {
   if (typeof value === 'string') return value.trim();
@@ -33,8 +34,8 @@ export class AutopilotSkill implements SkillAdapter {
   descriptor: SkillDescriptor = {
     name: 'autopilot',
     domain: 'cognitive-orchestration',
-    capabilities: ['planning', 'delegation', 'checkpointing'],
-    version: '1.0.0',
+    capabilities: ['planning', 'delegation', 'checkpointing', 'proactivity'],
+    version: '1.1.0',
   };
 
   canHandle(step: PlanStep): boolean {
@@ -44,16 +45,20 @@ export class AutopilotSkill implements SkillAdapter {
   async execute(ctx: ExecutionContext): Promise<SkillResult> {
     const objective = readObjective(ctx);
     const context = readContext(ctx);
-    const signals = collectSignals(`${objective} ${JSON.stringify(context)}`, ['autopilot', 'plan', 'execute', 'delegate', 'orchestrate', 'sequence', 'guardrail']);
+    const harnessState = (ctx.step.args.harnessState && typeof ctx.step.args.harnessState === 'object' && !Array.isArray(ctx.step.args.harnessState))
+      ? (ctx.step.args.harnessState as Record<string, unknown>)
+      : (ctx.state.artifacts.harnessState && typeof ctx.state.artifacts.harnessState === 'object' && !Array.isArray(ctx.state.artifacts.harnessState)
+        ? (ctx.state.artifacts.harnessState as Record<string, unknown>)
+        : {});
+    const cycle = buildAutopilotCycle(objective, harnessState, { ...context, hint: ctx.step.args.hint });
     const output = {
       objective,
-      mode: 'autopilot',
-      signals,
-      phases: ['frame the objective', 'pick a bounded path', 'execute with checkpoints', 'capture recovery notes'],
+      mode: 'proactivity',
+      cycle,
       guardrails: ['keep side effects explicit', 'prefer deterministic steps', 'preserve recovery history'],
     };
     recordArtifact(ctx, output);
-    return result('autopilot scaffold generated', output, { signals });
+    return result('autopilot cycle generated from harness state', output, { priorities: cycle.priorities, triggerCount: cycle.backgroundTriggers.length });
   }
 }
 
@@ -157,12 +162,38 @@ export class SignalObservationSkill implements SkillAdapter {
   }
 }
 
+type VisionBox = { x: number; y: number; width: number; height: number };
+type VisionTarget = { selector?: string; text?: string; box?: VisionBox; action?: string; clickable?: boolean };
+
+function isVisionBox(value: unknown): value is VisionBox {
+  return typeof value === 'object' && value !== null && ['x', 'y', 'width', 'height'].every((key) => typeof (value as Record<string, unknown>)[key] === 'number');
+}
+
+function extractVisionTargets(domSnapshot: unknown): VisionTarget[] {
+  if (!Array.isArray(domSnapshot)) return [];
+  return domSnapshot
+    .map((entry) => {
+      if (typeof entry !== 'object' || entry === null) return null;
+      const record = entry as Record<string, unknown>;
+      const box = isVisionBox(record.box) ? record.box : isVisionBox(record.bounds) ? record.bounds : undefined;
+      return {
+        selector: typeof record.selector === 'string' ? record.selector : undefined,
+        text: typeof record.text === 'string' ? record.text : undefined,
+        box,
+        clickable: typeof record.clickable === 'boolean' ? record.clickable : undefined,
+      } satisfies VisionTarget;
+    })
+    .filter((value): value is VisionTarget => Boolean(value))
+    .filter((entry) => entry.clickable !== false)
+    .slice(0, 12);
+}
+
 export class ComputerUseSkill implements SkillAdapter {
   descriptor: SkillDescriptor = {
     name: 'computer-use',
     domain: 'desktop-interaction',
-    capabilities: ['ui action planning', 'surface selection', 'fallback planning'],
-    version: '1.0.0',
+    capabilities: ['ui action planning', 'surface selection', 'vision snapshots', 'coordinate clicks'],
+    version: '1.1.0',
   };
 
   canHandle(step: PlanStep): boolean {
@@ -172,18 +203,40 @@ export class ComputerUseSkill implements SkillAdapter {
   async execute(ctx: ExecutionContext): Promise<SkillResult> {
     const objective = readObjective(ctx);
     const context = readContext(ctx);
+    const surface = normalizeText(ctx.step.args.surface) || 'desktop';
+    const screenshot = normalizeText(ctx.step.args.screenshot);
+    const domSnapshot = ctx.step.args.domSnapshot;
     const actions = Array.isArray(ctx.step.args.actions)
       ? ctx.step.args.actions.map(normalizeText).filter(Boolean)
       : collectSignals(`${objective} ${JSON.stringify(context)}`, ['click', 'type', 'scroll', 'drag', 'open', 'select', 'submit', 'focus', 'press']);
-    const surface = normalizeText(ctx.step.args.surface) || 'desktop';
+    const visionTargets = extractVisionTargets(domSnapshot);
+    const coordinateClicks = visionTargets
+      .filter((target) => target.box)
+      .map((target) => ({
+        selector: target.selector ?? target.text ?? 'unknown',
+        x: Math.round((target.box!.x ?? 0) + (target.box!.width ?? 0) / 2),
+        y: Math.round((target.box!.y ?? 0) + (target.box!.height ?? 0) / 2),
+        action: target.action ?? (target.clickable === false ? 'inspect' : 'click'),
+      }));
     const output = {
       objective,
       surface,
-      interactionPlan: actions.length > 0 ? actions.map((action) => `perform ${action}`) : ['inspect the interface', 'identify the next target', 'advance only with visible state'],
+      vision: {
+        screenshotPresent: screenshot.length > 0,
+        domSnapshotPresent: Array.isArray(domSnapshot),
+        targetCount: visionTargets.length,
+        coordinateClicks,
+        fallback: 'if the GUI cannot be represented with coordinates, fall back to browser extraction first',
+      },
+      interactionPlan: coordinateClicks.length > 0
+        ? coordinateClicks.map((click) => `${click.action} at ${click.x},${click.y} for ${click.selector}`)
+        : actions.length > 0
+          ? actions.map((action) => `perform ${action}`)
+          : ['inspect the interface', 'identify the next target', 'advance only with visible state'],
       safetyChecks: ['confirm the target application', 'avoid hidden destructive actions', 'capture state before submission'],
-      fallback: 'degrade to browser extraction if the interface cannot be represented deterministically',
+      nextAction: coordinateClicks.length > 0 ? 'execute the safest visible click first' : 'request a screenshot or DOM snapshot before acting',
     };
     recordArtifact(ctx, output);
-    return result('computer-use interaction plan generated', output, { surface, actions });
+    return result('vision-backed computer-use plan generated', output, { surface, targetCount: visionTargets.length, screenshotPresent: screenshot.length > 0 });
   }
 }
