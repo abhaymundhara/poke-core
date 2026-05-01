@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createObservation, createSignal, createSubscription, signalKey, type AutopilotObservation, type AutopilotSignal, type AutopilotSignalSource, type AutopilotSubscription, type AutopilotWake } from './events';
 import { AutopilotSchedulerWorker, type SchedulerSnapshot } from './scheduler';
 import { AutopilotLiveDaemon, type LiveDaemonSnapshot } from './live-signals';
+import { DEFAULT_SEMANTIC_NLU_PROVIDER } from '../search/index.ts';
 
 export type AutopilotTrigger = {
   id: string;
@@ -205,7 +206,7 @@ export class AutopilotEngine {
     private readonly clock: () => number = () => Date.now(),
   ) {
     this.scheduler = new AutopilotSchedulerWorker(this.clock);
-    this.liveDaemon = new AutopilotLiveDaemon({ objective: this.objective, harnessState: this.harnessState, context: this.context, clock: this.clock, enableLiveSignals: Boolean(this.context.liveSignals ?? this.context.liveDaemon ?? this.context.searchSignals), policyPath: typeof this.context.searchPolicyPath === 'string' ? this.context.searchPolicyPath : undefined });
+    this.liveDaemon = new AutopilotLiveDaemon({ objective: this.objective, harnessState: this.harnessState, context: this.context, clock: this.clock, enableLiveSignals: Boolean(this.context.liveSignals ?? this.context.liveDaemon ?? this.context.searchSignals), policyPath: typeof this.context.searchPolicyPath === 'string' ? this.context.searchPolicyPath : undefined, nluProvider: (this.context.nluProvider as typeof DEFAULT_SEMANTIC_NLU_PROVIDER | undefined) ?? DEFAULT_SEMANTIC_NLU_PROVIDER });
     this.seed();
   }
 
