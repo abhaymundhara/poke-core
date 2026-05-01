@@ -7,7 +7,12 @@ export type MemoryDocument = {
   updatedAt: number;
   tags: string[];
   metadata: Record<string, unknown>;
+  threadId?: string;
+  relationshipId?: string;
+  importance?: number;
 };
+
+export type DocumentLifecycle = 'relationship' | 'thread' | 'transactional' | 'preference' | 'reference' | 'unknown';
 
 export type ChunkRecord = {
   chunkId: string;
@@ -16,17 +21,24 @@ export type ChunkRecord = {
   text: string;
   tokenCount: number;
   termVector: Record<string, number>;
+  embedding: number[];
   salience: number;
   recencyScore: number;
+  lifecycle: DocumentLifecycle;
 };
 
 export type RetrievalQuery = {
   query: string;
   k: number;
+  mode?: 'hybrid' | 'semantic' | 'lexical';
   filters?: {
     tags?: string[];
     source?: string[];
     documentIds?: string[];
+    compaction?: {
+      maxDocuments?: number;
+      preserveLifecycle?: DocumentLifecycle[];
+    };
   };
   boost?: {
     recency?: number;
@@ -62,5 +74,10 @@ export type RetrievalResult = {
     tokens: string[];
     expandedTokens: string[];
     stages: Array<{ name: string; topScore: number; notes: string[] }>;
+    compaction?: {
+      summary: string;
+      kept: number;
+      dropped: number;
+    };
   };
 };

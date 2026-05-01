@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { compactDocuments, classifyLifecycle } from './compaction';
+import { embedText } from './embeddings';
 import { expandTokens, tokenize } from './tokenize';
 import { scoreChunk } from './scoring';
 import type { ChunkRecord, MemoryDocument, RetrievalQuery, RetrievalResult } from './types';
@@ -7,12 +9,14 @@ export class RagCorpus {
   private documents = new Map<string, MemoryDocument>();
   private chunks = new Map<string, ChunkRecord>();
   private chunksByDocument = new Map<string, string[]>();
+  private lastCompaction: string | null = null;
 
   upsertDocument(doc: Omit<MemoryDocument, 'createdAt' | 'updatedAt'> & Partial<Pick<MemoryDocument, 'createdAt' | 'updatedAt'>>) {
     const now = Date.now();
     const record: MemoryDocument = { ...doc, createdAt: doc.createdAt ?? now, updatedAt: now };
     this.documents.set(record.id, record);
     this.reindexDocument(record);
+    if (this.documents.size > 256) this.compact({ maxDocuments: 220, query: `${record.title} ${record.body}` });
     return record;
   }
 
@@ -21,6 +25,21 @@ export class RagCorpus {
     for (const chunkId of chunkIds) this.chunks.delete(chunkId);
     this.chunksByDocument.delete(documentId);
     this.documents.delete(documentId);
+  }
+
+  compact(options: { maxDocuments?: number; query?: string; preserveLifecycle?: ReturnType<typeof classifyLifecycle>[] } = {}) {
+    const plan = compactDocuments([...this.documents.values()], {
+      maxDocuments: options.maxDocuments,
+      query: options.query,
+      preserveLifecycle: options.preserveLifecycle,
+    });
+
+    if (plan.dropped.length > 0) {
+      for (const document of plan.dropped) this.deleteDocument(document.id);
+      this.lastCompaction = plan.summary;
+    }
+
+    return plan;
   }
 
   private recencyScore(createdAt: number, updatedAt: number): number {
@@ -52,19 +71,23 @@ export class RagCorpus {
     const parts = this.chunkText(`${doc.title}\n\n${doc.body}`);
     const recency = this.recencyScore(doc.createdAt, doc.updatedAt);
     const salience = this.salienceScore(`${doc.title}\n${doc.body}`);
+    const lifecycle = classifyLifecycle(doc);
     for (const part of parts) {
       const termVector: Record<string, number> = {};
-      for (const token of tokenize(part.text)) termVector[token] = (termVector[token] ?? 0) + 1;
+      const tokens = tokenize(part.text);
+      for (const token of tokens) termVector[token] = (termVector[token] ?? 0) + 1;
       const chunkId = randomUUID();
       const chunk: ChunkRecord = {
         chunkId,
         documentId: doc.id,
         position: part.position,
         text: part.text,
-        tokenCount: tokenize(part.text).length,
+        tokenCount: tokens.length,
         termVector,
+        embedding: embedText(part.text),
         salience,
         recencyScore: recency,
+        lifecycle,
       };
       this.chunks.set(chunkId, chunk);
       chunkIds.push(chunkId);
@@ -73,6 +96,11 @@ export class RagCorpus {
   }
 
   retrieve(query: RetrievalQuery): RetrievalResult {
+    const compaction = this.compact({
+      maxDocuments: query.filters?.compaction?.maxDocuments ?? 256,
+      query: query.query,
+      preserveLifecycle: query.filters?.compaction?.preserveLifecycle,
+    });
     const tokens = tokenize(query.query);
     const expandedTokens = expandTokens(tokens);
     const docs = [...this.documents.values()].filter((doc) => {
@@ -98,6 +126,7 @@ export class RagCorpus {
     stageNotes.push(`documents=${docs.length}`);
     stageNotes.push(`chunks=${this.chunks.size}`);
     stageNotes.push(`tokens=${tokens.length} expanded=${expandedTokens.length}`);
+    if (compaction.dropped.length > 0) stageNotes.push(compaction.summary);
 
     return {
       query: query.query,
@@ -114,6 +143,7 @@ export class RagCorpus {
           { name: 'candidate-filter', topScore: hits[0]?.score ?? 0, notes: stageNotes },
           { name: 'rerank', topScore: hits[0]?.score ?? 0, notes: hits.map((hit) => `${hit.documentId}:${hit.score.toFixed(3)}`).slice(0, 5) },
         ],
+        compaction: { summary: compaction.summary, kept: compaction.retained.length, dropped: compaction.dropped.length },
       },
     };
   }
