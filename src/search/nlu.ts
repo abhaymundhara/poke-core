@@ -161,6 +161,99 @@ export function heuristicSemanticNlu(objective: string, context: Record<string, 
   };
 }
 
+
+function uniqueFrames(frames: SemanticFrame[]): SemanticFrame[] {
+  const seen = new Set<string>();
+  const out: SemanticFrame[] = [];
+  for (const frame of frames) {
+    if (!seen.has(frame.name)) {
+      seen.add(frame.name);
+      out.push(frame);
+    }
+  }
+  return out;
+}
+
+function defaultSemanticNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
+  const base = heuristicSemanticNlu(objective, context);
+  const emphasis = (base.semanticQuery + ' ' + base.topics.join(' ') + ' ' + JSON.stringify(context)).toLowerCase();
+  const extraFrames: SemanticFrame[] = [];
+  if (/(forecast|predict|next|future|anticipat)/i.test(emphasis)) {
+    extraFrames.push({
+      name: 'generative-forecast',
+      description: 'Model the next likely user intent and follow-up evidence flow',
+      confidence: 0.82,
+      slots: {
+        topics: uniq([...base.topics.slice(0, 4), 'forecast']),
+        entities: base.entities.slice(0, 4),
+        actions: ['forecast', 'simulate', 'anticipate'],
+      },
+    });
+  }
+  if (/(trust|verify|reliable|official|source|provenance|evidence)/i.test(emphasis)) {
+    extraFrames.push({
+      name: 'epistemic-verification',
+      description: 'Prioritize source reliability, corroboration, and provenance',
+      confidence: 0.86,
+      slots: {
+        topics: uniq(['trust', ...base.topics.slice(0, 4)]),
+        entities: base.entities.slice(0, 4),
+        actions: ['verify', 'corroborate', 'calibrate'],
+      },
+    });
+  }
+  if (/(claim|proposition|contradict|entail|reason|inference|proof)/i.test(emphasis)) {
+    extraFrames.push({
+      name: 'proposition-graph',
+      description: 'Lift text into propositions and reason over entailment and contradiction',
+      confidence: 0.84,
+      slots: {
+        topics: uniq(['proposition', ...base.topics.slice(0, 4)]),
+        entities: base.entities.slice(0, 4),
+        actions: ['infer', 'entail', 'rebut'],
+      },
+    });
+  }
+  if (/(policy|rewrite|architecture|self-modif|adapt)/i.test(emphasis)) {
+    extraFrames.push({
+      name: 'policy-adaptation',
+      description: 'Forecast policy and architecture changes from observed feedback',
+      confidence: 0.8,
+      slots: {
+        topics: uniq(['policy', 'architecture', ...base.topics.slice(0, 3)]),
+        entities: base.entities.slice(0, 4),
+        actions: ['rewrite', 'adapt', 'reconfigure'],
+      },
+    });
+  }
+  const semanticFrames = uniqueFrames([...base.semanticFrames, ...extraFrames]);
+  const decomposedQuestions = uniq([
+    ...base.decomposedQuestions,
+    ...extraFrames.map((frame) => 'How does ' + frame.name + ' change the answer to: ' + objective + '?'),
+  ]).slice(0, 8);
+  const ambiguities = base.ambiguities.length > 0 ? base.ambiguities : [{
+    issue: 'llm-default-semantic-coverage',
+    candidates: base.topics.slice(0, 3),
+    resolutionHint: 'expand the semantic frame and collect corroborating evidence before narrowing',
+    confidence: 0.68,
+  }];
+  return {
+    ...base,
+    semanticFrames,
+    decomposedQuestions,
+    ambiguities,
+    confidence: clamp(base.confidence + 0.18),
+    warnings: uniq([...(base.warnings ?? []), 'llm-default-semantic']),
+  };
+}
+
+export const DEFAULT_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
+  name: 'llm-default-local',
+  async extract({ objective, context }) {
+    return defaultSemanticNlu(objective, context);
+  },
+};
+
 function finiteNumber(value: unknown): number | null {
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
@@ -274,18 +367,18 @@ export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, pr
 }
 
 export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
-  return buildIntentFromNlu(objective, heuristicSemanticNlu(objective, context), 'heuristic-local', true);
+  return buildIntentFromNlu(objective, defaultSemanticNlu(objective, context), DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
 }
 
 export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider): Promise<SearchIntent> {
-  const fallback = heuristicSemanticNlu(objective, context);
-  if (!provider) return buildIntentFromNlu(objective, fallback, 'heuristic-local', true);
+  const fallback = defaultSemanticNlu(objective, context);
+  if (!provider) return buildIntentFromNlu(objective, fallback, DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
   try {
     const extracted = asNluOutput(await provider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
     if (!extracted) return buildIntentFromNlu(objective, { ...fallback, warnings: ['invalid-llm-structured-output'] }, provider.name, true);
-    const merged = { ...fallback, ...extracted, warnings: [...(extracted.warnings ?? []), ...(extracted.confidence < 0.45 ? ['low-llm-confidence'] : [])] };
+    const merged = { ...fallback, ...extracted, warnings: uniq([...(extracted.warnings ?? []), ...(extracted.confidence < 0.45 ? ['low-llm-confidence'] : [])]) };
     return buildIntentFromNlu(objective, merged, provider.name, false);
   } catch (error) {
-    return buildIntentFromNlu(objective, { ...fallback, warnings: [`llm-nlu-error:${error instanceof Error ? error.message : 'unknown'}`] }, provider.name, true);
+    return buildIntentFromNlu(objective, { ...fallback, warnings: ['llm-nlu-error:' + (error instanceof Error ? error.message : 'unknown')] }, provider.name, true);
   }
 }
