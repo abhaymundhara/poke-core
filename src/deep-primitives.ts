@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 export type ThreadParticipant = { email: string; name?: string; locale?: string; timezone?: string; role?: string };
-export type ThreadIdentityInput = { subject: string; participants: ThreadParticipant[]; rootMessageId?: string; replyTo?: string; conversationId?: string; provider?: string; mailbox?: string };
+export type ThreadIdentityInput = { subject: string; participants: ThreadParticipant[]; messageId?: string; inReplyTo?: string | string[]; references?: string | string[]; rootMessageId?: string; replyTo?: string; conversationId?: string; provider?: string; mailbox?: string };
 export type NormalizedThreadIdentity = { threadId: string; subject: string; canonicalParticipants: string[]; anchor: string; provider?: string; mailbox?: string };
 
 export type Attendee = { email: string; name?: string; locale?: string; timezone?: string; response?: 'accepted' | 'declined' | 'tentative' | 'needsAction'; role?: 'required' | 'optional' | 'resource' };
@@ -13,13 +13,33 @@ export type RecurrenceInstance = { startUtc: string; endUtc: string; localStart:
 function normalizeText(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
 function stripSubject(subject: string): string { return subject.replace(/^(re|fwd?|fw):\s*/ig, '').replace(/\s+/g, ' ').trim().toLowerCase(); }
 function canonicalEmail(email: string): string { return email.trim().toLowerCase(); }
+function normalizeMessageId(value: unknown): string | null {
+  const text = normalizeText(value).replace(/^<|>$/g, '').trim().toLowerCase();
+  return text || null;
+}
+function normalizeMessageIdList(value: unknown): string[] {
+  if (Array.isArray(value)) return [...new Set(value.map(normalizeMessageId).filter((entry): entry is string => Boolean(entry)))];
+  const text = normalizeText(value);
+  if (!text) return [];
+  return [...new Set(text.split(/[\s,]+/).map(normalizeMessageId).filter((entry): entry is string => Boolean(entry)))];
+}
+function threadFingerprint(input: ThreadIdentityInput): string | null {
+  const conversationId = normalizeMessageId(input.conversationId);
+  const rootMessageId = normalizeMessageId(input.rootMessageId);
+  const references = normalizeMessageIdList(input.references);
+  const inReplyTo = normalizeMessageIdList(input.inReplyTo);
+  const replyTo = normalizeMessageId(input.replyTo);
+  const anchor = conversationId ?? rootMessageId ?? references[0] ?? inReplyTo[0] ?? replyTo;
+  return anchor || null;
+}
 
 export function canonicalThreadIdentity(input: ThreadIdentityInput): NormalizedThreadIdentity {
   const subject = stripSubject(input.subject);
   const participants = [...new Set(input.participants.map((participant) => canonicalEmail(participant.email)).filter(Boolean))].sort();
-  const anchor = input.rootMessageId || input.replyTo || input.conversationId || `${input.provider ?? 'mail'}:${input.mailbox ?? 'primary'}`;
-  const digest = createHash('sha1').update([subject, participants.join(','), anchor].join('|')).digest('hex').slice(0, 20);
-  return { threadId: `thread_${digest}`, subject, canonicalParticipants: participants, anchor, provider: input.provider, mailbox: input.mailbox };
+  const headerFingerprint = threadFingerprint(input);
+  const canonicalAnchor = headerFingerprint ?? `${subject}|${participants.join(',')}`;
+  const digest = createHash('sha1').update([canonicalAnchor, input.provider ?? 'mail', input.mailbox ?? 'primary'].join('|')).digest('hex').slice(0, 20);
+  return { threadId: `thread_${digest}`, subject, canonicalParticipants: participants, anchor: headerFingerprint ?? `${input.provider ?? 'mail'}:${input.mailbox ?? 'primary'}`, provider: input.provider, mailbox: input.mailbox };
 }
 
 function parseOffsetMinutes(label: string): number {
@@ -152,8 +172,8 @@ export function expandRecurrence(spec: RecurrenceSpec): RecurrenceInstance[] {
 
 export const DEEP_PRIMITIVES_FIXTURES = {
   thread: {
-    a: { subject: 'Re: Project sync', participants: [{ email: 'Abhay@Example.com' }, { email: 'jane@example.com' }], rootMessageId: '<abc@1>' },
-    b: { subject: 'project sync', participants: [{ email: 'jane@example.com' }, { email: 'abhay@example.com' }], rootMessageId: '<abc@1>' },
+    a: { subject: 'Re: Project sync', participants: [{ email: 'Abhay@Example.com' }, { email: 'jane@example.com' }], messageId: '<abc@1>', references: '<root@0>', inReplyTo: '<root@0>' },
+    b: { subject: 'project sync', participants: [{ email: 'jane@example.com' }, { email: 'abhay@example.com' }], messageId: '<def@2>', references: ['<root@0>', '<abc@1>'], inReplyTo: '<abc@1>' },
   },
   timezone: {
     local: '2026-03-08T09:00:00',
