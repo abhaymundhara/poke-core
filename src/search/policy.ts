@@ -58,6 +58,30 @@ export function defaultPolicy(): SearchPolicyState {
       filesystem: reliability('filesystem', 0.68),
       integration: reliability('integration', 0.74),
     },
+    epistemicModel: {
+      version: 1,
+      calibration: 0.68,
+      classPriors: { primary: 0.88, expert: 0.82, institutional: 0.76, community: 0.6, unknown: 0.5 },
+      sourceMemory: {},
+      domainMemory: {},
+    },
+    latentIntentModel: {
+      version: 1,
+      archetypes: [],
+      transitions: {},
+      lastUpdatedAt: nowMs(),
+    },
+    reasoningArchitecture: {
+      version: 1,
+      name: 'llm-first-adaptive-architecture',
+      activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'],
+      primaryReasoner: 'llm-default',
+      strategyBias: { 'semantic-first': 0.12, 'trust-first': 0.16, 'multi-hop': 0.14, 'freshness-first': 0.08, blend: 0.1 },
+      selfModificationCount: 0,
+      explanationStyle: 'balanced',
+      rewriteHistory: [],
+      guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'],
+    },
     queryProfiles: {},
     forecasts: [],
     rules: [{ id: 'guard-source-trust', description: 'Prefer sources with corroboration or first-party provenance for trust-sensitive searches.', enabled: true, minTrustScore: 0.55, guardrails: ['no-disable-audit', 'bounded-hop-budget'] }],
@@ -218,6 +242,15 @@ export class SearchPolicyStore {
     profile.lastUpdatedAt = nowMs();
     profile.averageScore = profile.averageScore === 0 ? outcome.score : profile.averageScore * 0.7 + outcome.score * 0.3;
     state.queryProfiles[outcome.sessionKey] = profile;
+    const architecture = state.reasoningArchitecture ?? (state.reasoningArchitecture = { version: 1, name: 'llm-first-adaptive-architecture', activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'], primaryReasoner: 'llm-default', strategyBias: {}, selfModificationCount: 0, explanationStyle: 'balanced', rewriteHistory: [], guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] });
+    architecture.selfModificationCount += 1;
+    architecture.rewriteHistory.push({ at: nowMs(), source: 'outcome', change: (useful ? 'reinforce:' : 'correct:') + outcome.strategyId + ':' + outcome.query });
+    architecture.strategyBias[outcome.strategyId] = clamp((architecture.strategyBias[outcome.strategyId] ?? 0) * 0.85 + outcome.score * 0.15);
+    if (!useful || outcome.score < 0.6) {
+      architecture.strategyBias['proposition-reasoning'] = clamp((architecture.strategyBias['proposition-reasoning'] ?? 0.08) + 0.04);
+      architecture.strategyBias['epistemic-trust'] = clamp((architecture.strategyBias['epistemic-trust'] ?? 0.08) + 0.04);
+    }
+    state.reasoningArchitecture = architecture;
     this.save(state);
     return state;
   }
@@ -235,6 +268,15 @@ export class SearchPolicyStore {
       entry.notes.push(`rewrite:${feedback.summary}`);
     }
     if (feedback.forecasts) next.forecasts = feedback.forecasts;
+    const architecture = next.reasoningArchitecture ?? (next.reasoningArchitecture = { version: 1, name: 'llm-first-adaptive-architecture', activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'], primaryReasoner: 'llm-default', strategyBias: {}, selfModificationCount: 0, explanationStyle: 'balanced', rewriteHistory: [], guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] });
+    architecture.selfModificationCount += 1;
+    architecture.rewriteHistory.push({ at: nowMs(), source: 'rewrite', change: feedback.summary });
+    if (/semantic|intent|ambiguous/i.test(feedback.summary)) architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.08);
+    if (/trust|verify|reliable|hallucinat|wrong/i.test(feedback.summary)) {
+      architecture.strategyBias['trust-first'] = clamp((architecture.strategyBias['trust-first'] ?? 0.08) + 0.1);
+      architecture.strategyBias['multi-hop'] = clamp((architecture.strategyBias['multi-hop'] ?? 0.08) + 0.04);
+    }
+    if (/forecast|predict|future/i.test(feedback.summary)) architecture.strategyBias['freshness-first'] = clamp((architecture.strategyBias['freshness-first'] ?? 0.08) + 0.06);
     const violations = validateRules(next.rules);
     next.auditLog.push({ at: nowMs(), action: 'rewrite-from-feedback', version: next.version, summary: feedback.summary, accepted: violations.length === 0, guardrails: violations });
     if (violations.length > 0) {
