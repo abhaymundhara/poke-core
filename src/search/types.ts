@@ -30,6 +30,84 @@ export type IntentAmbiguity = {
   confidence: number;
 };
 
+export type EpistemicClass = 'primary' | 'expert' | 'institutional' | 'community' | 'unknown';
+
+export type EpistemicTrustEntry = {
+  mean: number;
+  variance: number;
+  evidenceCount: number;
+  successes: number;
+  failures: number;
+  lastObservedAt: number | null;
+  notes: string[];
+  epistemicClass: EpistemicClass;
+};
+
+export type EpistemicTrustModel = {
+  version: number;
+  calibration: number;
+  classPriors: Record<EpistemicClass, number>;
+  sourceMemory: Record<string, EpistemicTrustEntry>;
+  domainMemory: Record<string, EpistemicTrustEntry>;
+};
+
+export type Proposition = {
+  id: string;
+  text: string;
+  subject: string;
+  predicate: string;
+  object: string;
+  polarity: 'affirmed' | 'negated' | 'conditional';
+  confidence: number;
+  support: number;
+  contradiction: number;
+  sources: string[];
+};
+
+export type PropositionEdge = {
+  from: string;
+  to: string;
+  relation: 'supports' | 'entails' | 'contradicts' | 'refines';
+  weight: number;
+};
+
+export type PropositionGraph = {
+  propositions?: Proposition[];
+  edges: PropositionEdge[];
+  summary: string;
+  confidence: number;
+};
+
+export type LatentIntentArchetype = {
+  label: string;
+  features: Record<string, number>;
+  probability: number;
+  horizon: 'immediate' | 'near-term' | 'later';
+  intervention: string;
+  sources: Array<SearchSource | string>;
+  lastObservedAt: number | null;
+  support: number;
+};
+
+export type LatentIntentModel = {
+  version: number;
+  archetypes: LatentIntentArchetype[];
+  transitions: Record<string, number>;
+  lastUpdatedAt: number;
+};
+
+export type ReasoningArchitecture = {
+  version: number;
+  name: string;
+  activeModules: Array<'semantic-nlu' | 'epistemic-trust' | 'proposition-reasoning' | 'intent-forecasting' | 'policy-rewrite'>;
+  primaryReasoner: 'llm-default' | 'policy' | 'hybrid';
+  strategyBias: Record<string, number>;
+  selfModificationCount: number;
+  explanationStyle: 'compact' | 'balanced' | 'thorough';
+  rewriteHistory: Array<{ at: number; source: string; change: string }>;
+  guardrails: string[];
+};
+
 export type SearchIntent = {
   objective: string;
   normalizedObjective: string;
@@ -188,6 +266,8 @@ export type SearchEvidenceGraph = {
   communities: EvidenceCommunity[];
   exploration: ExplorationStep[];
   claims: VerifiedClaim[];
+  propositions: Proposition[];
+  propositionGraph?: PropositionGraph;
   conflicts: EvidenceConflict[];
   synthesis: EvidenceSynthesis;
   summary: string;
@@ -275,6 +355,9 @@ export type SearchPolicyState = {
   updatedAt: number;
   strategies: SearchStrategyProfile[];
   sourceReliability: Record<string, SearchSourceReliability>;
+  epistemicModel?: EpistemicTrustModel;
+  latentIntentModel?: LatentIntentModel;
+  reasoningArchitecture?: ReasoningArchitecture;
   queryProfiles: Record<string, { count: number; lastScore: number; lastUpdatedAt: number; averageScore: number; focus: SearchFocus; sourceHints: SearchSource[] }>;
   forecasts: SearchSignalForecast[];
   rules: SearchPolicyRule[];
