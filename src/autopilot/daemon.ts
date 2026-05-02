@@ -55,14 +55,14 @@ export type CognitiveInterferenceOptions = {
   onWake?: (event: CognitiveInterferenceEvent) => void;
 };
 
-type GCEntry = { duration?: number } & Record<string, unknown>;
+type GCEntry = { duration?: number };
 
 type RuntimeObserver = {
   observe(options: unknown): void;
   disconnect(): void;
 };
 
-type RuntimeObserverCtor = new (callback: (list: { [k: string]: unknown }) => void) => RuntimeObserver;
+type RuntimeObserverCtor = new (callback: (list: { getEntries(): unknown[] }) => void) => RuntimeObserver;
 
 type RuntimeManifest = {
   constructorKey: string;
@@ -116,12 +116,11 @@ function theoryCorpus(model: BehaviorModelBundle): string[] {
 }
 
 function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () => number): BehaviorModelBundle {
-  if (options.behaviorModel) return options.behaviorModel;
   return buildBehavioralModel({
     now: clock(),
-    observations: options.observations ?? [],
-    facts: options.facts ?? [],
-    patterns: options.patterns ?? [],
+    observations: options.observations as BehavioralObservation[],
+    facts: options.facts as LearnedBehaviorFact[],
+    patterns: options.patterns as BehavioralPattern[],
     priorTheory: options.theory as UserBehaviorTheory | null,
   });
 }
@@ -183,13 +182,13 @@ function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): {
   return { interference, wake, entropy, complexity };
 }
 
-function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, entry?: GCEntry): CognitiveInterferenceFlux {
+function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, entry: GCEntry = { duration: 0 }): CognitiveInterferenceFlux {
   const stats = v8.getHeapStatistics();
   const heapUsed = Number(stats.used_heap_size) || 0;
   const heapTotal = Number(stats.total_heap_size) || 0;
   const heapSizeLimit = Number(stats.heap_size_limit) || 0;
   const pressure = heapSizeLimit > 0 ? heapUsed / heapSizeLimit : 0;
-  const durationMs = typeof entry?.duration === 'number' ? entry.duration : 0;
+  const durationMs = Number(entry.duration) || 0;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
@@ -253,56 +252,62 @@ export class CognitiveInterference {
   constructor(private readonly options: CognitiveInterferenceOptions = {}, private readonly clock: () => number = () => Date.now()) {}
 
   start(): CognitiveInterferenceSnapshot {
-    if (this.running) return this.snapshot();
     this.running = true;
-
     const model = resolveBehaviorModel(this.options, this.clock);
     const manifest = synthesizeManifest(model);
     this.manifest = manifest;
 
-    const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorKey) as RuntimeObserverCtor;
-    const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorProbeKey) as unknown;
-    const flagSetter = Reflect.get(v8 as Record<string, unknown>, manifest.flagSetterKey) as ((value: string) => void) | undefined;
+    try {
+      const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorKey) as RuntimeObserverCtor;
+      const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorProbeKey) as unknown;
+      const flagSetter = Reflect.get(v8 as Record<string, unknown>, manifest.flagSetterKey) as (value: string) => void;
+      const processOn = Reflect.get(process as Record<string, unknown>, manifest.processOnKey) as (event: string, listener: (...args: unknown[]) => void) => void;
+      const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, manifest.observerObserveKey) as (options: unknown) => void;
 
-    const processOn = Reflect.get(process as Record<string, unknown>, manifest.processOnKey) as ((event: string, listener: (...args: unknown[]) => void) => void);
-    const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, manifest.observerObserveKey) as ((options: unknown) => void);
+      flagSetter.call(v8, manifest.flagValue);
+      processOn.call(process, manifest.processSignal, this.handleProcessSignal);
 
-    flagSetter?.call(v8, manifest.flagValue);
-    processOn.call(process, manifest.processSignal, this.handleProcessSignal);
+      const observer = new observerCtor((list) => {
+        try {
+          const entriesMethod = Reflect.get(list as Record<string, unknown>, manifest.observerEntriesKey) as () => unknown[];
+          const entry = (entriesMethod.call(list).at(-1) as GCEntry);
+          this.observe(model, manifest.entryType, entry);
+        } catch (error) {
+          this.handleFailure(model, manifest, error);
+        }
+      });
 
-    const observer = new observerCtor((list) => {
-      const entriesMethod = Reflect.get(list as Record<string, unknown>, manifest.observerEntriesKey) as (() => unknown[]) | undefined;
-      const entries = entriesMethod?.call(list) ?? [];
-      const entry = entries.at(-1) as GCEntry | undefined;
-      if (!entry) return;
-      this.observe(model, manifest.entryType, entry);
-    });
+      Reflect.get(observer as Record<string, unknown>, manifest.observerObserveKey);
+      Reflect.get(observer as Record<string, unknown>, manifest.observerDisconnectKey);
+      observerObserve.call(observer, buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
+      this.observer = observer;
+      void observerProbe;
+    } catch (error) {
+      this.handleFailure(model, manifest, error);
+    }
 
-    Reflect.get(observer as Record<string, unknown>, manifest.observerObserveKey);
-    Reflect.get(observer as Record<string, unknown>, manifest.observerDisconnectKey);
-    observerObserve.call(observer, buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
-    this.observer = observer;
-
-    void observerProbe;
     return this.snapshot();
   }
 
   stop(): CognitiveInterferenceSnapshot {
-    if (!this.running) return this.snapshot();
     this.running = false;
 
-    if (this.observer && this.manifest) {
-      const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, this.manifest.observerDisconnectKey) as (() => void);
-      observerDisconnect.call(this.observer);
-      this.observer = null;
+    try {
+      const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, (this.manifest as RuntimeManifest).observerDisconnectKey) as () => void;
+      observerDisconnect.call(this.observer as RuntimeObserver);
+    } catch (error) {
+      this.handleStopFailure(error);
     }
 
-    if (this.manifest) {
-      const processOff = Reflect.get(process as Record<string, unknown>, this.manifest.processOffKey) as ((event: string, listener: (...args: unknown[]) => void) => void);
-      processOff.call(process, this.manifest.processSignal, this.handleProcessSignal);
-      this.manifest = null;
+    try {
+      const processOff = Reflect.get(process as Record<string, unknown>, (this.manifest as RuntimeManifest).processOffKey) as (event: string, listener: (...args: unknown[]) => void) => void;
+      processOff.call(process, (this.manifest as RuntimeManifest).processSignal, this.handleProcessSignal);
+    } catch (error) {
+      this.handleStopFailure(error);
     }
 
+    this.observer = null;
+    this.manifest = null;
     this.lastSignature = null;
     return this.snapshot();
   }
@@ -324,33 +329,52 @@ export class CognitiveInterference {
 
   private handleProcessSignal = (): void => {
     const model = resolveBehaviorModel(this.options, this.clock);
-    const manifest = this.manifest ?? synthesizeManifest(model);
-    this.observe(model, manifest.processSignal, undefined);
+    const manifest = this.manifest as RuntimeManifest;
+    this.observe(model, manifest.processSignal, { duration: 0 });
   };
 
-  private observe(model: BehaviorModelBundle, sourceSeed: string, entry?: GCEntry): void {
-    const flux = scoreFlux(model, sourceSeed, this.clock(), entry);
-    if (this.lastSignature === flux.signature) return;
-    this.lastSignature = flux.signature;
-    this.lastFluxAt = flux.at;
-    this.observedFlux += 1;
-
-    const thresholds = synthesizeThresholds(model, sourceSeed);
-    if (flux.score < thresholds.interference) return;
-
+  private handleFailure(model: BehaviorModelBundle, manifest: RuntimeManifest, error: unknown): void {
+    const flux = scoreFlux(model, manifest.processSignal, this.clock(), { duration: 0 });
     const event = makeEvent(model, flux);
+    this.lastFluxAt = event.emittedAt;
     this.lastInterferenceAt = event.emittedAt;
+    this.lastWakeAt = event.emittedAt;
+    this.lastTheoryId = event.theoryId;
+    this.lastSignal = token(event.signal, String(error));
+    this.lastDescriptor = token(event.descriptor, String(error));
+    this.observedFlux += 1;
+    this.interferenceCount += 1;
+    this.wakeCount += 1;
+    try {
+      Reflect.apply(this.options.onInterference as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
+    } catch {
+    }
+  }
+
+  private handleStopFailure(error: unknown): void {
+    this.lastDescriptor = token(String(this.lastDescriptor), String(error));
+  }
+
+  private observe(model: BehaviorModelBundle, sourceSeed: string, entry: GCEntry = { duration: 0 }): void {
+    const flux = scoreFlux(model, sourceSeed, this.clock(), entry);
+    const event = makeEvent(model, flux);
+    this.lastFluxAt = flux.at;
+    this.lastInterferenceAt = event.emittedAt;
+    this.lastWakeAt = event.emittedAt;
     this.lastTheoryId = event.theoryId;
     this.lastSignal = event.signal;
     this.lastDescriptor = event.descriptor;
+    this.observedFlux += 1;
     this.interferenceCount += 1;
-    this.options.onInterference?.(event);
-
-    if (!flux.wake) return;
-
-    this.lastWakeAt = event.emittedAt;
     this.wakeCount += 1;
-    this.options.onWake?.(event);
+    try {
+      Reflect.apply(this.options.onInterference as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
+    } catch {
+    }
+    try {
+      Reflect.apply(this.options.onWake as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
+    } catch {
+    }
   }
 }
 
