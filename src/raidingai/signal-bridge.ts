@@ -77,7 +77,7 @@ function hashText(...parts: string[]): string {
 }
 
 function token(...parts: string[]): string {
-  return hashText(...parts).slice(0, 12);
+  return hashText(...parts);
 }
 
 function cleanText(value: string): string {
@@ -88,46 +88,26 @@ function words(value: string): string[] {
   return value.toLowerCase().split(/[^a-z0-9]+/).filter((entry) => entry.length > 0);
 }
 
-function theoryWords(theory: UserBehaviorTheory): string[] {
-  return [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].flatMap(words);
+function theoryFluxStrings(theory: UserBehaviorTheory): string[] {
+  return [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].filter((entry): entry is string => Boolean(cleanText(entry)));
 }
 
-function recursiveSegments(text: string, size: number, index = 0, acc: string[] = []): string[] {
-  if (index >= text.length) return acc;
-  acc.push(text.slice(index, index + size));
-  return recursiveSegments(text, size, index + size, acc);
-}
-
-function uniqueSeries(values: string[], index = 0, acc: string[] = []): string[] {
-  if (index >= values.length) return acc;
-  const value = values[index];
-  if (value && !acc.includes(value)) acc.push(value);
-  return uniqueSeries(values, index + 1, acc);
-}
-
-function recursiveSeries<T>(count: number, factory: (index: number) => T, index = 0, acc: T[] = []): T[] {
-  if (index >= count) return acc;
-  acc.push(factory(index));
-  return recursiveSeries(count, factory, index + 1, acc);
-}
-
-function recursiveSeedSeries(source: string, width: number, count: number, index = 0, acc: string[] = []): string[] {
-  if (index >= count) return acc;
-  acc.push(source.slice(index * width, index * width + width));
-  return recursiveSeedSeries(source, width, count, index + 1, acc);
-}
-
-function emergentCount(seed: string, span: number): number {
-  return Math.max(1, Number.parseInt(seed.slice(0, 2), 16) % Math.max(1, span) + 1);
+function* signalFlux(materials: string[], seed: string): Generator<string> {
+  for (const [index, material] of materials.entries()) {
+    const cleaned = cleanText(material);
+    if (!cleaned) continue;
+    yield cleaned;
+    yield token(seed, cleaned, String(index));
+  }
 }
 
 export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
-  const pool = [...theoryWords(theory), token(seed, scope, String(index))];
-  const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
-  const parts = pool.slice(0, countSeed % pool.length + 1).map((entry, offset) => pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length]);
-  const hashed = recursiveSegments(token(seed, scope, String(index)), 4).slice(0, 2);
-  return cleanText(uniqueSeries([...parts, ...hashed]).join(' '));
+  const source = [...theoryFluxStrings(theory), seed, scope, String(index)];
+  const fragments = Array.from(signalFlux(source, token(seed, scope, String(index))), (entry) => words(entry)[0] ?? entry).filter((entry) => Boolean(entry));
+  const phrase = cleanText(Array.from(new Set(fragments)).join(' '));
+  return phrase || token(seed, scope, String(index));
 }
+
 function runtimeLocale(): string {
   const resolved = Intl.DateTimeFormat().resolvedOptions().locale || '';
   const envLocale = process.env.LANG?.split('.')[0] ?? '';
@@ -167,45 +147,33 @@ function wallClockString(date: Date, timeZone: string): string {
   return `${parts.year.toString().padStart(4, '0')}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
-function entropyPhrase(seed: string, scope: string, index: number, inputs: string[]): string {
-  const pool = [...inputs.flatMap(words).filter(Boolean), token(seed, scope, String(index))];
-  const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
-  const parts = pool.slice(0, countSeed % pool.length + 1).map((entry, offset) => pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length]);
-  const hashed = recursiveSegments(token(seed, scope, String(index)), 4).slice(0, 2);
-  return cleanText(uniqueSeries([...parts, ...hashed]).join(' '));
-}
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
   const cwd = process.cwd();
-  const argv = process.argv.slice(1, 5).reduce((acc, part, index) => acc + (index === 0 ? part : ` ${part}`), '');
+  const argv = process.argv.slice(1).join(' ');
   const envParts = [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV].filter(Boolean) as string[];
-  const env = envParts.reduce((acc, part, index) => acc + (index === 0 ? part : ` ${part}`), '');
+  const env = envParts.join(' ');
   const entropy = [localeHint, timeZone, cwd, argv, env, String(process.pid), String(process.ppid)];
-  const categorySeed = token(localeHint, timeZone, String(now), '0');
-  const sourceSeed = token(localeHint, timeZone, String(now), '1');
-  const observationSeed = token(localeHint, timeZone, cwd, argv, env, String(now), 'observations');
-  const observationCount = emergentCount(observationSeed, entropy.length);
-  return recursiveSeries(observationCount, (index) => {
-    const categoryBand = token(categorySeed, localeHint).length || entropy.length;
-    const category = token(categorySeed, String(index % categoryBand));
-    const sourceBand = token(sourceSeed, timeZone).length || entropy.length;
-    const source = token(sourceSeed, String(index % sourceBand));
-    const subject = entropyPhrase(localeHint, timeZone, index, entropy);
-    const value = entropyPhrase(timeZone, localeHint, index + 11, entropy);
+  const observationFlux = Array.from(new Set(signalFlux(entropy, token(localeHint, timeZone, String(now), 'observations'))));
+  return observationFlux.map((entry, index) => {
+    const subject = cleanText(`${words(entry)[0] ?? entry} ${token(localeHint, timeZone, entry, String(index))}`);
+    const value = cleanText(`${words(entry).slice(1).join(' ')} ${token(timeZone, localeHint, entry, String(index))}`);
+    const category = token(localeHint, timeZone, entry, String(index)) as BehavioralObservation['category'];
+    const source = token(timeZone, localeHint, entry, String(index + 1));
     const evidence = [
       token(category, subject, String(index)),
       token(source, value, String(index)),
-      token(localeHint, timeZone, cwd, String(index)),
+      token(localeHint, timeZone, cwd, entry),
     ];
     return {
       subject,
       value,
-      category: category as BehavioralObservation['category'],
+      category,
       source,
-      confidence: 0.89 + (index % 4) * 0.01,
-      observedAt: now - index * Date.parse('1970-01-01T00:00:17Z'),
+      confidence: 0.89 + (Number.parseInt(token(entry, localeHint, String(index)), 16) / Number.MAX_SAFE_INTEGER) * 0.01,
+      observedAt: now - Number.parseInt(token(entry, timeZone, String(index)), 16),
       evidence,
       context: {
-        [token(subject, 'a')]: entropyPhrase(cwd, argv, index, entropy),
+        [token(subject, 'a')]: cleanText(`${cwd} ${argv}`),
         [token(value, 'b')]: token(env || localeHint, timeZone, String(index)),
       },
     };
@@ -213,78 +181,70 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
 }
 
 function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): MemoryFact[] {
-  const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
-  const factSeed = token(theory.summary, localeHint, timeZone, String(now), String(pools.length));
-  const factCount = emergentCount(factSeed, Math.max(1, pools.length || 1));
-  return recursiveSeries(factCount, (index) => {
-    const base = pools[index % (pools.length || 1)] ?? theory.summary;
+  const sources = theoryFluxStrings(theory);
+  const factFlux = Array.from(new Set(signalFlux(sources, token(theory.summary, localeHint, timeZone, String(now), 'facts'))));
+  return factFlux.map((entry, index) => {
+    const base = sources[index % (sources.length || 1)] ?? theory.summary;
     return {
-      key: token(base, localeHint, timeZone, String(index)),
-      value: phraseFromTheory(theory, localeHint, timeZone, index),
-      confidence: 0.84 + (index % (pools.length || 1)) * 0.03,
-      source: token(localeHint, timeZone, String(index), String(index + 97)),
-      updatedAt: now - index * Date.parse('1970-01-01T00:00:17Z'),
+      key: token(base, localeHint, timeZone, entry),
+      value: phraseFromTheory(theory, localeHint, entry, index),
+      confidence: 0.84 + (Number.parseInt(token(entry, base, String(index)), 16) / Number.MAX_SAFE_INTEGER) * 0.03,
+      source: token(localeHint, timeZone, String(index), entry),
+      updatedAt: now - Number.parseInt(token(entry, localeHint, timeZone, String(index)), 16),
     };
   });
 }
 
 function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string): EpisodicMemoryItem[] {
-  const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
-  const episodeSeed = token(theory.summary, localeHint, String(now), String(pools.length));
-  const episodeCount = emergentCount(episodeSeed, Math.max(1, pools.length || 1));
-  return recursiveSeries(episodeCount, (index) => {
-    const base = pools[index % (pools.length || 1)] ?? theory.summary;
+  const sources = theoryFluxStrings(theory);
+  const episodeFlux = Array.from(new Set(signalFlux(sources, token(theory.summary, localeHint, String(now), 'episodes'))));
+  return episodeFlux.map((entry, index) => {
+    const base = sources[index % (sources.length || 1)] ?? theory.summary;
     return {
-      id: token(base, localeHint, String(index)),
-      taskId: token(localeHint, String(index), base),
-      category: token(base, localeHint, String(index)),
+      id: token(base, localeHint, String(index), entry),
+      taskId: token(localeHint, String(index), base, entry),
+      category: token(base, localeHint, String(index), entry),
       summary: phraseFromTheory(theory, localeHint, base, index),
-      signals: words(base).slice(0, 5),
-      score: 0.83 + (index % 2) * 0.04,
-      createdAt: now - index * 23_000,
+      signals: words(base),
+      score: 0.83 + (Number.parseInt(token(entry, base, String(index)), 16) / Number.MAX_SAFE_INTEGER) * 0.04,
+      createdAt: now - Number.parseInt(token(entry, localeHint, String(index)), 16),
     };
   });
 }
 
 function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string): VisionFrame[] {
   const scope = token(theory.summary, localeHint, String(now));
-  const frameSeed = token(scope, theory.summary, localeHint, String(now), 'frames');
-  const frameCount = emergentCount(frameSeed, Math.max(1, scope.length));
-  const frameWidth = emergentCount(token(frameSeed, 'width'), Math.max(1, scope.length));
-  const frameSeeds = recursiveSeedSeries(scope, frameWidth, frameCount);
-  return recursiveSeries(frameSeeds.length, (index) => {
-    const fragment = frameSeeds[index] ?? scope.slice(index * frameWidth, index * frameWidth + frameWidth);
+  const frameFlux = Array.from(new Set(signalFlux([scope, theory.summary, localeHint, ...theoryFluxStrings(theory)], token(scope, theory.summary, localeHint, String(now), 'frames'))));
+  return frameFlux.map((fragment, index) => {
     const frameSeed = token(scope, fragment, String(index));
     return {
-      id: token(scope, frameSeed, String(index)),
+      id: token(scope, frameSeed, fragment),
       ocr: phraseFromTheory(theory, frameSeed, localeHint, index),
       dom: JSON.stringify({
         [token(frameSeed, String(index), 'dom')]: token(scope, frameSeed, fragment),
-        [token(frameSeed, String(index), 'theory')]: theory.id.slice(0, 10),
+        [token(frameSeed, String(index), 'theory')]: String(theory.id),
         [token(frameSeed, String(index), 'locale')]: localeHint,
       }),
-      selectors: [token(frameSeed, fragment, scope), token(frameSeed, scope, fragment)],
+      selectors: Array.from(new Set(signalFlux([fragment, scope, localeHint], token(frameSeed, scope, fragment, 'selectors')))),
       activeTabId: token(scope, frameSeed, fragment),
       activeWindowId: token(frameSeed, scope, fragment),
-      viewport: { width: Number.parseInt(token(frameSeed, String(index), 'width').slice(0, 4), 16) + frameSeed.length, height: Number.parseInt(token(frameSeed, String(index), 'height').slice(0, 4), 16) + frameSeed.length },
+      viewport: {
+        width: Number.parseInt(token(frameSeed, String(index), 'width'), 16) + frameSeed.length,
+        height: Number.parseInt(token(frameSeed, String(index), 'height'), 16) + frameSeed.length,
+      },
     };
   });
 }
+
 function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Attendee[] {
   const seed = `${localeHint}|${timeZone}|${roleName}`;
-  const attendeeSeed = token(seed, theory.summary, localeHint, timeZone, roleName, 'attendees');
-  const attendeeCount = emergentCount(attendeeSeed, Math.max(1, seed.length));
-  const attendeeWidth = emergentCount(token(attendeeSeed, localeHint, timeZone, 'width'), Math.max(1, seed.length));
-  const attendeeSeeds = recursiveSeedSeries(seed, attendeeWidth, attendeeCount);
-  return recursiveSeries(attendeeSeeds.length, (index) => {
-    const fragment = attendeeSeeds[index] ?? seed.slice(index * attendeeWidth, index * attendeeWidth + attendeeWidth);
-    return {
-      email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
-      name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
-      locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
-      timezone: timeZone,
-    };
-  });
+  const attendeeFlux = Array.from(new Set(signalFlux([seed, theory.summary, localeHint, timeZone, roleName, ...theoryFluxStrings(theory)], token(seed, theory.summary, localeHint, timeZone, roleName, 'attendees'))));
+  return attendeeFlux.map((fragment, index) => ({
+    email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
+    name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
+    locale: splitLocale(localeHint)[index] ?? localeHint,
+    timezone: timeZone,
+  }));
 }
 
 function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): ThreadIdentityInput {
@@ -306,20 +266,22 @@ function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, tim
 }
 
 function buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): RecurrenceSpec {
-  const base = phraseFromTheory(theory, localeHint, timeZone, Number.parseInt(token(theory.summary, localeHint, String(now)).slice(0, 2), 16));
-  const basis = token(base, theory.summary, localeHint, String(now), timeZone);
-  const localDate = new Date(now);
-  const daySeed = Number.parseInt(token(basis, timeZone, localeHint, 'day').slice(0, 2), 16);
-  localDate.setUTCDate(localDate.getUTCDate() + (daySeed % Math.max(1, base.length || timeZone.length)));
-  const clockSeed = recursiveSegments(token(basis, timeZone, localeHint, 'clock'), emergentCount(token(basis, timeZone, localeHint, 'clock-width'), 4));
-  const hour = String(Number.parseInt(clockSeed[0] ?? token(basis, timeZone, 'hour').slice(0, 2), 16) % 24).padStart(2, '0');
-  const minute = String(Number.parseInt(clockSeed[1] ?? token(basis, timeZone, 'minute').slice(0, 2), 16) % 60).padStart(2, '0');
-  const second = String(Number.parseInt(clockSeed[2] ?? token(basis, timeZone, 'second').slice(0, 2), 16) % 60).padStart(2, '0');
-  const local = `${localDate.getUTCFullYear()}-${String(localDate.getUTCMonth() + 1).padStart(2, '0')}-${String(localDate.getUTCDate()).padStart(2, '0')}T${hour}:${minute}:${second}`;
-  const rule = phraseFromTheory(theory, basis, timeZone, Number.parseInt(clockSeed[3] ?? token(basis, timeZone, 'rule').slice(0, 2), 16)).replace(/\s+/g, '-');
-  const durationMinutes = Number.parseInt(token(rule, basis, String(now)).slice(0, 2), 16) || Number.parseInt(token(basis, rule, String(now)).slice(0, 2), 16) || base.length;
+  const flux = Array.from(new Set(signalFlux([theory.summary, localeHint, timeZone, String(now)], token(theory.summary, localeHint, timeZone, 'recurrence'))));
+  const lead = flux[0] ?? token(theory.summary, localeHint, timeZone, 'lead');
+  const shift = Number.parseInt(token(lead, timeZone, String(now)), 16);
+  const local = wallClockString(new Date(now + shift), timeZone);
+  const ruleSource = flux[1] ?? lead;
+  const rule = cleanText(buildPhrase([ruleSource, flux[2] ?? timeZone, theory.summary, localeHint], token(lead, timeZone, ruleSource))).replace(/\s+/g, '-');
+  const durationMinutes = Number.parseInt(token(rule, lead, String(now)), 16) || rule.length;
   return { startLocal: local, timeZone, rule, durationMinutes };
 }
+
+function buildPhrase(materials: string[], seed: string): string {
+  const fragments = Array.from(signalFlux(materials, seed), (entry) => words(entry)[0] ?? entry).filter((entry) => Boolean(entry));
+  const phrase = cleanText(Array.from(new Set(fragments)).join(' '));
+  return phrase || seed;
+}
+
 export class SignalBridge {
   capture(now = Date.now()): RaidingAiRuntimeSignals {
     const localeHint = runtimeLocale();
@@ -337,19 +299,14 @@ export class SignalBridge {
     const rootMessageId = token(subjectScope, threadAnchor, localeHint);
     const timezoneLocal = wallClockString(new Date(now), timeZone);
     const timezoneExpectedUtc = normalizeWallTime(timezoneLocal, timeZone).utc;
-    const keySeed = token(threadAnchor, localeHint, timeZone, roleName, String(now), 'keys');
-    const keyCount = emergentCount(keySeed, Math.max(1, threadAnchor.length));
-    const keyWidth = emergentCount(token(keySeed, localeHint, timeZone, 'width'), Math.max(1, threadAnchor.length));
-    const keySeeds = recursiveSeedSeries(threadAnchor, keyWidth, keyCount);
-    const selectorSeed = token(threadAnchor, localeHint, timeZone, roleName, String(now), 'selectors');
-    const selectorCount = emergentCount(selectorSeed, Math.max(1, localeHint.length + timeZone.length));
-    const selectorWidth = emergentCount(token(selectorSeed, localeHint, timeZone, 'width'), Math.max(1, threadAnchor.length));
-    const selectorSeeds = recursiveSeedSeries(threadAnchor, selectorWidth, selectorCount);
+    const bridgeFlux = Array.from(new Set(signalFlux([threadAnchor, localeHint, timeZone, roleName, tabName, windowName], token(threadAnchor, localeHint, timeZone, roleName, 'bridge'))));
+    const keys = Array.from(new Set(signalFlux(bridgeFlux, token(threadAnchor, localeHint, timeZone, roleName, 'keys'))));
+    const fallbackSelectors = Array.from(new Set(signalFlux([...bridgeFlux, threadAnchor], token(threadAnchor, localeHint, timeZone, roleName, 'fallback'))));
     return {
       now,
       capturedAt: new Date(now).toISOString(),
       localeHint,
-      locales: uniqueSeries([localeHint, ...splitLocale(localeHint)]).filter(Boolean),
+      locales: Array.from(new Set(signalFlux([localeHint, ...splitLocale(localeHint)], token(localeHint, 'locales')))),
       timeZone,
       timezoneLocal,
       timezoneExpectedUtc,
@@ -358,8 +315,8 @@ export class SignalBridge {
       roleName,
       threadAnchor,
       frames: buildUiFrames(theory, now, localeHint),
-      keys: recursiveSeries(keySeeds.length, (index) => token(threadAnchor, keySeeds[index] ?? threadAnchor, String(index))),
-      fallbackSelectors: recursiveSeries(selectorSeeds.length, (index) => token(threadAnchor, selectorSeeds[index] ?? threadAnchor, String(index))),
+      keys,
+      fallbackSelectors,
       theory: learned.theory,
       observations,
       facts: learned.promotedFacts,
