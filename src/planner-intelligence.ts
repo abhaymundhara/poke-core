@@ -11,7 +11,7 @@ import type {
   TaskInput,
   TaskPlan,
 } from './types';
-import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, understandSearchIntentWithNlu, type SemanticNluProvider } from './search/nlu';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from './search/nlu';
 import type { SearchIntent } from './search/types';
 
 export type PlannerResolveContext = Record<string, unknown> & {
@@ -65,6 +65,32 @@ const PLANNER_SYNTHESIS_SCHEMA = {
   },
 } as const;
 
+const PLANNER_INTENT_SCHEMA = {
+  type: 'object',
+  required: ['objective', 'normalizedObjective', 'semanticQuery', 'entities', 'topics', 'constraints', 'sourceHints', 'sourcePriors', 'freshness', 'focus', 'hopBudget', 'trustMode', 'querySeeds', 'evidenceTerms', 'sessionKey', 'semanticFrames', 'decomposedQuestions', 'ambiguities', 'nlu'],
+  properties: {
+    objective: { type: 'string' },
+    normalizedObjective: { type: 'string' },
+    semanticQuery: { type: 'string' },
+    entities: { type: 'array' },
+    topics: { type: 'array' },
+    constraints: { type: 'array' },
+    sourceHints: { type: 'array' },
+    sourcePriors: { type: 'array' },
+    freshness: { enum: ['historical', 'recent', 'live'] },
+    focus: { enum: ['semantic', 'trust', 'multi-hop', 'factual', 'diagnostic', 'exploratory'] },
+    hopBudget: { type: 'number' },
+    trustMode: { enum: ['official-first', 'diverse', 'broad'] },
+    querySeeds: { type: 'array' },
+    evidenceTerms: { type: 'array' },
+    sessionKey: { type: 'string' },
+    semanticFrames: { type: 'array' },
+    decomposedQuestions: { type: 'array' },
+    ambiguities: { type: 'array' },
+    nlu: { type: 'object' },
+  },
+} as const;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -77,10 +103,24 @@ function parsePlannerDraft(value: unknown, provider: string): PlannerSynthesisDr
   return value as PlannerSynthesisDraft;
 }
 
+function parseIntent(value: unknown, provider: string): SearchIntent {
+  if (!isRecord(value)) throw new Error('invalid-planner-intent:' + provider);
+  if (!isRecord(value.nlu)) throw new Error('invalid-planner-intent:' + provider);
+  return value as SearchIntent;
+}
+
 export async function resolvePlannerIntent(objective: string, context: PlannerResolveContext = {}): Promise<SearchIntent> {
   const provider = context.plannerProvider ?? context.semanticProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   try {
-    return await understandSearchIntentWithNlu(objective, context, provider, true);
+    const raw = await provider.extract({
+      objective: 'resolve the objective into a structured planner intent',
+      context: {
+        objective,
+        plannerContext: context,
+      },
+      schema: PLANNER_INTENT_SCHEMA,
+    });
+    return parseIntent(raw, provider.name);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new RecoveryRequired({ phase: 'intent', provider: provider.name, objective, reason, at: Date.now() });
