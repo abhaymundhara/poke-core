@@ -68,6 +68,17 @@ const STEP_KIND_VALUES: StepKind[] = [
 ];
 const STEP_KIND_SET = new Set<StepKind>(STEP_KIND_VALUES);
 
+const DEFAULT_SKILL_CATALOG: SkillDescriptor[] = [
+  { name: 'browser', domain: 'web-navigation', capabilities: ['navigate', 'extract', 'verify'], version: '1.0.0' },
+  { name: 'integration', domain: 'external-integrations', capabilities: ['inspect', 'comment', 'update', 'append', 'post_message', 'deploy'], version: '1.0.0' },
+  { name: 'harness', domain: 'domain-primitives', capabilities: ['readthread', 'draftreply', 'conflict_detection', 'relationship_recall', 'filesystem_scan'], version: '1.0.0' },
+  { name: 'autopilot', domain: 'cognitive-orchestration', capabilities: ['planning', 'delegation', 'checkpointing', 'proactivity'], version: '1.0.0' },
+  { name: 'user-modeling', domain: 'user-context', capabilities: ['preference extraction', 'tone detection', 'profile shaping'], version: '1.0.0' },
+  { name: 'grounding', domain: 'evidence-management', capabilities: ['claim tracing', 'evidence pairing', 'assumption tagging'], version: '1.0.0' },
+  { name: 'signal-observation', domain: 'telemetry-analysis', capabilities: ['trend detection', 'anomaly detection', 'signal summarization'], version: '1.0.0' },
+  { name: 'computer-use', domain: 'desktop-interaction', capabilities: ['ui action planning', 'surface selection', 'vision snapshots', 'coordinate clicks'], version: '1.0.0' },
+];
+
 const PLANNER_SYNTHESIS_SCHEMA = {
   type: 'object',
   required: ['strategy', 'toolAffordances', 'steps', 'recoveryPolicy', 'planner'],
