@@ -112,10 +112,7 @@ function charCodeTotal(text: string, index = 0, total = 0): number {
 
 function ratio(seed: string): number {
   const text = token(seed);
-  if (text.length === 0) return 0;
-  const HEX_CHAR_MIN = 48;
-  const HEX_CHAR_MAX = 102;
-  return (charCodeTotal(text) / text.length - HEX_CHAR_MIN) / (HEX_CHAR_MAX - HEX_CHAR_MIN);
+  return charCodeTotal(text) / Math.max(1, text.length);
 }
 
 function average(values: number[]): number {
@@ -275,7 +272,6 @@ export class CognitiveInterference {
     const signalMarker = manifestAt(model, 11);
 
     const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, observerCtorKey) as RuntimeObserverCtor;
-    const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, observerProbeKey) as unknown;
     const flagSetter = Reflect.get(v8 as Record<string, unknown>, slotSetter) as (value: string) => void;
     const processOn = Reflect.get(process as Record<string, unknown>, slotOn) as (event: string, listener: (...args: unknown[]) => void) => void;
     const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, slotObserve) as (options: unknown) => void;
@@ -289,11 +285,8 @@ export class CognitiveInterference {
       this.observe(model, entryMarker, entry);
     });
 
-    Reflect.get(observer as Record<string, unknown>, slotObserve);
-    Reflect.get(observer as Record<string, unknown>, slotDisconnect);
     observerObserve.call(observer, buildObserveOptions(slotOptions, entryMarker));
     this.observer = observer;
-    void observerProbe;
 
     return this.snapshot();
   }
@@ -333,7 +326,6 @@ export class CognitiveInterference {
   }
 
   private handleProcessSignal = (): void => {
-    if (!this.manifestModel) return;
     const model = this.manifestModel as BehaviorModelBundle;
     this.observe(model, manifestAt(model, 11), { duration: 0 });
   };
