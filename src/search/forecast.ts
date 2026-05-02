@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import type { SearchEvidenceGraph, SearchIntent, SearchPolicyState, SearchSignalForecast, SearchSource } from './types.ts';
-import { clamp, readJson, uniq, words, stableHash } from './utils.ts';
+import { average, clamp, readJson, uniq, words, stableHash } from './utils.ts';
 
 export type BehaviorTrajectoryEvent = {
   sessionId?: string;
