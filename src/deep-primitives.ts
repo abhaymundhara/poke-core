@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { buildRaidingAiScenario } from './raidingai/fixtures';
 
 export type ThreadParticipant = { email: string; name?: string; locale?: string; timezone?: string; role?: string };
 export type ThreadIdentityInput = { subject: string; participants: ThreadParticipant[]; messageId?: string; inReplyTo?: string | string[]; references?: string | string[]; rootMessageId?: string; replyTo?: string; conversationId?: string; provider?: string; mailbox?: string };
@@ -170,24 +171,4 @@ export function expandRecurrence(spec: RecurrenceSpec): RecurrenceInstance[] {
   return instances;
 }
 
-export const DEEP_PRIMITIVES_FIXTURES = {
-  thread: {
-    a: { subject: 'Re: Project sync', participants: [{ email: 'Abhay@Example.com' }, { email: 'jane@example.com' }], messageId: '<abc@1>', references: '<root@0>', inReplyTo: '<root@0>' },
-    b: { subject: 'project sync', participants: [{ email: 'jane@example.com' }, { email: 'abhay@example.com' }], messageId: '<def@2>', references: ['<root@0>', '<abc@1>'], inReplyTo: '<abc@1>' },
-  },
-  timezone: {
-    local: '2026-03-08T09:00:00',
-    timeZone: 'America/New_York',
-    expectedUtc: '2026-03-08T13:00:00.000Z',
-  },
-  attendees: [
-    { email: 'abhay@example.com', name: 'Abhay Mundhara', timezone: 'America/New_York', locale: 'en-GB' },
-    { email: 'jane@example.com', name: 'Jane Doe', role: 'required' },
-  ] satisfies Attendee[],
-  recurrence: {
-    startLocal: '2026-03-09T09:00:00',
-    timeZone: 'America/New_York',
-    rule: 'FREQ=WEEKLY;COUNT=3;BYDAY=MO,WE',
-    durationMinutes: 45,
-  } satisfies RecurrenceSpec,
-};
+export const DEEP_PRIMITIVES_FIXTURES = buildRaidingAiScenario({ now: Date.now() }).deepPrimitives;

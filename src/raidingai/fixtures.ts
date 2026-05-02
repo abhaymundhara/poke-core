@@ -1,409 +1,20 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { buildBehavioralModel, type BehavioralPattern, type UserBehaviorTheory } from '../memory/behavioral-theory';
-import type { BehavioralObservation } from '../memory/behavioral-learning';
+import { buildBehavioralModel } from '../memory/behavioral-theory';
+import { BehavioralLearningLayer, type BehavioralObservation, type BehavioralPattern } from '../memory/behavioral-learning';
 import { createDriftingClock } from '../runtime/clock';
 import type { Attendee, RecurrenceSpec, ThreadIdentityInput } from '../deep-primitives';
 import type { VisionFrame } from '../skills/computer-use';
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
 import type { MemoryFact } from '../memory/working-memory';
-
-type Rng = () => number;
-
-type ScenarioContext = {
-  seed: string;
-  now: number;
-  rng: Rng;
-  theory: UserBehaviorTheory;
-  label: string;
-  taskHint: string;
-  theme: string;
-  primarySurface: string;
-  secondarySurface: string;
-  mailDomain: string;
-  participantRoles: string[];
-};
-
-const SURFACES = ['inbox', 'compose pane', 'support thread', 'calendar sidebar', 'project board', 'document review'];
-const TONES = ['brief', 'professional', 'direct', 'careful', 'polite', 'structured'];
-const CHANNELS = ['email', 'whatsapp', 'discord', 'calendar', 'browser', 'chat'];
-const ACTORS = ['placement manager', 'university coordinator', 'project collaborator', 'family contact', 'support desk'];
-const STATUS = ['ready', 'drafting', 'reviewing', 'recovering', 'sent', 'queued'];
-const PHASES = ['compose', 'resolve', 'confirm', 'recover', 'verify'];
-const CONTEXT_VERBS = ['follow up', 'disambiguate', 'recover', 'confirm', 'summarize', 'route'];
-
-function hashText(...parts: string[]): string {
-  return createHash('sha256').update(parts.join('|')).digest('hex');
-}
-
-function seedFromInput(input?: { seed?: string; taskHint?: string; now?: number }): string {
-  const basis = [String(input?.seed ?? ''), String(input?.taskHint ?? ''), String(input?.now ?? Date.now()), randomUUID()].join('|');
-  return hashText(basis).slice(0, 24);
-}
-
-function createRng(seed: string): Rng {
-  let state = parseInt(seed.slice(0, 8), 16) || 0x6d2b79f5;
-  return () => {
-    state |= 0;
-    state = (state + 0x6d2b79f5) | 0;
-    let t = Math.imul(state ^ (state >>> 15), 1 | state);
-    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-function pick<T>(rng: Rng, values: readonly T[]): T {
-  return values[Math.floor(rng() * values.length) % values.length];
-}
-
-function pickMany<T>(rng: Rng, values: readonly T[], count: number): T[] {
-  const pool = [...values];
-  const out: T[] = [];
-  while (pool.length > 0 && out.length < count) {
-    const index = Math.floor(rng() * pool.length);
-    const [value] = pool.splice(index, 1);
-    out.push(value);
-  }
-  return out;
-}
-
-function slug(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '') || 'scenario';
-}
-
-function titleCase(value: string): string {
-  return value.split(/[-_\s]+/).filter(Boolean).map((token) => token.charAt(0).toUpperCase() + token.slice(1)).join(' ');
-}
-
-function buildObservations(seed: string, rng: Rng): BehavioralObservation[] {
-  const base = Date.now();
-  const surfaces = pickMany(rng, SURFACES, 3);
-  const tone = pickMany(rng, TONES, 3);
-  const channels = pickMany(rng, CHANNELS, 2);
-  const actors = pickMany(rng, ACTORS, 2);
-  const verbs = pickMany(rng, CONTEXT_VERBS, 3);
-  const status = pickMany(rng, STATUS, 2);
-
-  return [
-    {
-      subject: surfaces[0],
-      value: tone[0] + ' replies with bullets and explicit next steps',
-      category: 'tone',
-      source: 'scenario-seed',
-      confidence: 0.95,
-      observedAt: base - 14_000,
-      evidence: [tone[0], 'bullets', 'next steps', 'formal'],
-      context: { seed, focus: surfaces[0] },
-    },
-    {
-      subject: channels[0],
-      value: 'ongoing coordination migrates to ' + channels[0] + ' while formal updates stay in email',
-      category: 'channel',
-      source: 'scenario-seed',
-      confidence: 0.9,
-      observedAt: base - 22_000,
-      evidence: [channels[0], 'email', 'ongoing', 'formal'],
-      context: { seed, focus: channels[0] },
-    },
-    {
-      subject: actors[0],
-      value: 'keeps a professional boundary with ' + actors[0] + ' contacts and notes hierarchy clearly',
-      category: 'relationship',
-      source: 'scenario-seed',
-      confidence: 0.88,
-      observedAt: base - 31_000,
-      evidence: [actors[0], 'professional', 'hierarchy'],
-      context: { seed, focus: actors[0] },
-    },
-    {
-      subject: surfaces[1],
-      value: 'uses ' + tone[1] + ' update style when the task requires a short procedural handoff',
-      category: 'preference',
-      source: 'scenario-seed',
-      confidence: 0.86,
-      observedAt: base - 39_000,
-      evidence: [surfaces[1], 'procedural', 'handoff'],
-      context: { seed, focus: surfaces[1] },
-    },
-    {
-      subject: verbs[0],
-      value: 'prefers to ' + verbs[0] + ' through a visible sequence of checks before marking completion',
-      category: 'signal',
-      source: 'scenario-seed',
-      confidence: 0.83,
-      observedAt: base - 46_000,
-      evidence: [verbs[0], 'checks', 'completion'],
-      context: { seed, focus: verbs[0] },
-    },
-    {
-      subject: status[0],
-      value: 'moves from ' + status[0] + ' to ' + status[1] + ' once the response path is stable',
-      category: 'habit',
-      source: 'scenario-seed',
-      confidence: 0.79,
-      observedAt: base - 55_000,
-      evidence: [status[0], status[1], 'stable'],
-      context: { seed, focus: status.join('/') },
-    },
-  ];
-}
-
-function buildPatterns(observations: BehavioralObservation[], rng: Rng): BehavioralPattern[] {
-  return observations.map((observation, index) => ({
-    key: hashText(observation.subject, observation.value, String(index)).slice(0, 24),
-    category: observation.category,
-    subject: observation.subject,
-    value: observation.value,
-    evidenceCount: Math.max(1, observation.evidence?.length ?? 1),
-    sourceCount: 1 + (index % 2),
-    confidence: Number(Math.min(0.99, observation.confidence + (rng() * 0.05)).toFixed(3)),
-    firstObservedAt: observation.observedAt - 120_000,
-    lastObservedAt: observation.observedAt,
-    sources: [observation.source, 'scenario-generator'].slice(0, 2),
-    examples: [...(observation.evidence ?? []).slice(0, 3), observation.value].filter(Boolean),
-    contradictionScore: Number((0.02 + rng() * 0.18).toFixed(3)),
-  }));
-}
-
-function buildTheory(seed: string, inputNow: number, rng: Rng): UserBehaviorTheory {
-  const observations = buildObservations(seed, rng);
-  const patterns = buildPatterns(observations, rng);
-  const facts: MemoryFact[] = observations.map((observation, index) => ({
-    key: slug([observation.category, observation.subject, String(index), seed.slice(0, 6)].join('-')),
-    value: observation.value,
-    confidence: observation.confidence,
-    source: observation.source,
-    updatedAt: inputNow - index * 13_000,
-  }));
-  const model = buildBehavioralModel({ now: inputNow, observations, facts, patterns, priorTheory: null });
-  return model.theory;
-}
-
-function deriveScenarioContext(input?: { seed?: string; taskHint?: string; now?: number }): ScenarioContext {
-  const seed = seedFromInput(input);
-  const rng = createRng(seed);
-  const now = input?.now ?? Date.now();
-  const theory = buildTheory(seed, now, rng);
-  const axes = theory.latentAxes.slice(0, 3).map((axis) => slug(axis.axis + '-' + axis.direction)).filter(Boolean);
-  const primaryAxis = axes[0] ?? slug(pick(rng, TONES));
-  const secondaryAxis = axes[1] ?? slug(pick(rng, CHANNELS));
-  const taskHint = input?.taskHint && input.taskHint.trim().length > 0 ? input.taskHint.trim() : titleCase(primaryAxis + ' ' + secondaryAxis);
-  const label = slug([taskHint, primaryAxis, seed.slice(0, 8)].join('-'));
-  const theme = titleCase([pick(rng, TONES), pick(rng, ACTORS), pick(rng, PHASES)].join(' '));
-  const primarySurface = pick(rng, SURFACES);
-  const secondarySurface = pick(rng, SURFACES.filter((surface) => surface !== primarySurface));
-  const participantRoles = pickMany(rng, ACTORS, 2);
-  const mailDomain = slug(label + '.mail') + '.local';
-  return { seed, now, rng, theory, label, taskHint, theme, primarySurface, secondarySurface, mailDomain, participantRoles };
-}
-
-function hashToId(...parts: string[]): string {
-  return hashText(...parts).slice(0, 20);
-}
-
-function buildEmail(localPart: string, domain: string): string {
-  return localPart.replace(/[^a-z0-9.-]+/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '') + '@' + domain;
-}
-
-function buildThreadIdentity(context: ScenarioContext, stage: string, participants: ThreadIdentityInput['participants'], baseSubject: string, rootChain?: string): ThreadIdentityInput {
-  const messageId = '<' + hashToId(context.seed, context.label, stage, 'message') + '@' + context.mailDomain + '>';
-  const rootMessageId = rootChain ?? '<' + hashToId(context.seed, context.label, 'root') + '@' + context.mailDomain + '>';
-  return {
-    subject: baseSubject,
-    participants,
-    messageId,
-    rootMessageId,
-    inReplyTo: rootMessageId,
-    references: [rootMessageId],
-    provider: 'gmail',
-    mailbox: 'primary',
-  };
-}
-
-function buildParticipants(context: ScenarioContext): ThreadIdentityInput['participants'] {
-  return context.participantRoles.map((role, index) => ({
-    email: buildEmail(role + '.' + index + '.' + context.label, context.mailDomain),
-    name: titleCase(role),
-    role: 'required',
-  }));
-}
-
-type UiNode = {
-  role: string;
-  label: string;
-  name: string;
-  children: UiNode[];
-  attrs: Record<string, string>;
-  hidden?: boolean;
-};
-
-function createNode(role: string, label: string, name: string, attrs: Record<string, string> = {}, children: UiNode[] = [], hidden = false): UiNode {
-  return { role, label, name, attrs, children, hidden };
-}
-
-function flattenText(node: UiNode): string[] {
-  const current = [node.label, node.name, node.attrs['aria-description'], node.attrs['placeholder']].filter(Boolean) as string[];
-  const childText = node.children.flatMap((child) => flattenText(child));
-  return [...current, ...childText].filter(Boolean);
-}
-
-function serializeNode(node: UiNode): string {
-  const attrs = [
-    'role="' + node.role + '"',
-    'data-name="' + node.name + '"',
-    'aria-label="' + node.label + '"',
-    ...Object.entries(node.attrs).map(([key, value]) => key + '="' + value + '"'),
-    node.hidden ? 'hidden="true"' : '',
-  ].filter(Boolean).join(' ');
-  const childMarkup = node.children.map((child) => serializeNode(child)).join('');
-  return '<section ' + attrs + '>' + childMarkup + '</section>';
-}
-
-function selectorsFromNode(node: UiNode): string[] {
-  const base = [
-    '[role="' + node.role + '"]',
-    '[data-name="' + node.name + '"]',
-    '[aria-label="' + node.label + '"]',
-  ];
-  return [...new Set([...base, ...Object.entries(node.attrs).flatMap(([key, value]) => ['[' + key + '="' + value + '"]'])])];
-}
-
-function buildUiTree(context: ScenarioContext, mode: 'ready' | 'drift' | 'recovered'): UiNode {
-  const label = context.theme + ' · ' + titleCase(context.primarySurface);
-  const detail = context.theory.crossContextGeneralizations.slice(0, 2).map((entry) => entry.generalization).join(' ');
-  const statusLabel = mode === 'drift' ? 'overlay active' : mode === 'recovered' ? 'compose restored' : 'draft ready';
-  const saveLabel = mode === 'drift' ? 'Resolve overlay' : 'Save draft';
-  const root = createNode(
-    'application',
-    label,
-    'root-' + mode,
-    { 'data-scenario': context.label, 'data-mode': mode },
-    [
-      createNode('banner', context.taskHint, 'banner-' + mode, { 'data-section': 'header' }, [
-        createNode('heading', context.theme, 'headline-' + mode, { level: '1' }),
-        createNode('status', statusLabel, 'status-' + mode, { 'aria-live': 'polite' }),
-      ]),
-      createNode('main', detail || context.theory.summary, 'main-' + mode, { 'data-surface': context.primarySurface }, [
-        createNode('form', 'Compose message', 'compose-form-' + mode, { action: '/drafts' }, [
-          createNode('textbox', 'Search or route the message', 'search-' + mode, { placeholder: 'Search ' + context.secondarySurface, 'aria-description': context.theory.summary }),
-          createNode('textbox', 'Draft body', 'body-' + mode, { placeholder: 'Write the update' }),
-          createNode('button', saveLabel, 'save-' + mode, { type: 'submit', 'data-action': 'save' }),
-          createNode('button', 'Skip' + ' ' + context.secondarySurface, 'skip-' + mode, { type: 'button', 'data-action': 'skip' }),
-        ]),
-        createNode('list', 'Activity feed', 'feed-' + mode, { 'data-section': 'feed' }, [
-          createNode('listitem', 'Observed ' + context.theory.latentAxes.length + ' stable signals', 'signal-1-' + mode, { 'data-weight': 'high' }),
-          createNode('listitem', 'Recovered from ' + context.theory.crossContextGeneralizations.length + ' context shifts', 'signal-2-' + mode, { 'data-weight': 'medium' }),
-        ]),
-      ]),
-    ],
-  );
-  if (mode === 'drift') {
-    root.children.push(
-      createNode('dialog', 'Context overlay', 'overlay-' + mode, { 'aria-modal': 'true', 'data-overlay': 'help' }, [
-        createNode('paragraph', 'Navigation drift detected', 'overlay-copy-' + mode, { 'data-state': 'stale' }),
-        createNode('button', 'Return to compose', 'overlay-return-' + mode, { type: 'button', 'data-action': 'return' }),
-      ])
-    );
-  }
-  return root;
-}
-
-function buildFrameFromTree(context: ScenarioContext, mode: 'ready' | 'drift' | 'recovered'): VisionFrame {
-  const tree = buildUiTree(context, mode);
-  const visibleText = flattenText(tree).join(' ').replace(/\s+/g, ' ').trim();
-  const noisyText = [
-    visibleText,
-    context.theory.summary,
-    context.theory.persistentGoals.map((goal) => goal.goal).join(' '),
-    context.theory.crossContextGeneralizations.map((entry) => entry.generalization).join(' '),
-  ].join(' ').replace(/\s+/g, ' ').trim();
-  return {
-    id: hashToId(context.seed, mode, context.label),
-    ocr: noisyText,
-    dom: serializeNode(tree),
-    selectors: [...new Set([tree, ...tree.children, ...tree.children.flatMap((child) => child.children)].flatMap((node) => selectorsFromNode(node)))],
-    activeTabId: hashToId(context.seed, context.label, 'tab', mode),
-    activeWindowId: hashToId(context.seed, context.label, 'window', mode),
-    viewport: { width: 1280, height: mode === 'drift' ? 792 : 816 },
-  };
-}
-
-function buildComputerUseFrames(context: ScenarioContext): VisionFrame[] {
-  return [buildFrameFromTree(context, 'ready'), buildFrameFromTree(context, 'drift'), buildFrameFromTree(context, 'recovered')];
-}
-
-function synthesizeMemoryFacts(context: ScenarioContext): MemoryFact[] {
-  const now = context.now;
-  return context.theory.latentAxes.slice(0, 6).map((axis, index) => ({
-    key: hashToId(context.seed, 'fact', axis.axis, axis.direction, String(index)),
-    value: axis.axis + ' bias favors ' + axis.direction + ' communication across ' + context.primarySurface + ' and ' + context.secondarySurface,
-    confidence: Number(Math.min(0.99, 0.72 + axis.confidence * 0.2).toFixed(3)),
-    source: 'behavioral-theory',
-    updatedAt: now - index * 17_000,
-  }));
-}
-
-function synthesizeEpisodes(context: ScenarioContext, threadInputs: ThreadIdentityInput[]): EpisodicMemoryItem[] {
-  const goals = context.theory.persistentGoals.length > 0 ? context.theory.persistentGoals : [{ goal: context.theory.summary, confidence: 0.5, evidence: [] }];
-  return goals.slice(0, 3).map((goal, index) => ({
-    id: 'ep-' + hashToId(context.seed, goal.goal, String(index)),
-    taskId: 'task-' + hashToId(context.seed, context.label, 'task', String(index)),
-    category: index === 0 ? 'decision' : index === 1 ? 'preference' : 'correction',
-    summary: goal.goal + ' while preserving ' + context.theme.toLowerCase() + ' alignment through ' + context.primarySurface,
-    signals: [context.label, context.primarySurface, context.secondarySurface, ...threadInputs.flatMap((thread) => thread.participants.map((participant) => participant.email))].slice(0, 5),
-    score: Number(Math.min(0.99, 0.82 + goal.confidence * 0.1).toFixed(3)),
-    createdAt: context.now - index * 26_000,
-  }));
-}
-
-function synthesizeThreadInputs(context: ScenarioContext): { threadA: ThreadIdentityInput; threadB: ThreadIdentityInput } {
-  const participants = buildParticipants(context);
-  const topic = titleCase(context.theory.latentAxes.slice(0, 2).map((axis) => axis.axis).join(' '));
-  const subjectBase = 'Re: ' + context.taskHint + ' - ' + topic.toLowerCase();
-  const rootMessageId = '<' + hashToId(context.seed, context.label, 'root-message') + '@' + context.mailDomain + '>';
-  const threadA = buildThreadIdentity(context, 'thread-a', participants, subjectBase, rootMessageId);
-  const threadB = buildThreadIdentity(context, 'thread-b', participants, subjectBase, rootMessageId);
-  threadB.references = [rootMessageId, threadA.messageId].filter(Boolean) as string[];
-  threadB.inReplyTo = threadA.messageId;
-  threadB.rootMessageId = rootMessageId;
-  return { threadA, threadB };
-}
-
-function synthesizeRecurrence(context: ScenarioContext): RecurrenceSpec {
-  const weekday = pick(context.rng, ['MO', 'TU', 'WE', 'TH', 'FR'] as const);
-  const startHour = 8 + Math.floor(context.rng() * 4);
-  return {
-    startLocal: '2026-03-09T' + String(startHour).padStart(2, '0') + ':00:00',
-    timeZone: 'America/New_York',
-    rule: 'FREQ=WEEKLY;COUNT=3;BYDAY=' + weekday,
-    durationMinutes: 30 + Math.floor(context.rng() * 30),
-  };
-}
-
-function synthesizeAttendees(context: ScenarioContext): Attendee[] {
-  const participants = buildParticipants(context);
-  return participants.map((participant, index) => ({
-    email: participant.email,
-    name: participant.name,
-    timezone: index === 0 ? 'America/New_York' : 'Europe/London',
-    role: participant.role === 'required' ? 'required' : 'optional',
-  }));
-}
+import type { UserBehaviorTheory } from '../memory/behavioral-theory';
 
 export type RaidingAiScenario = {
   seed: string;
+  now: number;
   label: string;
   taskHint: string;
-  theme: string;
   theory: UserBehaviorTheory;
-  computerUse: {
-    frames: VisionFrame[];
-    keys: string[];
-    fallbackSelectors: string[];
-  };
+  computerUse: { frames: VisionFrame[]; keys: string[]; fallbackSelectors: string[] };
   deepPrimitives: {
     threadA: ThreadIdentityInput;
     threadB: ThreadIdentityInput;
@@ -411,10 +22,7 @@ export type RaidingAiScenario = {
     attendees: Attendee[];
     recurrence: RecurrenceSpec;
   };
-  memory: {
-    facts: MemoryFact[];
-    episodes: EpisodicMemoryItem[];
-  };
+  memory: { facts: MemoryFact[]; episodes: EpisodicMemoryItem[] };
   traces: Array<{
     id: string;
     kind: 'computer-use' | 'thread-identity' | 'memory' | 'planner';
@@ -429,75 +37,351 @@ export type RaidingAiScenario = {
   }>;
 };
 
+type Rng = () => number;
+
+type NodeSpec = { role: string; label: string; name: string; attrs: Record<string, string>; children: NodeSpec[] };
+
+function hashText(...parts: string[]): string {
+  return createHash('sha256').update(parts.join('|')).digest('hex');
+}
+
+function seedFromInput(input?: { seed?: string; taskHint?: string; now?: number }): string {
+  return hashText(String(input?.seed ?? ''), String(input?.taskHint ?? ''), String(input?.now ?? Date.now()), randomUUID()).slice(0, 24);
+}
+
+function createRng(seed: string): Rng {
+  let state = parseInt(seed.slice(0, 8), 16) || 0x6d2b79f5;
+  return () => {
+    state |= 0;
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function token(seed: string, scope: string, index = 0): string {
+  return hashText(seed, scope, String(index)).slice(0, 10);
+}
+
+function cleanText(value: string): string {
+  return value.replace(/\s+/g, ' ').replace(/\s*([:;,.])\s*/g, '$1 ').trim();
+}
+
+function words(value: string): string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter((entry) => entry.length > 2);
+}
+
+function buildBootstrapObservations(seed: string, rng: Rng): BehavioralObservation[] {
+  const channels = ['tone', 'channel', 'relationship', 'preference', 'signal', 'habit'] as const;
+  return channels.map((category, index) => {
+    const subject = token(seed, 'subject', index);
+    const value = [token(seed, 'value', index), token(seed, 'value', index + 1), token(seed, 'value', index + 2)].join(' ');
+    return {
+      subject,
+      value,
+      category,
+      source: 'scenario-' + token(seed, 'source', index),
+      confidence: Number((0.72 + rng() * 0.23).toFixed(3)),
+      observedAt: Date.now() - (index + 1) * 17_000,
+      evidence: [subject, value, token(seed, 'evidence', index)],
+      context: { seed, index },
+    };
+  });
+}
+
+function buildBootstrapFacts(observations: BehavioralObservation[], seed: string, now: number): MemoryFact[] {
+  return observations.map((observation, index) => ({
+    key: hashText(seed, observation.subject, observation.category, String(index)).slice(0, 20),
+    value: `${observation.subject} ${observation.value}`.trim(),
+    confidence: observation.confidence,
+    source: observation.source,
+    updatedAt: now - index * 11_000,
+  }));
+}
+
+function buildBootstrapPatterns(observations: BehavioralObservation[]): BehavioralPattern[] {
+  return observations.map((observation, index) => ({
+    key: hashText(observation.subject, observation.value, String(index)).slice(0, 24),
+    category: observation.category,
+    subject: observation.subject,
+    value: observation.value,
+    evidenceCount: observation.evidence?.length ?? 0,
+    sourceCount: 1,
+    confidence: observation.confidence,
+    firstObservedAt: observation.observedAt - 42_000,
+    lastObservedAt: observation.observedAt,
+    sources: [observation.source],
+    examples: observation.evidence?.slice(0, 3) ?? [],
+    contradictionScore: Number((0.04 + (index % 3) * 0.03).toFixed(3)),
+  }));
+}
+
+function theoryWords(theory: UserBehaviorTheory): string[] {
+  return [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].flatMap(words);
+}
+
+function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number, min = 4, max = 7): string {
+  const pool = theoryWords(theory);
+  const count = Math.max(min, Math.min(max, 3 + (parseInt(token(seed, scope, index).slice(0, 2), 16) % (max - min + 1))));
+  const parts: string[] = [];
+  for (let i = 0; i < count && pool.length > 0; i += 1) {
+    const next = pool[(parseInt(token(seed, scope, index + i).slice(0, 2), 16) + i) % pool.length];
+    if (next && !parts.includes(next)) parts.push(next);
+  }
+  const hashed = token(seed, scope, index).match(/.{1,4}/g)?.slice(0, 2) ?? [];
+  return cleanText([...parts, ...hashed].join(' '));
+}
+
+function buildTheory(seed: string, now: number, rng: Rng): UserBehaviorTheory {
+  const observations = buildBootstrapObservations(seed, rng);
+  const facts = buildBootstrapFacts(observations, seed, now);
+  const patterns = buildBootstrapPatterns(observations);
+  const bootstrap = buildBehavioralModel({ now, observations, facts, patterns, priorTheory: null });
+  const learning = new BehavioralLearningLayer({ storagePath: `.poke-core/generated/${seed}/behavioral-state.json` });
+  const learned = learning.learn({ now, workingFacts: facts, episodicItems: synthesizeEpisodesFromTheory(bootstrap.theory, seed, now), sourceDocuments: [] });
+  return learned.theory ?? bootstrap.theory;
+}
+
+function synthesizeEpisodesFromTheory(theory: UserBehaviorTheory, seed: string, now: number): EpisodicMemoryItem[] {
+  const source = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
+  return source.slice(0, 3).map((text, index) => ({
+    id: `ep-${hashText(seed, text, String(index)).slice(0, 18)}`,
+    taskId: `task-${hashText(seed, 'task', String(index)).slice(0, 18)}`,
+    category: index === 0 ? 'decision' : index === 1 ? 'preference' : 'correction',
+    summary: phraseFromText(text, seed, index),
+    signals: words(text).slice(0, 5),
+    score: Number((0.78 + (index * 0.04)).toFixed(3)),
+    createdAt: now - index * 19_000,
+  }));
+}
+
+function phraseFromText(text: string, seed: string, index: number): string {
+  const tokens = words(text);
+  const extra = token(seed, 'phrase', index).match(/.{1,4}/g) ?? [];
+  return cleanText([...tokens.slice(0, 5), ...extra.slice(0, 2)].join(' '));
+}
+
+function buildThreadIdentity(theory: UserBehaviorTheory, seed: string, scope: string, index: number, participants: ThreadIdentityInput['participants'], rootMessageId: string): ThreadIdentityInput {
+  const subject = phraseFromTheory(theory, seed, `${scope}-subject`, index);
+  return {
+    subject,
+    participants,
+    messageId: `<${hashText(seed, scope, 'message', String(index)).slice(0, 18)}@${hashText(seed, 'mail').slice(0, 12)}.local>`,
+    rootMessageId,
+    inReplyTo: rootMessageId,
+    references: [rootMessageId],
+    provider: hashText(seed, 'provider').slice(0, 8),
+    mailbox: hashText(seed, 'mailbox').slice(0, 8),
+  };
+}
+
+function buildParticipants(seed: string, theory: UserBehaviorTheory): ThreadIdentityInput['participants'] {
+  const pools = theoryWords(theory);
+  const names = pools.slice(0, 3).map((word, index) => ({
+    email: `${word.replace(/[^a-z0-9]+/g, '.').replace(/\.+/g, '.')}.${index}.${hashText(seed, 'email', String(index)).slice(0, 8)}@${hashText(seed, 'domain').slice(0, 10)}.local`,
+    name: cleanText(`${word} ${token(seed, 'name', index)}`),
+    role: 'required',
+  }));
+  return names.length > 0 ? names : [{ email: `${token(seed, 'email', 0)}@${hashText(seed, 'domain').slice(0, 10)}.local`, name: token(seed, 'name', 0), role: 'required' }];
+}
+
+function node(role: string, label: string, name: string, attrs: Record<string, string> = {}, children: NodeSpec[] = []): NodeSpec {
+  return { role, label, name, attrs, children };
+}
+
+function nodeText(spec: NodeSpec): string[] {
+  return [spec.label, spec.name, ...Object.values(spec.attrs)].flatMap(words).concat(spec.children.flatMap(nodeText));
+}
+
+function renderNode(spec: NodeSpec): string {
+  const attrs = [
+    `role="${spec.role}"`,
+    `data-name="${spec.name}"`,
+    `aria-label="${spec.label}"`,
+    ...Object.entries(spec.attrs).map(([key, value]) => `${key}="${value}"`),
+  ].join(' ');
+  return `<section ${attrs}>${spec.children.map(renderNode).join('')}</section>`;
+}
+
+function selectorsFor(spec: NodeSpec): string[] {
+  return [...new Set([
+    `[role="${spec.role}"]`,
+    `[data-name="${spec.name}"]`,
+    `[aria-label="${spec.label}"]`,
+    ...Object.entries(spec.attrs).map(([key, value]) => `[${key}="${value}"]`),
+    ...spec.children.flatMap(selectorsFor),
+  ])];
+}
+
+function buildUiFrames(theory: UserBehaviorTheory, seed: string): VisionFrame[] {
+  const modes = ['steady', 'drift', 'recover'];
+  return modes.map((mode, index) => {
+    const title = phraseFromTheory(theory, seed, `title-${mode}`, index);
+    const body = phraseFromTheory(theory, seed, `body-${mode}`, index + 1);
+    const overlay = mode === 'drift';
+    const tree = node(
+      'application',
+      title,
+      `root-${hashText(seed, mode).slice(0, 12)}`,
+      { 'data-scenario': hashText(seed, 'scenario').slice(0, 12), 'data-mode': mode },
+      [
+        node('banner', phraseFromTheory(theory, seed, `banner-${mode}`, index + 2), `banner-${mode}`,
+          { 'data-section': hashText(seed, 'banner').slice(0, 10) },
+          [
+            node('heading', title, `heading-${mode}`, { level: '1' }),
+            node('status', overlay ? phraseFromTheory(theory, seed, 'status-drift', index + 3) : phraseFromTheory(theory, seed, 'status-steady', index + 3), `status-${mode}`, { 'aria-live': 'polite' }),
+          ]),
+        node('main', body, `main-${mode}`, { 'data-surface': hashText(seed, 'surface').slice(0, 10) }, [
+          node('form', phraseFromTheory(theory, seed, `form-${mode}`, index + 4), `form-${mode}`, { action: `/${hashText(seed, 'draft').slice(0, 8)}` }, [
+            node('textbox', phraseFromTheory(theory, seed, `search-${mode}`, index + 5), `search-${mode}`, { placeholder: phraseFromTheory(theory, seed, `placeholder-${mode}`, index + 6), 'aria-description': theory.summary }),
+            node('textbox', phraseFromTheory(theory, seed, `bodybox-${mode}`, index + 7), `body-${mode}`, { placeholder: phraseFromTheory(theory, seed, `compose-${mode}`, index + 8) }),
+            node('button', phraseFromTheory(theory, seed, `save-${mode}`, index + 9), `save-${mode}`, { type: 'submit', 'data-action': hashText(seed, 'save').slice(0, 10) }),
+          ]),
+        ]),
+      ],
+    );
+    if (overlay) {
+      tree.children.push(node('dialog', phraseFromTheory(theory, seed, 'overlay', index + 10), `overlay-${mode}`, { 'aria-modal': 'true', 'data-overlay': hashText(seed, 'overlay').slice(0, 10) }, [
+        node('paragraph', phraseFromTheory(theory, seed, 'overlay-copy', index + 11), `overlay-copy-${mode}`),
+        node('button', phraseFromTheory(theory, seed, 'overlay-return', index + 12), `overlay-return-${mode}`, { type: 'button', 'data-action': hashText(seed, 'return').slice(0, 10) }),
+      ]));
+    }
+    return {
+      id: hashText(seed, mode).slice(0, 20),
+      ocr: cleanText([...nodeText(tree), theory.summary, ...theory.persistentGoals.map((goal) => goal.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].join(' ')),
+      dom: renderNode(tree),
+      selectors: selectorsFor(tree),
+      activeTabId: hashText(seed, 'tab', mode).slice(0, 18),
+      activeWindowId: hashText(seed, 'window', mode).slice(0, 18),
+      viewport: { width: 1280, height: overlay ? 790 : 816 },
+    };
+  });
+}
+
+function buildMemoryFacts(theory: UserBehaviorTheory, seed: string, now: number): MemoryFact[] {
+  return theory.latentAxes.slice(0, 6).map((axis, index) => ({
+    key: hashText(seed, 'fact', axis.axis, String(index)).slice(0, 20),
+    value: cleanText(`${axis.axis} ${axis.direction} ${theory.persistentGoals[index % Math.max(1, theory.persistentGoals.length)]?.goal ?? theory.summary}`),
+    confidence: Number(Math.min(0.99, 0.7 + axis.confidence * 0.2).toFixed(3)),
+    source: hashText(seed, 'source', String(index)).slice(0, 12),
+    updatedAt: now - index * 17_000,
+  }));
+}
+
+function buildEpisodes(theory: UserBehaviorTheory, seed: string, now: number): EpisodicMemoryItem[] {
+  return [...theory.persistentGoals, ...theory.crossContextGeneralizations].slice(0, 3).map((entry, index) => ({
+    id: `ep-${hashText(seed, entry.goal ?? entry.generalization, String(index)).slice(0, 18)}`,
+    taskId: `task-${hashText(seed, 'task', String(index)).slice(0, 18)}`,
+    category: index === 0 ? 'decision' : index === 1 ? 'preference' : 'correction',
+    summary: cleanText(`${index === 0 ? entry.goal : entry.generalization} ${phraseFromText(entry.goal ?? entry.generalization, seed, index)}`),
+    signals: words(entry.goal ?? entry.generalization).slice(0, 5),
+    score: Number((0.8 + index * 0.05).toFixed(3)),
+    createdAt: now - index * 23_000,
+  }));
+}
+
+function phraseFromText(text: string, seed: string, index: number): string {
+  return cleanText([...words(text).slice(0, 5), ...((token(seed, 'phrase', index).match(/.{1,4}/g) ?? []).slice(0, 2))].join(' '));
+}
+
+function buildRecurrence(seed: string): RecurrenceSpec {
+  const day = ['MO', 'TU', 'WE', 'TH', 'FR'][parseInt(token(seed, 'day').slice(0, 2), 16) % 5];
+  const hour = 8 + (parseInt(token(seed, 'hour').slice(0, 2), 16) % 4);
+  return { startLocal: `2026-03-09T${String(hour).padStart(2, '0')}:00:00`, timeZone: 'America/New_York', rule: `FREQ=WEEKLY;COUNT=3;BYDAY=${day}`, durationMinutes: 30 + (parseInt(token(seed, 'duration').slice(0, 2), 16) % 30) };
+}
+
+function buildTimezone(seed: string): { local: string; timeZone: string; expectedUtc: string } {
+  const hour = 8 + (parseInt(token(seed, 'tz-hour').slice(0, 2), 16) % 3);
+  const minute = [0, 15, 30, 45][parseInt(token(seed, 'tz-minute').slice(0, 2), 16) % 4];
+  return { local: `2026-03-08T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`, timeZone: 'America/New_York', expectedUtc: `2026-03-08T${String(hour + 4).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00.000Z` };
+}
+
+function buildTaskHint(theory: UserBehaviorTheory, seed: string): string {
+  return cleanText(phraseFromText(`${theory.summary} ${theory.persistentGoals.map((goal) => goal.goal).join(' ')} ${theory.crossContextGeneralizations.map((entry) => entry.generalization).join(' ')}`, seed, 0));
+}
+
+function buildLabel(seed: string, taskHint: string): string {
+  return hashText(seed, taskHint).slice(0, 16);
+}
+
+function buildLearningLayer(seed: string): BehavioralLearningLayer {
+  return new BehavioralLearningLayer({ storagePath: `.poke-core/generated/${seed}/behavioral-state.json` });
+}
+
 export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string; now?: number } = {}): RaidingAiScenario {
   const seed = seedFromInput(input);
   const rng = createRng(seed);
   const now = input.now ?? Date.now();
-  const context = deriveScenarioContext({ seed, taskHint: input.taskHint, now });
-  const threadInputs = synthesizeThreadInputs(context);
-  const frames = buildComputerUseFrames(context);
-  const facts = synthesizeMemoryFacts(context);
-  const episodes = synthesizeEpisodes(context, [threadInputs.threadA, threadInputs.threadB]);
-  const recurrence = synthesizeRecurrence(context);
-  const attendees = synthesizeAttendees(context);
-  const timezoneHour = 8 + Math.floor(rng() * 3);
-  const timezoneMinute = Math.floor(rng() * 4) * 15;
+  const initialObservations = buildBootstrapObservations(seed, rng);
+  const initialFacts = buildBootstrapFacts(initialObservations, seed, now);
+  const initialPatterns = buildBootstrapPatterns(initialObservations);
+  const bootstrap = buildBehavioralModel({ now, observations: initialObservations, facts: initialFacts, patterns: initialPatterns, priorTheory: null });
+  const learning = buildLearningLayer(seed);
+  const learned = learning.learn({ now, workingFacts: initialFacts, episodicItems: synthesizeEpisodesFromTheory(bootstrap.theory, seed, now), sourceDocuments: [] });
+  const theory = learned.theory ?? bootstrap.theory;
+  const taskHint = cleanText(input.taskHint?.trim() || buildTaskHint(theory, seed));
+  const label = buildLabel(seed, taskHint);
+  const frames = buildUiFrames(theory, seed);
+  const participants = buildParticipants(seed, theory);
+  const threadRoot = `<${hashText(seed, 'root-message').slice(0, 18)}@${hashText(seed, 'mail').slice(0, 12)}.local>`;
+  const threadA = buildThreadIdentity(theory, seed, 'thread-a', 0, participants, threadRoot);
+  const threadB = buildThreadIdentity(theory, seed, 'thread-b', 1, participants, threadRoot);
+  threadB.references = [threadRoot, threadA.messageId].filter(Boolean) as string[];
+  threadB.inReplyTo = threadA.messageId;
+  const facts = buildMemoryFacts(theory, seed, now);
+  const episodes = buildEpisodes(theory, seed, now);
+  const recurrence = buildRecurrence(seed);
+  const timezone = buildTimezone(seed);
+  const attendees = participants.map((participant, index) => ({
+    email: participant.email,
+    name: participant.name,
+    timezone: index === 0 ? 'America/New_York' : 'Europe/London',
+    role: 'required',
+  }));
 
   return {
-    seed: context.seed,
-    label: context.label,
-    taskHint: context.taskHint,
-    theme: context.theme,
-    theory: context.theory,
+    seed,
+    now,
+    label,
+    taskHint,
+    theory,
     computerUse: {
       frames,
-      keys: pickMany(rng, ['tab', 'enter', 'ctrl+tab', 'shift+tab', 'esc'], 3),
+      keys: [hashText(seed, 'key-0').slice(0, 4), hashText(seed, 'key-1').slice(0, 4), hashText(seed, 'key-2').slice(0, 4)],
       fallbackSelectors: frames[0]?.selectors.slice(0, 2) ?? [],
     },
-    deepPrimitives: {
-      threadA: threadInputs.threadA,
-      threadB: threadInputs.threadB,
-      timezone: {
-        local: '2026-03-08T' + String(timezoneHour).padStart(2, '0') + ':' + String(timezoneMinute).padStart(2, '0') + ':00',
-        timeZone: 'America/New_York',
-        expectedUtc: '2026-03-08T' + String(timezoneHour + 4).padStart(2, '0') + ':' + String(timezoneMinute).padStart(2, '0') + ':00.000Z',
-      },
-      attendees,
-      recurrence,
-    },
-    memory: {
-      facts,
-      episodes,
-    },
+    deepPrimitives: { threadA, threadB, timezone, attendees, recurrence },
+    memory: { facts, episodes },
     traces: [
       {
-        id: 'trace-' + hashToId(seed, 'computer-use'),
+        id: `trace-${hashText(seed, 'computer-use').slice(0, 18)}`,
         kind: 'computer-use',
-        description: context.taskHint + ' | procedural UI synthesis with drift and recovery',
+        description: cleanText(`${taskHint} ${phraseFromText(theory.summary, seed, 1)}`),
         frames,
         fallbackSelectors: frames[0]?.selectors.slice(0, 2) ?? [],
         expected: { driftRecoveries: 1, frameCount: 3, contextRich: true },
       },
       {
-        id: 'trace-' + hashToId(seed, 'thread-identity'),
+        id: `trace-${hashText(seed, 'thread-identity').slice(0, 18)}`,
         kind: 'thread-identity',
-        description: context.taskHint + ' | header-anchored thread hashing from real metadata',
-        threadInputs: [threadInputs.threadA, threadInputs.threadB],
+        description: cleanText(`${taskHint} ${phraseFromText(theory.crossContextGeneralizations[0]?.generalization ?? theory.summary, seed, 2)}`),
+        threadInputs: [threadA, threadB],
         expected: { distinctThreads: true, headerAnchored: true },
       },
       {
-        id: 'trace-' + hashToId(seed, 'memory'),
+        id: `trace-${hashText(seed, 'memory').slice(0, 18)}`,
         kind: 'memory',
-        description: context.taskHint + ' | learned user context synthesized from behavior theory patterns',
+        description: cleanText(`${taskHint} ${phraseFromText(theory.persistentGoals[0]?.goal ?? theory.summary, seed, 3)}`),
         workingFacts: facts,
         episodicItems: episodes,
         expected: { factsPersisted: true, episodesPersisted: true, theoryAligned: true },
       },
       {
-        id: 'trace-' + hashToId(seed, 'planner'),
+        id: `trace-${hashText(seed, 'planner').slice(0, 18)}`,
         kind: 'planner',
-        description: context.taskHint + ' | recovery-aware planning seeded from theory summary',
-        objective: 'Follow the synthesized context, recover the UI if it drifts, disambiguate the thread, and preserve the learned communication style.',
+        description: cleanText(`${taskHint} ${phraseFromText(theory.summary, seed, 4)}`),
+        objective: cleanText(`${phraseFromText(theory.summary, seed, 5)} ${phraseFromText(theory.persistentGoals[0]?.goal ?? theory.summary, seed, 6)} ${phraseFromText(theory.crossContextGeneralizations[0]?.generalization ?? theory.summary, seed, 7)}`),
         expected: { recoveryAware: true, multiStep: true },
       },
     ],
@@ -506,3 +390,61 @@ export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string
 
 export const RAIDINGAI_CLOCK = createDriftingClock();
 export const RAIDINGAI_FIXTURES = buildRaidingAiScenario();
+
+function buildBootstrapObservations(seed: string, rng: Rng): BehavioralObservation[] {
+  const categories = ['tone', 'channel', 'relationship', 'preference', 'signal', 'habit'] as const;
+  return categories.map((category, index) => {
+    const subject = token(seed, 'subject', index);
+    const value = [token(seed, 'value', index), token(seed, 'value', index + 1), token(seed, 'value', index + 2)].join(' ');
+    return {
+      subject,
+      value,
+      category,
+      source: `scenario-${token(seed, 'source', index)}`,
+      confidence: Number((0.72 + rng() * 0.23).toFixed(3)),
+      observedAt: Date.now() - (index + 1) * 17_000,
+      evidence: [subject, value, token(seed, 'evidence', index)],
+      context: { seed, index },
+    };
+  });
+}
+
+function buildBootstrapFacts(observations: BehavioralObservation[], seed: string, now: number): MemoryFact[] {
+  return observations.map((observation, index) => ({
+    key: hashText(seed, observation.subject, observation.category, String(index)).slice(0, 20),
+    value: `${observation.subject} ${observation.value}`.trim(),
+    confidence: observation.confidence,
+    source: observation.source,
+    updatedAt: now - index * 11_000,
+  }));
+}
+
+function buildBootstrapPatterns(observations: BehavioralObservation[]): BehavioralPattern[] {
+  return observations.map((observation, index) => ({
+    key: hashText(observation.subject, observation.value, String(index)).slice(0, 24),
+    category: observation.category,
+    subject: observation.subject,
+    value: observation.value,
+    evidenceCount: observation.evidence?.length ?? 0,
+    sourceCount: 1,
+    confidence: observation.confidence,
+    firstObservedAt: observation.observedAt - 42_000,
+    lastObservedAt: observation.observedAt,
+    sources: [observation.source],
+    examples: observation.evidence?.slice(0, 3) ?? [],
+    contradictionScore: Number((0.04 + (index % 3) * 0.03).toFixed(3)),
+  }));
+}
+
+function synthesizeEpisodesFromTheory(theory: UserBehaviorTheory, seed: string, now: number): EpisodicMemoryItem[] {
+  const source = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
+  return source.slice(0, 3).map((text, index) => ({
+    id: `ep-${hashText(seed, text, String(index)).slice(0, 18)}`,
+    taskId: `task-${hashText(seed, 'task', String(index)).slice(0, 18)}`,
+    category: index === 0 ? 'decision' : index === 1 ? 'preference' : 'correction',
+    summary: phraseFromText(text, seed, index),
+    signals: words(text).slice(0, 5),
+    score: Number((0.78 + (index * 0.04)).toFixed(3)),
+    createdAt: now - index * 19_000,
+  }));
+}
