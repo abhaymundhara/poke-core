@@ -3,7 +3,7 @@ import { buildBehavioralModel } from '../memory/behavioral-theory';
 import { BehavioralLearningLayer, type BehavioralObservation, type BehavioralPattern, type LearnedBehaviorFact } from '../memory/behavioral-learning';
 import { createDriftingClock } from '../runtime/clock';
 import type { Attendee, RecurrenceSpec, ThreadIdentityInput } from '../deep-primitives';
-import type { VisionFrame } from '../skills/computer-use';
+type VisionFrame = { id: string; screenshot?: string; ocr?: string; dom?: string; selectors?: string[]; activeTabId?: string; activeWindowId?: string; viewport?: { width: number; height: number } };
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
 import type { MemoryFact } from '../memory/working-memory';
 import type { UserBehaviorTheory } from '../memory/behavioral-theory';
