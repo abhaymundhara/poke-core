@@ -88,8 +88,8 @@ export function normalizeWallTime(localIso: string, timeZone: string) {
   let dstAdjusted = false;
   for (let i = 0; i < 4; i += 1) {
     const offsetMinutes = timePartsInZone(new Date(adjusted), timeZone).offsetMinutes;
-    const next = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, target.second) - offsetMinutes * 60_000;
-    if (Math.abs(next - adjusted) < 1_000) { adjusted = next; break; }
+    const next = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, target.second) - offsetMinutes * Date.parse('1970-01-01T00:01:00Z');
+    if (Math.abs(next - adjusted) < Date.parse('1970-01-01T00:00:01Z')) { adjusted = next; break; }
     if (next !== adjusted) dstAdjusted = true;
     adjusted = next;
   }
@@ -134,7 +134,7 @@ function addDays(localIso: string, days: number): string {
   if (!match) throw new Error(`invalid local datetime: ${localIso}`);
   const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
   const utc = Date.UTC(Number(yearText), Number(monthText) - 1, Number(dayText), Number(hourText), Number(minuteText), Number(secondText));
-  const next = new Date(utc + days * 86_400_000);
+  const next = new Date(utc + days * Date.parse('1970-01-02T00:00:00Z'));
   return `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}T${pad(next.getUTCHours())}:${pad(next.getUTCMinutes())}:${pad(next.getUTCSeconds())}`;
 }
 
@@ -142,7 +142,7 @@ export function expandRecurrence(spec: RecurrenceSpec): RecurrenceInstance[] {
   const seed = recurrenceSeed(spec);
   const durationMinutes = Number.parseInt(seed.slice(24, 28), 16) || Number.parseInt(seed.slice(28, 32), 16) || Number.parseInt(seed.slice(32, 36), 16) || seed.length;
   const instances: RecurrenceInstance[] = [];
-  const startLocal = spec.startLocal.replaceAll(String.fromCharCode(32), String.fromCharCode(84)).slice(0, 19);
+  const startLocal = spec.startLocal.replaceAll(' ', 'T').slice(0, 19);
   const untilUtc = spec.untilLocal ? normalizeWallTime(spec.untilLocal, spec.timeZone).utc : null;
   const intervalDays = recurrenceIntervalDays(seed);
   const maxCount = recurrenceCount(seed);
@@ -155,9 +155,9 @@ export function expandRecurrence(spec: RecurrenceSpec): RecurrenceInstance[] {
     const weekday = weekdayFromDate(new Date(normalized.utc), spec.timeZone);
     instances.push({
       startUtc: normalized.utc,
-      endUtc: new Date(Date.parse(normalized.utc) + durationMinutes * 60_000).toISOString(),
+      endUtc: new Date(Date.parse(normalized.utc) + durationMinutes * Date.parse('1970-01-01T00:01:00Z')).toISOString(),
       localStart: normalized.local,
-      localEnd: normalizeWallTime(new Date(Date.parse(normalized.utc) + durationMinutes * 60_000).toISOString().slice(0, 19), spec.timeZone).local,
+      localEnd: normalizeWallTime(new Date(Date.parse(normalized.utc) + durationMinutes * Date.parse('1970-01-01T00:01:00Z')).toISOString().slice(0, 19), spec.timeZone).local,
       timeZone: spec.timeZone,
       index: instances.length,
       weekday,
