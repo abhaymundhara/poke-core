@@ -587,7 +587,7 @@ export class AutopilotLiveDaemon {
     for (const observation of [...web.observations, ...platform.observations]) this.deps.onObservation?.(observation);
     for (const signal of [...web.signals, ...platform.signals]) {
       this.deps.onSignal?.(signal);
-      if (signal.wakeMode === 'immediate' || signal.priority >= 0.8) wakeReasons.push(signal.reason);
+      if (signal.wakeMode === 'immediate' || signal.priority >= 0.8) wakeReasons.push(signal.reason ?? signal.key ?? signal.payload?.reason ?? signal.payload?.title ?? signal.source);
     }
     for (const event of platform.events) this.deps.onEvent?.(event);
     if (wakeReasons.length > 0) {

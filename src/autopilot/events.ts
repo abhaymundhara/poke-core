@@ -75,14 +75,8 @@ export function isHighFrequencySignal(signal: Pick<AutopilotSignal, 'key' | 'tag
 
 export function matchesSubscription(subscription: AutopilotSubscription, topic: string, payload: Record<string, unknown>): boolean {
   if (!subscription.enabled) return false;
-  let payloadStr = '';
-  try {
-    payloadStr = JSON.stringify(payload);
-  } catch {
-    payloadStr = '';
-  }
-  const haystack = normalizeToken(`${subscription.topic} ${topic} ${payloadStr}`);
-  return subscription.match.length === 0 || subscription.match.some((entry) => entry.trim().length > 0 && haystack.includes(normalizeToken(entry)));
+  const haystack = `${subscription.topic} ${topic} ${JSON.stringify(payload)}`.toLowerCase();
+  return subscription.match.length === 0 || subscription.match.some((entry) => entry.trim().length > 0 && haystack.includes(entry.toLowerCase()));
 }
 
 export function mergeWake(existing: AutopilotWake, incoming: AutopilotWake): AutopilotWake {
@@ -91,7 +85,6 @@ export function mergeWake(existing: AutopilotWake, incoming: AutopilotWake): Aut
   if (incoming.mode === 'debounce') {
     return {
       ...existing,
-      mode: incoming.mode,
       wakeAt: Math.max(existing.wakeAt, incoming.wakeAt),
       reason: incoming.reason || existing.reason,
       payload: { ...existing.payload, ...incoming.payload },
@@ -102,7 +95,6 @@ export function mergeWake(existing: AutopilotWake, incoming: AutopilotWake): Aut
 
   return {
     ...existing,
-    mode: incoming.mode,
     wakeAt: Math.min(existing.wakeAt, incoming.wakeAt),
     reason: incoming.reason || existing.reason,
     payload: { ...existing.payload, ...incoming.payload },

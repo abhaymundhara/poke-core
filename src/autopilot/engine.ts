@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createObservation, createSignal, createSubscription, signalKey, type AutopilotObservation, type AutopilotSignal, type AutopilotSignalSource, type AutopilotSubscription, type AutopilotWake } from './events';
 import { AutopilotSchedulerWorker, type SchedulerSnapshot } from './scheduler';
 import { AutopilotLiveDaemon, type GithubWatch, type LiveDaemonSnapshot, type LiveWebSignalBundle, type PlatformSignalBundle } from './live-signals';
-import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from '../search/index.ts';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER } from '../search/index.ts';
 import type { SearchPlan } from '../search/index.ts';
 
 export type AutopilotTrigger = {
@@ -198,14 +198,10 @@ export class AutopilotEngine {
         this.auditTrail.push(`live-wake:${reason}`);
         this.auditTrail.push(`live-wake-payload:${JSON.stringify(payload)}`);
       },
-      nluProvider: this.resolveLiveNluProvider(),
+      nluProvider: DEFAULT_LLM_SEMANTIC_NLU_PROVIDER,
     }, asNumber(this.context.daemonIntervalMs, 15_000));
     this.seed();
     if (this.context.liveDaemon !== false) this.startDaemon(asNumber(this.context.daemonIntervalMs, 15_000));
-  }
-
-  private resolveLiveNluProvider(): SemanticNluProvider {
-    return (this.context.nluProvider as SemanticNluProvider | undefined) ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   }
 
   private seed(): void {
