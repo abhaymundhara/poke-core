@@ -158,12 +158,15 @@ export class SearchSession {
       finalEvidenceGraph = evidenceGraph;
     }
 
+    const completedPlan = finalPlan as SearchPlan;
+    const completedEvidenceGraph = finalEvidenceGraph as SearchPlan['evidenceGraph'];
+
     if (learn) {
-      const score = clamp(finalEvidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + finalStrategy.lastScore * 0.2);
-      void this.learn(finalPlan.intent, finalStrategy, finalTrustedResults, score).catch(() => undefined);
+      const score = clamp(completedEvidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + finalStrategy.lastScore * 0.2);
+      void this.learn(completedPlan.intent, finalStrategy, finalTrustedResults, score).catch(() => undefined);
     }
 
-    return applyRuntimePipeline(finalPlan, this.state);
+    return applyRuntimePipeline(completedPlan, this.state);
   }
 
   plan(objective: string, context: Record<string, unknown> = {}): SearchPlan {
