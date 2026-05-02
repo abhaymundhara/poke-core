@@ -222,14 +222,92 @@ function scoreStrategy(intent: SearchIntent, strategy: SearchStrategyProfile, po
   return sourceScore * freshnessBoost * trustBoost * hopBoost * semanticBoost * historicalBoost;
 }
 
+type RuntimeCompositionHints = {
+  preferredStrategyId?: string;
+  emphasis?: string[];
+  queryAugments?: string[];
+  trustNotes?: string[];
+  pipelineNotes?: string[];
+  trustBoost?: number;
+  hopBoost?: number;
+  freshnessBoost?: number;
+  semanticBoost?: number;
+};
+
+function parseRuntimeCompositionHints(source?: string | null): RuntimeCompositionHints {
+  if (!source) return {};
+  const trimmed = source.trim();
+  if (!trimmed) return {};
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === 'object') return parsed as RuntimeCompositionHints;
+    } catch {
+      // fall through
+    }
+  }
+  const lower = trimmed.toLowerCase();
+  return {
+    preferredStrategyId: ['trust-first', 'multi-hop', 'freshness-first', 'semantic-first', 'blend'].find((strategyId) => lower.includes(strategyId)),
+    emphasis: ['trust', 'evidence', 'freshness', 'semantic', 'multi-hop', 'corroboration'].filter((token) => lower.includes(token)),
+    queryAugments: lower.includes('freshness') ? ['latest evidence'] : lower.includes('trust') ? ['cross-source verification'] : [],
+    trustNotes: lower.includes('trust') ? ['runtime:trust-adjustment'] : [],
+    pipelineNotes: lower.includes('multi-hop') ? ['multi-hop'] : lower.includes('freshness') ? ['freshness'] : [],
+  };
+}
+
+function rankStrategiesWithHints(intent: SearchIntent, policy: SearchPolicyState, fallbackChoose: typeof chooseStrategy, hints: RuntimeCompositionHints): SearchStrategyProfile {
+  const strategies = policy.strategies ?? [];
+  const base = fallbackChoose(intent, policy);
+  if (!strategies.length) return base;
+  const emphasis = new Set(hints.emphasis ?? []);
+  const ranked = strategies
+    .map((strategy) => {
+      const sourceScore = strategy.lastScore ?? 0.5;
+      const focusBoost = intent.focus === 'trust' ? strategy.trustBias : intent.focus === 'multi-hop' ? strategy.hopBias : intent.focus === 'semantic' ? strategy.semanticBias : 1;
+      const trustBoost = emphasis.has('trust') && strategy.id === 'trust-first' ? 1.15 : 1;
+      const hopBoost = emphasis.has('multi-hop') && strategy.id === 'multi-hop' ? 1.14 : 1;
+      const freshnessBoost = emphasis.has('freshness') && strategy.id === 'freshness-first' ? 1.12 : 1;
+      const semanticBoost = emphasis.has('semantic') && strategy.id === 'semantic-first' ? 1.12 : 1;
+      const preferredBoost = hints.preferredStrategyId && strategy.id === hints.preferredStrategyId ? 1.16 : 1;
+      const calibrated = sourceScore * focusBoost * trustBoost * hopBoost * freshnessBoost * semanticBoost * preferredBoost * (hints.trustBoost ?? 1) * (hints.hopBoost ?? 1) * (hints.freshnessBoost ?? 1) * (hints.semanticBoost ?? 1);
+      return { strategy, score: calibrated };
+    })
+    .sort((left, right) => right.score - left.score);
+  return ranked[0]?.strategy ?? base;
+}
+
+function applyRuntimePlanHints(plan: unknown, policy: SearchPolicyState, hints: RuntimeCompositionHints): unknown {
+  if (!plan || typeof plan !== 'object') return plan;
+  const next: any = { ...(plan as Record<string, unknown>) };
+  if ((hints.queryAugments ?? []).length > 0) {
+    next.queries = uniq([...(Array.isArray(next.queries) ? next.queries : []), ...(hints.queryAugments ?? [])].map((entry) => String(entry))).slice(0, 8);
+  }
+  if ((hints.trustNotes ?? []).length > 0) {
+    next.trustNotes = uniq([...(Array.isArray(next.trustNotes) ? next.trustNotes : []), ...(hints.trustNotes ?? [])].map((entry) => String(entry)));
+  }
+  if ((hints.pipelineNotes ?? []).some((note) => note.includes('trust'))) {
+    next.trustNotes = uniq([...(Array.isArray(next.trustNotes) ? next.trustNotes : []), 'runtime:trust-adjustment']);
+  }
+  if ((hints.pipelineNotes ?? []).some((note) => note.includes('multi-hop'))) {
+    next.hopPlan = uniq([...(Array.isArray(next.hopPlan) ? next.hopPlan : []), String(next.intent?.semanticQuery ?? 'evidence') + ' evidence reconciliation']).slice(0, 6);
+  }
+  if ((hints.pipelineNotes ?? []).some((note) => note.includes('freshness'))) {
+    next.queries = uniq([...(Array.isArray(next.queries) ? next.queries : []), String(next.intent?.semanticQuery ?? 'evidence') + ' latest']).slice(0, 8);
+  }
+  return next;
+}
+
 export function compileRuntimeStrategySelector(state: SearchPolicyState) {
   const source = state.reasoningArchitecture?.runtimeComposition?.strategySelectorSource ?? baseRuntimeComposition().strategySelectorSource;
-  return new Function('intent', 'policy', 'fallbackChoose', `const fn = (${source}); return fn(intent, policy, fallbackChoose);`) as (intent: SearchIntent, policy: SearchPolicyState, fallbackChoose: typeof chooseStrategy) => SearchStrategyProfile;
+  const hints = parseRuntimeCompositionHints(source);
+  return (intent: SearchIntent, policy: SearchPolicyState, fallbackChoose: typeof chooseStrategy) => rankStrategiesWithHints(intent, policy, fallbackChoose, hints);
 }
 
 export function compileRuntimePipeline(state: SearchPolicyState) {
   const source = state.reasoningArchitecture?.runtimeComposition?.pipelineSource ?? baseRuntimeComposition().pipelineSource;
-  return new Function('plan', 'policy', `const fn = (${source}); return fn(plan, policy);`) as (plan: unknown, policy: SearchPolicyState) => unknown;
+  const hints = parseRuntimeCompositionHints(source);
+  return (plan: unknown, policy: SearchPolicyState) => applyRuntimePlanHints(plan, policy, hints);
 }
 
 export function chooseStrategy(intent: SearchIntent, policy: SearchPolicyState): SearchStrategyProfile {
