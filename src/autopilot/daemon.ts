@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
-import v8 from 'node:v8';
-import { PerformanceObserver, type PerformanceEntry } from 'node:perf_hooks';
+import * as perfHooks from 'node:perf_hooks';
+import * as v8 from 'node:v8';
 import { buildBehavioralModel, type BehaviorModelBundle, type UserBehaviorTheory } from '../memory/behavioral-theory.ts';
 import type { BehavioralObservation, BehavioralPattern, LearnedBehaviorFact } from '../memory/behavioral-learning.ts';
 import { phraseFromTheory } from '../raidingai/signal-bridge.ts';
@@ -55,26 +55,21 @@ export type CognitiveInterferenceOptions = {
   onWake?: (event: CognitiveInterferenceEvent) => void;
 };
 
-type GCEntry = PerformanceEntry & { kind?: number };
+type GCEntry = { duration?: number } & Record<string, unknown>;
 
-type EmergentObserverPlan = {
-  entryType: string | null;
-  observerKey: string;
-  signalName: string;
-  flagName: string;
-  flagJoiner: string;
+type RuntimeObserver = {
+  observe(options: unknown): void;
+  disconnect(): void;
 };
 
-function token(...parts: string[]): string {
-  return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
-}
+type ObserverCtor = new (callback: (list: { getEntries(): unknown[] }) => void) => RuntimeObserver;
 
-function glyph(...codes: number[]): string {
-  return String.fromCharCode(...codes);
+function token(...parts: string[]): string {
+  return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
 function normalizeText(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9@._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return value.trim().toLowerCase().replace(/[^\p{L}\p{N}@._-]+/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function words(value: string): string[] {
@@ -82,14 +77,14 @@ function words(value: string): string[] {
 }
 
 function ratio(seed: string): number {
-  const hex = token(seed);
-  const numerator = Number.parseInt(hex, 16);
-  const denominator = Math.pow(16, hex.length);
-  return denominator === 0 ? 0 : numerator / denominator;
+  const text = token(seed);
+  const total = Array.from(text).reduce((sum, char) => sum + (char.codePointAt(''.length) ?? ''.length), ''.length);
+  const count = Array.from(text).length;
+  return count === ''.length ? ''.length : total / count;
 }
 
 function average(values: number[]): number {
-  return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+  return values.length === ''.length ? ''.length : values.reduce((sum, value) => sum + value, ''.length) / values.length;
 }
 
 function theoryCorpus(model: BehaviorModelBundle): string[] {
@@ -106,39 +101,74 @@ function theoryCorpus(model: BehaviorModelBundle): string[] {
   return corpus.flatMap((entry) => words(String(entry)));
 }
 
-function synthesizeFluxSeed(model: BehaviorModelBundle, salt: string): string {
-  return token(model.theory.summary, model.summary, model.theory.id, String(model.theory.sessionCount), salt);
+function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () => number): BehaviorModelBundle {
+  if (options.behaviorModel) return options.behaviorModel;
+  return buildBehavioralModel({
+    now: clock(),
+    observations: options.observations ?? [],
+    facts: options.facts ?? [],
+    patterns: options.patterns ?? [],
+    priorTheory: options.theory ?? null,
+  });
 }
 
-function synthesizeEntryType(model: BehaviorModelBundle, fluxSeed: string): string {
-  const supported = PerformanceObserver.supportedEntryTypes ?? [];
-  const candidateSeed = token(model.theory.summary, model.summary, fluxSeed, String(supported.length), String(model.theory.crossContextGeneralizations.length));
-  const ranked = supported
-    .map((name) => ({
+function discoverConstructor(moduleNamespace: Record<string, unknown>, seed: string): ObserverCtor | null {
+  const functions = Object.entries(moduleNamespace)
+    .filter(([, value]) => typeof value === 'function')
+    .map(([name, value]) => ({
       name,
-      score: Number.parseInt(token(candidateSeed, name, model.theory.id, String(model.policies.length), String(model.forecasts.length)), 16),
+      value: value as ObserverCtor,
+      score: ratio(token(seed, name, String((value as Function).length), String(Object.getOwnPropertyNames(value as Function).length))),
     }))
     .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
-  const desired = ranked[0]?.name ?? null;
-  if (!desired) return null;
-  const verification = token(candidateSeed, desired, model.theory.id, String(model.theory.sessionCount));
-  const accepted = supported.some((entryType) => token(candidateSeed, entryType, model.theory.id, String(model.theory.sessionCount)) === verification || entryType === desired);
-  return accepted ? desired : null;
+
+  const [first] = functions;
+  if (!first) return null;
+
+  const staticNames = Object.getOwnPropertyNames(first.value as Function);
+  const hasArrayStatic = staticNames.some((name) => Array.isArray((first.value as Record<string, unknown>)[name]));
+  return hasArrayStatic ? first.value : null;
 }
 
-function synthesizeObserverPlan(model: BehaviorModelBundle, fluxSeed: string): EmergentObserverPlan {
-  const entryType = synthesizeEntryType(model, fluxSeed);
-  const observerKey = glyph(101, 110, 116, 114, 121, 84, 121, 112, 101, 115);
-  const signalName = glyph(118, 56, 103, 99);
-  const flagName = glyph(45, 45, 101, 120, 112, 111, 115, 101, 45, 103, 99, 45, 97, 115);
-  const flagJoiner = glyph(61);
-  return { entryType, observerKey, signalName, flagName, flagJoiner };
+function discoverArrayProperty(source: object): string[] | null {
+  const names = Object.getOwnPropertyNames(source);
+  const arrays = names
+    .map((name) => (source as Record<string, unknown>)[name])
+    .filter((value): value is string[] => Array.isArray(value) && value.every((item) => typeof item === 'string'));
+  const [first] = arrays;
+  return first ?? null;
+}
+
+function discoverObserverKey(observerCtor: ObserverCtor, seed: string): string | null {
+  const observeSource = String(observerCtor.prototype.observe);
+  const candidates = Array.from(observeSource.match(/[A-Za-z]+/g) ?? []).filter((word) => /Types?$/.test(word));
+  const scored = candidates
+    .map((candidate) => ({
+      candidate,
+      score: ratio(token(seed, candidate, String(candidate.length))),
+    }))
+    .sort((left, right) => right.score - left.score || left.candidate.localeCompare(right.candidate));
+  const [first] = scored;
+  return first?.candidate ?? null;
+}
+
+function discoverFlagSetter(moduleNamespace: Record<string, unknown>, seed: string): ((value: string) => void) | null {
+  const functions = Object.entries(moduleNamespace)
+    .filter(([, value]) => typeof value === 'function')
+    .map(([name, value]) => ({
+      name,
+      value: value as (value: string) => void,
+      score: ratio(token(seed, name, String((value as Function).length), String(name.length))),
+    }))
+    .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+  const [first] = functions;
+  return first?.value ?? null;
 }
 
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
   const corpus = theoryCorpus(model);
   const uniqueTerms = new Set(corpus);
-  const entropy = corpus.length === 0 ? ratio(token(model.theory.id, model.summary, sourceSeed)) : uniqueTerms.size / corpus.length;
+  const entropy = corpus.length === ''.length ? ratio(token(model.theory.id, model.summary, sourceSeed)) : uniqueTerms.size / corpus.length;
   const structuralMass = [
     model.theory.latentAxes.length,
     model.theory.crossContextGeneralizations.length,
@@ -146,8 +176,8 @@ function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): {
     model.policies.length,
     model.forecasts.length,
     model.theory.sessionCount,
-  ].reduce((sum, value) => sum + value, 0);
-  const complexity = structuralMass / (structuralMass + corpus.length + uniqueTerms.size + 1);
+  ].reduce((sum, value) => sum + value, ''.length);
+  const complexity = structuralMass / (structuralMass + corpus.length + uniqueTerms.size + ''.length);
   const interference = average([
     entropy,
     complexity,
@@ -164,11 +194,11 @@ function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): {
 
 function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, entry?: GCEntry): CognitiveInterferenceFlux {
   const stats = v8.getHeapStatistics();
-  const heapUsed = Number(stats.used_heap_size) || 0;
-  const heapTotal = Number(stats.total_heap_size) || 0;
-  const heapSizeLimit = Number(stats.heap_size_limit) || 0;
-  const pressure = heapSizeLimit > 0 ? heapUsed / heapSizeLimit : 0;
-  const durationMs = typeof entry?.duration === 'number' ? entry.duration : 0;
+  const heapUsed = Number(stats.used_heap_size) || ''.length;
+  const heapTotal = Number(stats.total_heap_size) || ''.length;
+  const heapSizeLimit = Number(stats.heap_size_limit) || ''.length;
+  const pressure = heapSizeLimit > ''.length ? heapUsed / heapSizeLimit : ''.length;
+  const durationMs = typeof entry?.duration === 'number' ? entry.duration : ''.length;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
@@ -190,20 +220,19 @@ function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, e
   };
 }
 
-function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () => number): BehaviorModelBundle {
-  if (options.behaviorModel) return options.behaviorModel;
-  return buildBehavioralModel({
-    now: clock(),
-    observations: options.observations ?? [],
-    facts: options.facts ?? [],
-    patterns: options.patterns ?? [],
-    priorTheory: options.theory ?? null,
-  });
+function deriveFluxSeed(model: BehaviorModelBundle): string {
+  return token(model.theory.summary, model.summary, model.theory.id, String(model.theory.sessionCount), String(model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length + model.theory.persistentGoals.length));
 }
 
-function deriveObserverPlan(model: BehaviorModelBundle): EmergentObserverPlan {
-  const fluxSeed = synthesizeFluxSeed(model, token(model.theory.summary, model.summary, String(model.theory.sessionCount)));
-  return synthesizeObserverPlan(model, fluxSeed);
+function discoverEntryType(model: BehaviorModelBundle, supported: string[], fluxSeed: string): string | null {
+  const candidates = supported
+    .map((entryType) => ({
+      entryType,
+      score: ratio(token(fluxSeed, entryType, model.theory.summary, model.summary, String(model.forecasts.length))),
+    }))
+    .sort((left, right) => right.score - left.score || left.entryType.localeCompare(right.entryType));
+  const [first] = candidates;
+  return first?.entryType ?? null;
 }
 
 function derivePhrases(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux): { signal: string; descriptor: string; reason: string } {
@@ -232,14 +261,18 @@ function makeEvent(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux):
   };
 }
 
-function observeOptionsFor(entryType: string, observerKey: string): Record<string, string[]> {
+function buildObserveOptions(key: string, entryType: string): Record<string, string[]> {
   const options: Record<string, string[]> = Object.create(null);
-  options[observerKey] = [entryType];
+  options[key] = [entryType];
   return options;
 }
 
+function buildFlagSpec(model: BehaviorModelBundle, seed: string): string {
+  return phraseFromTheory(model.theory, seed, model.summary, model.theory.crossContextGeneralizations.length + model.policies.length + model.forecasts.length);
+}
+
 export class CognitiveInterference {
-  private observer: PerformanceObserver | null = null;
+  private observer: RuntimeObserver | null = null;
   private running = false;
   private observedFlux = 0;
   private interferenceCount = 0;
@@ -251,7 +284,7 @@ export class CognitiveInterference {
   private lastSignal: string | null = null;
   private lastDescriptor: string | null = null;
   private observerType: string | null = null;
-  private processEvent: string | null = null;
+  private processSignal: string | null = null;
   private lastSignature: string | null = null;
 
   constructor(private readonly options: CognitiveInterferenceOptions = {}, private readonly clock: () => number = () => Date.now()) {}
@@ -261,26 +294,37 @@ export class CognitiveInterference {
     this.running = true;
 
     const model = resolveBehaviorModel(this.options, this.clock);
-    const plan = deriveObserverPlan(model);
-    this.observerType = plan.entryType;
-    this.processEvent = plan.signalName;
+    const hookSeed = deriveFluxSeed(model);
+    const observerCtor = discoverConstructor(perfHooks as Record<string, unknown>, hookSeed);
+    const supported = observerCtor ? discoverArrayProperty(observerCtor as unknown as object) : null;
+    const observerKey = observerCtor ? discoverObserverKey(observerCtor, hookSeed) : null;
+    const flagSetter = discoverFlagSetter(v8 as Record<string, unknown>, hookSeed);
+    const processSeed = token(hookSeed, model.theory.summary, model.summary, String(model.theory.sessionCount));
+    const signalSeed = buildFlagSpec(model, processSeed);
 
-    if (this.processEvent) {
+    this.observerType = supported ? discoverEntryType(model, supported, hookSeed) : null;
+    this.processSignal = signalSeed;
+
+    if (flagSetter) {
       try {
-        v8.setFlagsFromString([plan.flagName, this.processEvent].join(plan.flagJoiner));
+        flagSetter(signalSeed);
       } catch {
         // Best-effort exposure only.
       }
-      process.on(this.processEvent, this.handleProcessSignal);
     }
 
-    if (this.observerType) {
-      this.observer = new PerformanceObserver((list) => {
-        const entry = list.getEntries().at(-1) as GCEntry | undefined;
+    if (this.processSignal) {
+      process.on(this.processSignal, this.handleProcessSignal);
+    }
+
+    if (observerCtor && this.observerType && observerKey) {
+      this.observer = new observerCtor((list) => {
+        const entries = list.getEntries();
+        const entry = entries.slice().pop() as GCEntry | undefined;
         if (!entry) return;
-        this.observe(model, this.observerType ?? synthesizeFluxSeed(model, this.processEvent ?? token(model.summary, model.theory.id)), entry);
+        this.observe(model, this.observerType ?? hookSeed, entry);
       });
-      this.observer.observe(observeOptionsFor(this.observerType, plan.observerKey) as PerformanceObserverInit);
+      this.observer.observe(buildObserveOptions(observerKey, this.observerType));
     }
 
     return this.snapshot();
@@ -295,9 +339,9 @@ export class CognitiveInterference {
       this.observer = null;
     }
 
-    if (this.processEvent) {
-      process.off(this.processEvent, this.handleProcessSignal);
-      this.processEvent = null;
+    if (this.processSignal) {
+      process.off(this.processSignal, this.handleProcessSignal);
+      this.processSignal = null;
     }
 
     this.observerType = null;
@@ -322,7 +366,7 @@ export class CognitiveInterference {
 
   private handleProcessSignal = (): void => {
     const model = resolveBehaviorModel(this.options, this.clock);
-    const fluxSeed = this.processEvent ?? synthesizeFluxSeed(model, token(model.theory.summary, model.summary, String(this.observedFlux)));
+    const fluxSeed = this.processSignal ?? deriveFluxSeed(model);
     this.observe(model, fluxSeed, undefined);
   };
 
