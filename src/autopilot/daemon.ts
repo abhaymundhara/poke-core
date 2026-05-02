@@ -23,6 +23,7 @@ export type CognitiveInterferenceFlux = {
   score: number;
   entropy: number;
   complexity: number;
+  interference: boolean;
   wake: boolean;
 };
 
@@ -145,6 +146,7 @@ function scoreFlux(entry: GCEntry | undefined, source: string, model: BehaviorMo
     score,
     entropy: thresholds.entropy,
     complexity: thresholds.complexity,
+    interference: score >= thresholds.interference,
     wake: score >= thresholds.wake,
   };
 }
@@ -247,7 +249,7 @@ export class CognitiveInterference {
     this.lastFluxAt = flux.at;
     this.observedFlux += 1;
 
-    if (flux.score < synthesizeThresholds(model, flux.signature).interference) return;
+    if (!flux.interference) return;
 
     const event = makeEvent(model, flux);
     this.lastInterferenceAt = event.emittedAt;
