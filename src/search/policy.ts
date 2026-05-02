@@ -346,14 +346,19 @@ function generateSearchIndexSourceRewrite(feedback: SearchPolicyFeedback, curren
     feedback.desiredBehavior ?? '',
   ].join('|')).slice(0, 12);
   const revisionLine = "export const SEARCH_INDEX_REWRITE_REVISION = '" + revision + "';";
-  let next = currentSource;
-  if (next.includes('SEARCH_INDEX_REWRITE_REVISION')) {
-    next = next.replace(/export const SEARCH_INDEX_REWRITE_REVISION = '.*?';/, revisionLine);
-  } else {
-    next = next.replace("export * from './policy.ts';\n\nexport const SEARCH_INDEX_SOURCE_PATH", "export * from './policy.ts';\n\n" + revisionLine + \"\n\nexport const SEARCH_INDEX_SOURCE_PATH");
+  if (currentSource.includes('SEARCH_INDEX_REWRITE_REVISION')) {
+    return currentSource.replace(/export const SEARCH_INDEX_REWRITE_REVISION = '.*?';/, revisionLine);
   }
-  next = next.replace(/function buildTrustNotes\(intent: SearchPlan\['intent'\], sourceRanking: SearchPlan\['sourceRanking'\], state: any\): string\[\] \{[\s\S]*?\n\}/, "function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan['sourceRanking'], state: any): string[] {\n  const composition = activeComposition(state);\n  const rewriteNotes = composition?.notes ?? [];\n  return [\n    'trust-mode=' + intent.trustMode,\n    'freshness=' + intent.freshness,\n    'hop-budget=' + intent.hopBudget,\n    'nlu=' + intent.nlu.provider + ':' + intent.nlu.confidence.toFixed(2) + ' path=' + (intent.nlu.fallbackUsed ? 'legacy' : 'semantic'),\n    'rewrite-revision=' + revision,\n    ...rewriteNotes.slice(0, 3).map((note) => 'rewrite=' + note),\n    ...sourceRanking.slice(0, 3).map((entry) => entry.source + ':' + entry.score.toFixed(2) + ':' + entry.reason),\n  ];\n}");
-  return next;
+  return currentSource.replace(
+    "export * from './policy.ts';
+
+export const SEARCH_INDEX_SOURCE_PATH",
+    "export * from './policy.ts';
+
+" + revisionLine + "
+
+export const SEARCH_INDEX_SOURCE_PATH",
+  );
 }
 
 function asSynthesizedOutput(value: unknown): (SearchPolicyFeedback & { rules?: SearchPolicyRule[]; strategyLogic?: Partial<StrategyLogic>; architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>>; runtimeComposition?: Partial<RuntimeComposition> }) | null {
