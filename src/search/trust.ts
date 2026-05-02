@@ -19,6 +19,47 @@ function baseModel(): EpistemicTrustModel {
   };
 }
 
+export type TrustEscalationSignal = {
+  id: string;
+  at: number;
+  level: 'high';
+  reason: string;
+  threshold: number;
+  gateMode: 'escalate';
+  intent: SearchIntent;
+  trustedResults: TrustedEvidence[];
+  replanIntent: SearchIntent;
+  sourceCount: number;
+  observedMinTrust: number;
+  observedMeanTrust: number;
+  observedMaxTrust: number;
+};
+
+type TrustEscalationListener = (signal: TrustEscalationSignal) => void;
+const trustEscalationListeners = new Set<TrustEscalationListener>();
+
+export function registerTrustEscalationListener(listener: TrustEscalationListener | null): () => void {
+  if (!listener) return () => undefined;
+  trustEscalationListeners.add(listener);
+  return () => { trustEscalationListeners.delete(listener); };
+}
+
+export function emitTrustEscalation(signal: Omit<TrustEscalationSignal, 'id' | 'at'>): TrustEscalationSignal {
+  const emitted: TrustEscalationSignal = {
+    ...signal,
+    id: stableHash([signal.reason, signal.intent.semanticQuery, signal.threshold, signal.observedMinTrust, signal.observedMeanTrust, signal.observedMaxTrust, signal.sourceCount].join('|')).slice(0, 12),
+    at: Date.now(),
+  };
+  for (const listener of trustEscalationListeners) {
+    try {
+      listener(emitted);
+    } catch {
+      continue;
+    }
+  }
+  return emitted;
+}
+
 function modelEntry(source: string, score: number, useful: boolean, notes: string[]): any {
   const mean = clamp(score);
   const variance = clamp(0.18 + Math.abs(0.5 - mean) * 0.6);
@@ -151,6 +192,7 @@ export type TrustGateOutcome = {
   shouldReplan: boolean;
   shouldEscalate: boolean;
   replanIntent: SearchIntent;
+  escalationSignal: TrustEscalationSignal | null;
 };
 
 function uniqueSources(results: TrustedEvidence[]): number {
@@ -211,6 +253,22 @@ export function evaluateTrustGate(intent: SearchIntent, trustedResults: TrustedE
   const shouldEscalate = trustedResults.length === 0 || observedMinTrust < threshold - 0.16 || observedMeanTrust < threshold - 0.1;
   const shouldReplan = reasons.length > 0;
   const mode: TrustGateOutcome['mode'] = shouldEscalate ? 'escalate' : shouldReplan ? 'replan' : 'accept';
+  const replanIntent = shouldReplan ? replanIntentForLowTrust(intent, trustedResults, mode) : intent;
+  const escalationSignal = shouldEscalate ? {
+    id: stableHash([intent.semanticQuery, threshold.toFixed(3), observedMinTrust.toFixed(3), observedMeanTrust.toFixed(3), observedMaxTrust.toFixed(3), String(corroboratedSources)].join('|')).slice(0, 12),
+    at: Date.now(),
+    level: 'high' as const,
+    reason: reasons.join('|') || 'fail-closed',
+    threshold,
+    gateMode: 'escalate' as const,
+    intent,
+    trustedResults,
+    replanIntent,
+    sourceCount: corroboratedSources,
+    observedMinTrust,
+    observedMeanTrust,
+    observedMaxTrust,
+  } : null;
 
   return {
     mode,
@@ -223,7 +281,8 @@ export function evaluateTrustGate(intent: SearchIntent, trustedResults: TrustedE
     reasons,
     shouldReplan,
     shouldEscalate,
-    replanIntent: shouldReplan ? replanIntentForLowTrust(intent, trustedResults, mode) : intent,
+    replanIntent,
+    escalationSignal,
   };
 }
 
