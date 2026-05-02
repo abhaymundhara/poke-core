@@ -13,6 +13,8 @@ export type RaidingAiRuntimeSignals = {
   localeHint: string;
   locales: string[];
   timeZone: string;
+  timezoneLocal: string;
+  timezoneExpectedUtc: string;
   tabName: string;
   windowName: string;
   roleName: string;
@@ -74,6 +76,10 @@ function hashText(...parts: string[]): string {
   return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
+function token(...parts: string[]): string {
+  return hashText(...parts).slice(0, 12);
+}
+
 function canonicalLocale(value: string): string {
   return value.trim().replace(/_/g, '-');
 }
@@ -116,84 +122,17 @@ function wallClockString(date: Date, timeZone: string): string {
   return `${parts.year.toString().padStart(4, '0')}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
-function localPart(seed: string, scope: string): string {
-  return `u-${hashText(seed, scope).slice(0, 10)}`;
-}
-
-function wordFromCodes(codes: number[]): string {
-  return String.fromCharCode(...codes);
-}
-
-function mailbox(seed: string, scope: string): string {
-  const domain = `${hashText(scope, seed).slice(0, 12)}.local`;
-  return `${localPart(seed, scope)}@${domain}`;
-}
-
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
   const cwd = process.cwd();
   const argv = process.argv.slice(1, 5).join(' ');
   const env = [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV].filter(Boolean).join(' ');
   return [
-    {
-      subject: `${localeHint} ${timeZone}`.trim(),
-      value: `${localeHint} ${splitLocale(localeHint).join(' ')}`.trim(),
-      category: 'signal',
-      source: 'system',
-      confidence: 0.94,
-      observedAt: now,
-      evidence: [localeHint, ...splitLocale(localeHint)],
-      context: { localeHint, timeZone },
-    },
-    {
-      subject: `${timeZone} ${hashText(timeZone, String(now)).slice(0, 8)}`.trim(),
-      value: `${timeZone} current session clock`.trim(),
-      category: 'schedule',
-      source: 'system',
-      confidence: 0.92,
-      observedAt: now,
-      evidence: [timeZone, 'clock', 'session'],
-      context: { timeZone },
-    },
-    {
-      subject: `${hashText(String(process.pid), String(process.ppid)).slice(0, 8)} ${cwd.split('/').slice(-1)[0] ?? ''}`.trim(),
-      value: `${process.pid} ${process.ppid} ${cwd} ${argv}`.trim(),
-      category: 'signal',
-      source: 'system',
-      confidence: 0.91,
-      observedAt: now,
-      evidence: [String(process.pid), String(process.ppid), cwd, argv],
-      context: { cwd, argv },
-    },
-    {
-      subject: hashText(env || 'env', localeHint, timeZone).slice(0, 12),
-      value: `${env} concise professional structured channel relationship`.trim(),
-      category: 'collaboration',
-      source: 'browser',
-      confidence: 0.93,
-      observedAt: now,
-      evidence: ['concise', 'professional', 'structured', 'channel', 'relationship'],
-      context: { env },
-    },
-    {
-      subject: hashText(new Date(now).toISOString(), 'feedback').slice(0, 12),
-      value: `${new Date(now).toISOString()} quick follow-up today`.trim(),
-      category: 'tone',
-      source: 'email',
-      confidence: 0.9,
-      observedAt: now,
-      evidence: ['quick', 'follow-up', 'today'],
-      context: { now },
-    },
-    {
-      subject: hashText(cwd, 'structure').slice(0, 12),
-      value: `${cwd.split('/').slice(-2).join(' ')} bullet numbered step`.trim(),
-      category: 'signal',
-      source: 'memory',
-      confidence: 0.9,
-      observedAt: now,
-      evidence: ['bullet', 'numbered', 'step'],
-      context: { cwd },
-    },
+    { subject: token(localeHint, timeZone), value: `${localeHint} ${splitLocale(localeHint).join(' ')}`.trim(), category: 'signal', source: 'system', confidence: 0.94, observedAt: now, evidence: [localeHint, ...splitLocale(localeHint)], context: { localeHint, timeZone } },
+    { subject: token(timeZone, String(now)), value: `${timeZone} current session clock`.trim(), category: 'schedule', source: 'system', confidence: 0.92, observedAt: now, evidence: [timeZone, 'clock', 'session'], context: { timeZone } },
+    { subject: token(String(process.pid), String(process.ppid), cwd), value: `${process.pid} ${process.ppid} ${cwd} ${argv}`.trim(), category: 'signal', source: 'system', confidence: 0.91, observedAt: now, evidence: [String(process.pid), String(process.ppid), cwd, argv], context: { cwd, argv } },
+    { subject: token(env || 'env', localeHint, timeZone), value: `${env} concise professional structured channel relationship`.trim(), category: 'collaboration', source: 'browser', confidence: 0.93, observedAt: now, evidence: ['concise', 'professional', 'structured', 'channel', 'relationship'], context: { env } },
+    { subject: token(new Date(now).toISOString(), 'feedback'), value: `${new Date(now).toISOString()} quick follow-up today`.trim(), category: 'tone', source: 'email', confidence: 0.9, observedAt: now, evidence: ['quick', 'follow-up', 'today'], context: { now } },
+    { subject: token(cwd, 'structure'), value: `${cwd.split('/').slice(-2).join(' ')} bullet numbered step`.trim(), category: 'signal', source: 'memory', confidence: 0.9, observedAt: now, evidence: ['bullet', 'numbered', 'step'], context: { cwd } },
   ];
 }
 
@@ -201,13 +140,7 @@ function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: s
   const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
   return Array.from({ length: Math.max(5, pools.length || 0) }, (_, index) => {
     const base = pools[index % (pools.length || 1)] ?? theory.summary;
-    return {
-      key: hashText(base, localeHint, timeZone, String(index)).slice(0, 20),
-      value: `${base} ${localeHint} ${timeZone}`.trim(),
-      confidence: Number((0.84 + (index % 3) * 0.03).toFixed(3)),
-      source: 'system',
-      updatedAt: now - index * 17_000,
-    };
+    return { key: token(base, localeHint, timeZone, String(index)), value: `${base} ${localeHint} ${timeZone}`.trim(), confidence: Number((0.84 + (index % 3) * 0.03).toFixed(3)), source: 'system', updatedAt: now - index * 17_000 };
   });
 }
 
@@ -215,31 +148,22 @@ function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: stri
   const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
   return Array.from({ length: 4 }, (_, index) => {
     const base = pools[index % (pools.length || 1)] ?? theory.summary;
-    return {
-      id: hashText(base, localeHint, String(index)).slice(0, 18),
-      taskId: hashText(localeHint, String(index), base).slice(0, 18),
-      category: hashText(base, String(index + 1), localeHint).slice(0, 10),
-      summary: `${base} ${localeHint}`.trim(),
-      signals: base.split(/\s+/).slice(0, 5),
-      score: Number((0.83 + (index % 2) * 0.04).toFixed(3)),
-      createdAt: now - index * 23_000,
-    };
+    return { id: token(base, localeHint, String(index)), taskId: token(localeHint, String(index), base), category: token(base, String(index + 1), localeHint), summary: `${base} ${localeHint}`.trim(), signals: base.split(/\s+/).slice(0, 5), score: Number((0.83 + (index % 2) * 0.04).toFixed(3)), createdAt: now - index * 23_000 };
   });
 }
 
 function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string): VisionFrame[] {
-  const scope = hashText(theory.summary, localeHint, String(now));
+  const scope = token(theory.summary, localeHint, String(now));
   return [0, 1, 2].map((index) => {
-    const drift = index === 1;
-    const fragment = hashText(scope, String(index)).slice(0, 8);
+    const fragment = token(scope, String(index));
     return {
-      id: hashText(scope, String(index), localeHint).slice(0, 20),
+      id: token(scope, String(index), localeHint),
       ocr: `${theory.summary} ${localeHint} ${fragment}`.trim(),
       dom: JSON.stringify({ scope: fragment, theory: theory.id.slice(0, 10), localeHint }),
-      selectors: [hashText(fragment, 'selector', 'a').slice(0, 10), hashText(fragment, 'selector', 'b').slice(0, 10)],
-      activeTabId: hashText(scope, String(index), wordFromCodes([116, 97, 98])).slice(0, 18),
-      activeWindowId: hashText(scope, String(index), wordFromCodes([119, 105, 110, 100, 111, 119])).slice(0, 18),
-      viewport: { width: 1280, height: drift ? 790 : 816 },
+      selectors: [token(fragment, String(index), '0'), token(fragment, String(index), '1')],
+      activeTabId: token(scope, String(index), String(index + 11)),
+      activeWindowId: token(scope, String(index), String(index + 23)),
+      viewport: { width: 1280, height: index === 1 ? 790 : 816 },
     };
   });
 }
@@ -247,9 +171,9 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
 function buildAttendees(localeHint: string, timeZone: string, roleName: string): Attendee[] {
   const seed = `${localeHint}|${timeZone}|${roleName}`;
   return [
-    { email: mailbox(seed, 'attendee-0'), timezone: timeZone, role: roleName },
-    { email: mailbox(seed, 'attendee-1'), timezone: timeZone, locale: splitLocale(localeHint)[0] ?? localeHint, role: roleName },
-    { email: mailbox(seed, 'attendee-2'), timezone: timeZone, role: roleName },
+    { email: `${token(seed, '0')}@${token(seed, '1')}`, name: token(seed, '2'), locale: localeHint, timezone: timeZone, role: roleName },
+    { email: `${token(seed, '3')}@${token(seed, '4')}`, name: token(seed, '5'), locale: splitLocale(localeHint)[0] ?? localeHint, timezone: timeZone, role: roleName },
+    { email: `${token(seed, '6')}@${token(seed, '7')}`, name: token(seed, '8'), timezone: timeZone, role: roleName },
   ];
 }
 
@@ -258,20 +182,20 @@ function buildThreadIdentity(localeHint: string, timeZone: string, subjectSeed: 
   return {
     subject: subjectSeed,
     participants,
-    messageId: hashText(subjectSeed, messageSeed, timeZone).slice(0, 28),
+    messageId: token(subjectSeed, messageSeed, timeZone),
     rootMessageId,
     inReplyTo: rootMessageId,
     references: [rootMessageId],
-    provider: hashText(localeHint, timeZone, subjectSeed, 'provider').slice(0, 12),
-    mailbox: hashText(localeHint, timeZone, subjectSeed, 'mailbox').slice(0, 12),
+    provider: token(localeHint, timeZone, subjectSeed, 'p'),
+    mailbox: token(localeHint, timeZone, subjectSeed, 'm'),
   };
 }
 
 function buildRecurrence(now: number, timeZone: string): RecurrenceSpec {
   const start = new Date(now + 86_400_000);
-  const parts = new Intl.DateTimeFormat(undefined, { timeZone, weekday: 'short' }).format(start).slice(0, 2).toUpperCase();
+  const weekday = new Intl.DateTimeFormat(undefined, { timeZone, weekday: 'short' }).format(start).slice(0, 2).toUpperCase();
   const local = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}T09:00:00`;
-  return { startLocal: local, timeZone, rule: `FREQ=WEEKLY;COUNT=3;BYDAY=${parts}`, durationMinutes: 45 };
+  return { startLocal: local, timeZone, rule: `FREQ=WEEKLY;COUNT=3;BYDAY=${weekday}`, durationMinutes: 45 };
 }
 
 export class SignalBridge {
@@ -281,28 +205,31 @@ export class SignalBridge {
     const observations = buildRuntimeObservations(now, localeHint, timeZone);
     const theory = buildBehavioralModel({ now, observations, facts: [], patterns: [], priorTheory: null }).theory;
     const memoryFacts = buildMemoryFacts(theory, now, localeHint, timeZone);
-    const learning = new BehavioralLearningLayer({ storagePath: hashText(String(now), localeHint, timeZone).slice(0, 32) });
+    const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
     const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: buildEpisodes(theory, now, localeHint), sourceDocuments: [] });
-    const roleName = hashText(theory.summary, localeHint, timeZone, wordFromCodes([114, 111, 108, 101])).slice(0, 8);
-    const tabName = hashText(theory.summary, localeHint, timeZone, wordFromCodes([116, 97, 98])).slice(0, 8);
-    const windowName = hashText(theory.summary, localeHint, timeZone, wordFromCodes([119, 105, 110, 100, 111, 119])).slice(0, 8);
-    const threadAnchor = hashText(theory.summary, localeHint, timeZone, String(now)).slice(0, 18);
+    const roleName = token(theory.summary, localeHint, timeZone, String(now));
+    const tabName = token(theory.summary, localeHint, timeZone, String(now + 1));
+    const windowName = token(theory.summary, localeHint, timeZone, String(now + 2));
+    const threadAnchor = token(theory.summary, localeHint, timeZone, String(now + 3));
     const subjectSeed = `${theory.summary} ${localeHint} ${timeZone}`.trim();
-    const rootMessageId = hashText(subjectSeed, 'root', threadAnchor).slice(0, 28);
-    const localWall = wallClockString(new Date(now), timeZone);
+    const rootMessageId = token(subjectSeed, 'root', threadAnchor);
+    const timezoneLocal = wallClockString(new Date(now), timeZone);
+    const timezoneExpectedUtc = normalizeWallTime(timezoneLocal, timeZone).utc;
     return {
       now,
       capturedAt: new Date(now).toISOString(),
       localeHint,
       locales: Array.from(new Set([localeHint, ...splitLocale(localeHint)])).filter(Boolean),
       timeZone,
+      timezoneLocal,
+      timezoneExpectedUtc,
       tabName,
       windowName,
       roleName,
       threadAnchor,
       frames: buildUiFrames(theory, now, localeHint),
-      keys: [0, 1, 2].map((index) => hashText(threadAnchor, String(index), localeHint).slice(0, 6)),
-      fallbackSelectors: [hashText(threadAnchor, 'selector', '0').slice(0, 10), hashText(threadAnchor, 'selector', '1').slice(0, 10)],
+      keys: [0, 1, 2].map((index) => token(threadAnchor, String(index), localeHint)),
+      fallbackSelectors: [token(threadAnchor, '0', 'selector'), token(threadAnchor, '1', 'selector')],
       theory: learned.theory,
       observations,
       facts: learned.promotedFacts,
@@ -311,7 +238,7 @@ export class SignalBridge {
       memoryFacts,
       attendees: buildAttendees(localeHint, timeZone, roleName),
       threadA: buildThreadIdentity(localeHint, timeZone, `Re: ${subjectSeed}`, rootMessageId, threadAnchor, roleName),
-      threadB: buildThreadIdentity(localeHint, timeZone, `Re: ${subjectSeed}`, rootMessageId, hashText(threadAnchor, 'b').slice(0, 18), roleName),
+      threadB: buildThreadIdentity(localeHint, timeZone, `Re: ${subjectSeed}`, rootMessageId, token(threadAnchor, 'b'), roleName),
       recurrence: buildRecurrence(now, timeZone),
       summary: `${theory.summary} ${localeHint} ${timeZone}`.trim(),
     };
@@ -319,43 +246,22 @@ export class SignalBridge {
 
   buildTrace(now = Date.now()): RaidingAiTrace {
     const runtime = this.capture(now);
-    const captureId = hashText(runtime.threadAnchor, runtime.summary, runtime.capturedAt).slice(0, 28);
-    const localWall = wallClockString(new Date(runtime.now), runtime.timeZone);
+    const captureId = token(runtime.threadAnchor, runtime.summary, runtime.capturedAt);
     return {
       captureId,
       capturedAt: runtime.capturedAt,
       taskHint: `${runtime.theory.summary} ${runtime.localeHint}`.trim(),
       summary: runtime.summary,
-      behavioral: {
-        observations: runtime.observations,
-        facts: runtime.facts,
-        patterns: runtime.patterns,
-        episodes: runtime.episodes,
-      },
-      computerUse: {
-        frames: runtime.frames,
-        keys: runtime.keys,
-        fallbackSelectors: runtime.fallbackSelectors,
-      },
+      behavioral: { observations: runtime.observations, facts: runtime.facts, patterns: runtime.patterns, episodes: runtime.episodes },
+      computerUse: { frames: runtime.frames, keys: runtime.keys, fallbackSelectors: runtime.fallbackSelectors },
       deepPrimitives: {
         threadA: runtime.threadA,
         threadB: runtime.threadB,
-        timezone: {
-          local: localWall,
-          timeZone: runtime.timeZone,
-          expectedUtc: normalizeWallTime(localWall, runtime.timeZone).utc,
-        },
+        timezone: { local: runtime.timezoneLocal, timeZone: runtime.timeZone, expectedUtc: runtime.timezoneExpectedUtc },
         attendees: runtime.attendees,
         recurrence: runtime.recurrence,
       },
-      signalBridge: {
-        localeHint: runtime.localeHint,
-        locales: runtime.locales,
-        tabName: runtime.tabName,
-        windowName: runtime.windowName,
-        roleName: runtime.roleName,
-        threadAnchor: runtime.threadAnchor,
-      },
+      signalBridge: { localeHint: runtime.localeHint, locales: runtime.locales, tabName: runtime.tabName, windowName: runtime.windowName, roleName: runtime.roleName, threadAnchor: runtime.threadAnchor },
     };
   }
 }
