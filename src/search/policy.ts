@@ -289,6 +289,37 @@ function applySynthesizedArchitecture(state: SearchPolicyState, synthesized: Sea
   architecture.rewriteHistory.push({ at: nowMs(), source, change: synthesized.summary });
   architecture.selfModificationCount += 1;
 }
+function synthesizeRuntimePolicy(outcome: SearchOutcome, current: SearchPolicyState): SearchPolicyFeedback & { strategyLogic: Partial<StrategyLogic>; architecture: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>> } {
+  const source = outcome.source ? String(outcome.source) : 'web';
+  const utility = outcome.useful ?? outcome.score >= 0.7;
+  const summaryBits = [
+    utility ? 'reinforce' : 'correct',
+    outcome.strategyId,
+    outcome.query,
+    source,
+    `score=${outcome.score.toFixed(2)}`,
+  ];
+  const strategyLogic: Partial<StrategyLogic> = {
+    search: outcome.hopsUsed && outcome.hopsUsed > 2 ? 'llm-semantic-decomposition' : current.reasoningArchitecture?.strategyLogic?.search ?? 'semantic-decomposition',
+    trust: utility ? 'epistemic-corroboration-learning' : 'epistemic-corroboration-learning+contradiction-resolver',
+    conflict: outcome.relevantCount && outcome.relevantCount > 1 ? 'graph-conditioned-logical-reconciliation' : current.reasoningArchitecture?.strategyLogic?.conflict ?? 'graph-conditioned-entailment',
+    searchSources: [...new Set([...(current.reasoningArchitecture?.strategyLogic?.searchSources ?? []), source, ...(outcome.resultDomains ?? []).slice(0, 2)])],
+    trustSignals: [...new Set([...(current.reasoningArchitecture?.strategyLogic?.trustSignals ?? []), 'cross-corroboration', 'evidence-outcome', 'domain-memory'])],
+    conflictSignals: [...new Set([...(current.reasoningArchitecture?.strategyLogic?.conflictSignals ?? []), 'semantic-embedding', 'graph-neighborhood', 'proposition-consistency'])],
+  };
+  return {
+    summary: summaryBits.join(' | '),
+    latentNeeds: outcome.resultDomains ?? [],
+    successfulSources: utility ? [source] : [],
+    failedSources: utility ? [] : [source],
+    sourceReliability: utility ? { [source]: clamp((current.sourceReliability[source]?.score ?? 0.6) * 0.9 + 0.1 * outcome.score) } : { [source]: clamp((current.sourceReliability[source]?.score ?? 0.6) * 0.94 - 0.02) },
+    strategyLogic,
+    architecture: {
+      explanationStyle: outcome.score >= 0.8 ? 'thorough' : outcome.score >= 0.6 ? 'balanced' : 'compact',
+      activeModules: outcome.score < 0.6 ? ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'] : current.reasoningArchitecture?.activeModules,
+    },
+  };
+}
 
 export class SearchPolicyStore {
   constructor(private readonly statePath = DEFAULT_STATE_PATH) {}
@@ -317,16 +348,19 @@ export class SearchPolicyStore {
     profile.lastUpdatedAt = nowMs();
     profile.averageScore = profile.averageScore === 0 ? outcome.score : profile.averageScore * 0.7 + outcome.score * 0.3;
     state.queryProfiles[outcome.sessionKey] = profile;
+    const runtimeFeedback = synthesizeRuntimePolicy(outcome, state);
     const architecture = ensureArchitecture(state);
     architecture.selfModificationCount += 1;
-    architecture.rewriteHistory.push({ at: nowMs(), source: 'outcome', change: (useful ? 'reinforce:' : 'correct:') + outcome.strategyId + ':' + outcome.query });
-    architecture.strategyBias[outcome.strategyId] = clamp((architecture.strategyBias[outcome.strategyId] ?? 0) * 0.85 + outcome.score * 0.15);
+    architecture.rewriteHistory.push({ at: nowMs(), source: 'outcome', change: runtimeFeedback.summary });
+    architecture.strategyBias[outcome.strategyId] = clamp((architecture.strategyBias[outcome.strategyId] ?? 0) * 0.82 + outcome.score * 0.18);
     if (!useful || outcome.score < 0.6) {
-      architecture.strategyBias['proposition-reasoning'] = clamp((architecture.strategyBias['proposition-reasoning'] ?? 0.08) + 0.04);
-      architecture.strategyBias['epistemic-trust'] = clamp((architecture.strategyBias['epistemic-trust'] ?? 0.08) + 0.04);
+      architecture.strategyBias['proposition-reasoning'] = clamp((architecture.strategyBias['proposition-reasoning'] ?? 0.08) + 0.05);
+      architecture.strategyBias['epistemic-trust'] = clamp((architecture.strategyBias['epistemic-trust'] ?? 0.08) + 0.05);
+      architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.03);
     }
     state.epistemicModel = updateEpistemicTrustModel(state.epistemicModel, { source, resultDomains: outcome.resultDomains ?? [], useful, score: outcome.score, notes: outcome.notes ?? [] });
     state.reasoningArchitecture = architecture;
+    state.rules = state.rules.map((rule) => ({ ...rule, learnedFrom: { outcomeCount: (rule.learnedFrom?.outcomeCount ?? 0) + 1, failureCount: (rule.learnedFrom?.failureCount ?? 0) + (useful ? 0 : 1), lastFailure: !useful ? outcome.query : rule.learnedFrom?.lastFailure } }));
     this.save(state);
     return state;
   }
@@ -357,10 +391,10 @@ export class SearchPolicyStore {
     return next;
   }
   async rewriteFromFeedbackSemantic(feedback: SearchPolicyFeedback, provider?: PolicyRewriteProvider): Promise<SearchPolicyState> {
-    if (!provider) return this.rewriteFromFeedback(feedback);
     const current = this.load();
     try {
-      const payload = asSynthesizedOutput(await provider.synthesize({ feedback, current, guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] }));
+      const activeProvider = provider ?? createDefaultPolicyRewriteProvider();
+      const payload = asSynthesizedOutput(await activeProvider.synthesize({ feedback, current, guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] }));
       if (!payload) return this.rewriteFromFeedback(feedback);
       const mergedFeedback: SearchPolicyFeedback = {
         ...feedback,
