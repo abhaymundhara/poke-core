@@ -122,7 +122,7 @@ function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () =
     observations: options.observations ?? [],
     facts: options.facts ?? [],
     patterns: options.patterns ?? [],
-    priorTheory: options.theory ?? null,
+    priorTheory: options.theory as UserBehaviorTheory | null,
   });
 }
 
