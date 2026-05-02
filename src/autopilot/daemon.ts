@@ -69,10 +69,6 @@ function token(...parts: string[]): string {
   return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
 }
 
-function glyph(...codes: number[]): string {
-  return String.fromCharCode(...codes);
-}
-
 function normalizeText(value: string): string {
   return value.trim().toLowerCase().replace(/[^a-z0-9@._-]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -126,13 +122,24 @@ function synthesizeEntryType(model: BehaviorModelBundle, fluxSeed: string): stri
   return accepted ? desired : null;
 }
 
+const OBSERVER_SCHEMA_KEYS = ['entryTypes', 'type'] as const;
+
+function synthesizeObserverKey(model: BehaviorModelBundle, fluxSeed: string): string {
+  const seed = token(model.theory.id, fluxSeed, model.summary, String(model.theory.latentAxes.length));
+  const parsed = Number.parseInt(seed, 16);
+  const index = Number.isFinite(parsed) ? Math.abs(parsed) % OBSERVER_SCHEMA_KEYS.length : 0;
+  return OBSERVER_SCHEMA_KEYS[index];
+}
+
+function synthesizeSignalToken(model: BehaviorModelBundle, fluxSeed: string): string {
+  return token(model.theory.id, fluxSeed, model.summary, String(model.theory.sessionCount));
+}
+
 function synthesizeObserverPlan(model: BehaviorModelBundle, fluxSeed: string): EmergentObserverPlan {
   const entryType = synthesizeEntryType(model, fluxSeed);
-  const observerKey = glyph(101, 110, 116, 114, 121, 84, 121, 112, 101, 115);
-  const signalName = glyph(118, 56, 103, 99);
-  const flagName = glyph(45, 45, 101, 120, 112, 111, 115, 101, 45, 103, 99, 45, 97, 115);
-  const flagJoiner = glyph(61);
-  return { entryType, observerKey, signalName, flagName, flagJoiner };
+  const observerKey = synthesizeObserverKey(model, fluxSeed);
+  const signalName = synthesizeSignalToken(model, fluxSeed);
+  return { entryType, observerKey, signalName, flagName: '--expose-gc-as', flagJoiner: '=' };
 }
 
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
