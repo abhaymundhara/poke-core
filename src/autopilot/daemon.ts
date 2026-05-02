@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import v8 from 'node:v8';
+import { PerformanceObserver, type PerformanceEntry } from 'node:perf_hooks';
 import { buildBehavioralModel, type BehaviorModelBundle, type UserBehaviorTheory } from '../memory/behavioral-theory.ts';
 import type { BehavioralObservation, BehavioralPattern, LearnedBehaviorFact } from '../memory/behavioral-learning.ts';
 import { phraseFromTheory } from '../raidingai/signal-bridge.ts';
@@ -54,6 +55,8 @@ export type CognitiveInterferenceOptions = {
   onWake?: (event: CognitiveInterferenceEvent) => void;
 };
 
+type GCEntry = PerformanceEntry & { kind?: number };
+
 function token(...parts: string[]): string {
   return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
 }
@@ -91,11 +94,20 @@ function theoryCorpus(model: BehaviorModelBundle): string[] {
   return corpus.flatMap((entry) => words(String(entry)));
 }
 
-function synthesizeTheory(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number; cadenceMs: number } {
+function selectSupportedEntryType(model: BehaviorModelBundle): string | null {
+  const supported = PerformanceObserver.supportedEntryTypes ?? [];
+  if (supported.length === 0) return null;
+  const ordered = [...supported].sort((left, right) => left.length - right.length || left.localeCompare(right));
+  const shortest = ordered[0];
+  if (!shortest) return null;
+  return shortest;
+}
+
+function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
   const corpus = theoryCorpus(model);
   const uniqueTerms = new Set(corpus);
   const entropy = corpus.length === 0 ? ratio(token(model.theory.id, model.summary, sourceSeed)) : uniqueTerms.size / corpus.length;
-  const complexityCount = [
+  const structuralMass = [
     model.theory.latentAxes.length,
     model.theory.crossContextGeneralizations.length,
     model.theory.persistentGoals.length,
@@ -103,37 +115,33 @@ function synthesizeTheory(model: BehaviorModelBundle, sourceSeed: string): { int
     model.forecasts.length,
     model.theory.sessionCount,
   ].reduce((sum, value) => sum + value, 0);
-  const complexity = complexityCount / (complexityCount + corpus.length + uniqueTerms.size + 1);
+  const complexity = structuralMass / (structuralMass + corpus.length + uniqueTerms.size + 1);
   const interference = average([
     entropy,
     complexity,
-    ratio(token(model.summary, model.theory.id, sourceSeed, String(complexityCount))),
+    ratio(token(model.summary, model.theory.id, sourceSeed, String(structuralMass))),
   ]);
-  const wake = Math.max(interference, average([
+  const wake = average([
+    interference,
     entropy,
     complexity,
     ratio(token(model.theory.summary, model.summary, sourceSeed, String(uniqueTerms.size))),
-  ]));
-  const cadenceRatio = average([
-    ratio(token(model.theory.summary, model.summary, sourceSeed, String(model.theory.sessionCount))),
-    ratio(token(model.summary, model.theory.id, sourceSeed, String(corpus.length))),
   ]);
-  const cadenceMs = Math.max(125, Math.round((250 + cadenceRatio * 1750) * (1 + complexity)));
-  return { interference, wake, entropy, complexity, cadenceMs };
+  return { interference, wake, entropy, complexity };
 }
 
-function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number): CognitiveInterferenceFlux {
+function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, entry?: GCEntry): CognitiveInterferenceFlux {
   const stats = v8.getHeapStatistics();
   const heapUsed = Number(stats.used_heap_size) || 0;
   const heapTotal = Number(stats.total_heap_size) || 0;
   const heapSizeLimit = Number(stats.heap_size_limit) || 0;
   const pressure = heapSizeLimit > 0 ? heapUsed / heapSizeLimit : 0;
-  const durationMs = Math.max(0, Math.round((heapUsed + heapTotal + heapSizeLimit) % 997));
+  const durationMs = typeof entry?.duration === 'number' ? entry.duration : 0;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
   const score = average([pressure, entropy, complexity, ratio(token(model.theory.id, signature, model.summary))]);
-  const thresholds = synthesizeTheory(model, sourceSeed);
+  const thresholds = synthesizeThresholds(model, sourceSeed);
   return {
     at,
     source: token(sourceSeed, model.summary, model.theory.id),
@@ -161,6 +169,12 @@ function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () =
   });
 }
 
+function deriveRuntimeAliases(model: BehaviorModelBundle): { observerType: string | null; processEvent: string | null; sourceSeed: string } {
+  const sourceSeed = token(model.theory.summary, model.summary, model.theory.id, String(model.theory.sessionCount));
+  const processEvent = token(model.summary, model.theory.summary, sourceSeed, String(model.theory.latentAxes.length));
+  return { observerType: selectSupportedEntryType(model), processEvent, sourceSeed };
+}
+
 function derivePhrases(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux): { signal: string; descriptor: string; reason: string } {
   const signalSeed = token(model.theory.id, model.summary, flux.signature, String(flux.at), String(model.theory.sessionCount));
   const descriptorSeed = token(model.theory.summary, signalSeed, flux.source, String(model.theory.latentAxes.length));
@@ -172,7 +186,7 @@ function derivePhrases(model: BehaviorModelBundle, flux: CognitiveInterferenceFl
 }
 
 function makeEvent(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux): CognitiveInterferenceEvent {
-  const thresholds = synthesizeTheory(model, flux.source);
+  const thresholds = synthesizeThresholds(model, flux.source);
   const phrases = derivePhrases(model, flux);
   return {
     id: randomUUID(),
@@ -188,7 +202,7 @@ function makeEvent(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux):
 }
 
 export class CognitiveInterference {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private observer: PerformanceObserver | null = null;
   private running = false;
   private observedFlux = 0;
   private interferenceCount = 0;
@@ -199,24 +213,58 @@ export class CognitiveInterference {
   private lastTheoryId: string | null = null;
   private lastSignal: string | null = null;
   private lastDescriptor: string | null = null;
+  private observerType: string | null = null;
+  private processEvent: string | null = null;
+  private lastSignature: string | null = null;
 
   constructor(private readonly options: CognitiveInterferenceOptions = {}, private readonly clock: () => number = () => Date.now()) {}
 
   start(): CognitiveInterferenceSnapshot {
     if (this.running) return this.snapshot();
     this.running = true;
+
     const model = resolveBehaviorModel(this.options, this.clock);
-    const cadence = synthesizeTheory(model, token(model.theory.id, model.summary, model.theory.summary)).cadenceMs;
-    this.timer = setInterval(() => this.observe(), cadence);
-    this.observe();
+    const aliases = deriveRuntimeAliases(model);
+    this.observerType = aliases.observerType;
+    this.processEvent = aliases.processEvent;
+
+    if (this.processEvent) {
+      try {
+        v8.setFlagsFromString(['--expose-gc-as', this.processEvent].join('='));
+      } catch {
+        // The runtime can still emit the observer path even if the alias cannot be installed.
+      }
+      process.on(this.processEvent, this.handleProcessSignal);
+    }
+
+    if (this.observerType) {
+      this.observer = new PerformanceObserver((list) => {
+        const entry = list.getEntries().at(-1) as GCEntry | undefined;
+        if (!entry) return;
+        this.observe(model, this.observerType ?? token(model.summary, model.theory.id), entry);
+      });
+      this.observer.observe({ entryTypes: [this.observerType] });
+    }
+
     return this.snapshot();
   }
 
   stop(): CognitiveInterferenceSnapshot {
     if (!this.running) return this.snapshot();
     this.running = false;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+
+    if (this.observer) {
+      this.observer.disconnect();
+      this.observer = null;
+    }
+
+    if (this.processEvent) {
+      process.off(this.processEvent, this.handleProcessSignal);
+      this.processEvent = null;
+    }
+
+    this.observerType = null;
+    this.lastSignature = null;
     return this.snapshot();
   }
 
@@ -235,14 +283,20 @@ export class CognitiveInterference {
     };
   }
 
-  private observe(): void {
+  private handleProcessSignal = (): void => {
     const model = resolveBehaviorModel(this.options, this.clock);
-    const sourceSeed = token(model.theory.summary, model.summary, String(model.theory.sessionCount), String(this.observedFlux));
-    const flux = scoreFlux(model, sourceSeed, this.clock());
+    const aliases = this.processEvent ?? deriveRuntimeAliases(model);
+    this.observe(model, aliases, undefined);
+  };
+
+  private observe(model: BehaviorModelBundle, sourceSeed: string, entry?: GCEntry): void {
+    const flux = scoreFlux(model, sourceSeed, this.clock(), entry);
+    if (this.lastSignature === flux.signature) return;
+    this.lastSignature = flux.signature;
     this.lastFluxAt = flux.at;
     this.observedFlux += 1;
 
-    const thresholds = synthesizeTheory(model, flux.source);
+    const thresholds = synthesizeThresholds(model, sourceSeed);
     if (flux.score < thresholds.interference) return;
 
     const event = makeEvent(model, flux);
