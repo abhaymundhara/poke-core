@@ -20,7 +20,7 @@ export type UiPerception = {
   activeWindowId: string;
   driftDetected: boolean;
   focusedSelector: string | null;
-  keyboardHint: string | null;
+  inputHint: string | null;
   tabCount: number;
   windowCount: number;
 };
@@ -118,7 +118,7 @@ export function captureFrame(frame: VisionFrame, state: ComputerUseState): UiPer
     activeWindowId: frame.activeWindowId ?? state.activeWindowId,
     driftDetected,
     focusedSelector,
-    keyboardHint: hintFromFrame(frame),
+    inputHint: hintFromFrame(frame),
     tabCount: state.tabCount,
     windowCount: state.windowCount,
   };
@@ -129,7 +129,7 @@ export function captureFrame(frame: VisionFrame, state: ComputerUseState): UiPer
   return perception;
 }
 
-function applyKey(state: ComputerUseState, key: string): string {
+function applySemanticAction(state: ComputerUseState, key: string): string {
   const normalized = text(key).toLowerCase();
   if (!normalized) return '';
   state.lastAction = normalized;
@@ -213,7 +213,7 @@ export function runVisionLoop(
       if (recovery.recovered) lastAction = state.lastAction;
     }
     if (instructions.keys) {
-      for (const key of asIterable(instructions.keys)) lastAction = applyKey(state, key) || lastAction;
+      for (const key of asIterable(instructions.keys)) lastAction = applySemanticAction(state, key) || lastAction;
     }
     if (state.lastAction) lastAction = state.lastAction;
   }

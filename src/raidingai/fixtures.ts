@@ -12,7 +12,7 @@ export type RaidingAiScenario = {
   label: string;
   taskHint: string;
   theory: UserBehaviorTheory;
-  computerUse: { frames: Iterable<VisionFrame>; keys: Iterable<string>; fallbackSelectors: Iterable<string> };
+  computerUse: { frames: Iterable<VisionFrame> | (() => Iterable<VisionFrame>); keys: Iterable<string> | (() => Iterable<string>); fallbackSelectors: Iterable<string> | (() => Iterable<string>) };
   deepPrimitives: {
     threadA: ThreadIdentityInput;
     threadB: ThreadIdentityInput;
