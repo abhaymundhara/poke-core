@@ -9,6 +9,8 @@ export type RaidingAiSummary = { averageScore: number; minScore: number; maxScor
 export type RaidingAiAudit = { results: RaidingAiCaseResult[]; summary: RaidingAiSummary; passed: boolean; gaps: string[] };
 
 function average(values: number[]): number { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0; }
+function minScore(values: number[]): number { let result = Number.POSITIVE_INFINITY; for (const value of values) if (value < result) result = value; return values.length ? result : 0; }
+function maxScore(values: number[]): number { let result = Number.NEGATIVE_INFINITY; for (const value of values) if (value > result) result = value; return values.length ? result : 0; }
 function scoreRatio(condition: boolean, weight: number): number { return condition ? weight : 0; }
 function assertNear(actual: string, expected: string): boolean { return actual === expected; }
 
@@ -67,7 +69,7 @@ function runBehavioralModelCase(): RaidingAiCaseResult {
 export function runRaidingAiBenchmark() {
   const results = [runComputerUseCase(), runDeepPrimitivesCase(), runMemoryConsolidationCase(), runBehavioralModelCase()];
   const scores = results.map((result) => result.score);
-  const summary: RaidingAiSummary = { averageScore: average(scores), minScore: Math.min(...scores), maxScore: Math.max(...scores), passRate: results.filter((result) => result.passed).length / results.length, verdict: results.every((result) => result.passed) ? 'pass' : 'needs-work' };
+  const summary: RaidingAiSummary = { averageScore: average(scores), minScore: minScore(scores), maxScore: maxScore(scores), passRate: results.filter((result) => result.passed).length / results.length, verdict: results.every((result) => result.passed) ? 'pass' : 'needs-work' };
   return { results, summary };
 }
 
