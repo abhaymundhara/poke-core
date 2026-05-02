@@ -60,11 +60,20 @@ function plannerTokens(objective: string, context: PlannerResolveContext, intent
   ]);
 }
 
-function overlap(left: string[], right: string[]): number {
-  if (left.length === 0 || right.length === 0) return 0;
-  const rightSet = new Set(right);
-  const matches = left.filter((token) => rightSet.has(token));
-  return matches.length / Math.max(left.length, right.length);
+function sourcePriorForSkill(intent: SearchIntent, skill: SkillDescriptor): number {
+  const bucket = sourceBucketForSkill(skill.name, intent);
+  const prior = intent.sourcePriors.find((entry) => entry.source === bucket || entry.source === skill.name) ?? null;
+  return prior ? clamp(prior.weight, 0, 1) : 0;
+}
+
+function frameAffinityForSkill(intent: SearchIntent, skill: SkillDescriptor): number {
+  const score = intent.semanticFrames.reduce((total, frame) => {
+    const frameText = `${frame.name} ${frame.description}`.toLowerCase();
+    const skillSignals = [skill.name, skill.domain, ...skill.capabilities].map((value) => value.toLowerCase());
+    const matchesSkill = skillSignals.some((signal) => frameText.includes(signal));
+    return total + (matchesSkill ? Math.max(0.05, frame.confidence * 0.12) : 0);
+  }, 0);
+  return clamp(score, 0, 0.25);
 }
 
 function normalizeSkills(skillCatalog?: SkillDescriptor[] | null): SkillDescriptor[] {
@@ -486,7 +495,7 @@ function selectedStepsFromPlans(actionPlans: PlannerActionPlan[], input: TaskInp
 
 function buildPlanFromIntent(input: TaskInput, intent: SearchIntent, context: PlannerResolveContext): TaskPlan {
   const skills = normalizeSkills(context.skillCatalog);
-  const affordances = skills.map((skill) => scoreSkill(skill, intent, context, plannerTokens(input.objective, context, intent))).sort((left, right) => right.score - left.score);
+  const affordances = skills.map((skill) => scoreSkill(skill, intent, context)).sort((left, right) => right.score - left.score);
   const strategy = chooseStrategy(intent, affordances);
   const recoveryPolicy = buildRecoveryPolicy(intent, affordances, strategy);
   context.recoveryPolicy = recoveryPolicy;
@@ -516,17 +525,7 @@ function buildPlanFromIntent(input: TaskInput, intent: SearchIntent, context: Pl
   }
 
   const steps = selectedStepsFromPlans(actionPlans, input, intent, context);
-  if (steps.length === 0) {
-    steps.push({
-      id: randomUUID(),
-      position: 0,
-      kind: 'verify',
-      title: 'validate objective shape',
-      skill: 'grounding',
-      args: { objective: input.objective, context, semanticIntent: intent, mode: 'fallback-verify' },
-      retryPolicy: { maxAttempts: 1, retryableKinds: [] },
-    });
-  }
+  if (steps.length === 0) throw new Error('planner could not synthesize an LLM-backed plan');
   for (const [index, step] of steps.entries()) step.position = index;
   const graph = buildIntentGraph(input, intent, affordances, strategy, context, steps, actionPlans, recoveryPolicy);
   return {

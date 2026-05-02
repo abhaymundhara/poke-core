@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
 import { buildPlan, cloneIntentGraph, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState } from './planner';
-import { SkillRouter } from './router';
 import { buildPokeGraph, type PokeGraphState } from './graph';
 import { RagCorpus } from './rag/retriever';
 import { EpisodicMemory } from './memory/episodic-memory';
@@ -22,17 +21,17 @@ export type TaskExecutionResult = {
 };
 
 export class PokeCoreOrchestrator {
-  private router: SkillRouter;
+  private readonly skills: SkillAdapter[];
   private rag = new RagCorpus();
   private working = new WorkingMemory();
   private episodic = new EpisodicMemory();
 
   constructor(private store: PokeCoreStore, skills: SkillAdapter[]) {
-    this.router = new SkillRouter(skills);
+    this.skills = skills.slice();
   }
 
   get skillCatalog() {
-    return this.router.descriptors();
+    return this.skills.map((skill) => skill.descriptor);
   }
 
   get skillPlaybooks() {
@@ -51,6 +50,32 @@ export class PokeCoreOrchestrator {
     return this.episodic;
   }
 
+  private scoreSkillAdapter(adapter: SkillAdapter, step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): number {
+    const descriptor = adapter.descriptor;
+    if (!adapter.canHandle(step)) return -1;
+    const affordance = plan.intentGraph?.toolAffordances.find((entry) => entry.skill === descriptor.name);
+    const executionSignal = state.executionProfile?.affordanceSignals?.find((entry) => entry.skill === descriptor.name);
+    const exactStepMatch = descriptor.name === step.skill ? 0.55 : 0;
+    const intentMatch = affordance?.score ?? 0;
+    const runtimeMatch = executionSignal?.score ?? 0;
+    const stepKindMatch = step.kind.startsWith('browser') && (descriptor.name === 'browser' || descriptor.name === 'computer-use')
+      ? 0.12
+      : step.kind.startsWith('harness') && descriptor.name === 'harness'
+        ? 0.12
+        : step.kind === 'integration.call' && descriptor.name === 'integration'
+          ? 0.12
+          : step.kind === 'autopilot.loop' && descriptor.name === 'autopilot'
+            ? 0.12
+            : 0;
+    const plannerBias = state.planner?.currentNodeId === step.id ? 0.05 : 0;
+    return exactStepMatch + intentMatch * 0.4 + runtimeMatch * 0.2 + stepKindMatch + plannerBias;
+  }
+
+  private resolveSkill(step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): SkillAdapter {
+    const candidates = this.skills.filter((candidate) => candidate.canHandle(step));
+    if (candidates.length === 0) throw new Error('no skill adapter can handle step ' + step.id + ' (' + step.kind + ')');
+    return candidates.slice().sort((left, right) => this.scoreSkillAdapter(right, step, plan, state) - this.scoreSkillAdapter(left, step, plan, state))[0]!;
+  }
   private ensurePlan(input: TaskInput): TaskPlan {
     const plan = buildPlan(input);
     const validation = validatePlan(plan.steps);
@@ -116,7 +141,7 @@ export class PokeCoreOrchestrator {
     const beforeSnapshot = this.store.recordSnapshot(task.taskId, 'executing', state);
     this.persistTransition(task.taskId, task.status, 'executing', { stepId: step.id, snapshotId: beforeSnapshot.snapshotId, stepIndex });
 
-    const skill = this.router.resolve(step);
+    const skill = this.resolveSkill(step, plan, state);
     const ctx: ExecutionContext = { taskId: task.taskId, task, plan, step, state };
     state.planner = state.planner ? { ...state.planner, currentNodeId: step.id, notes: [...state.planner.notes, `active:${step.id}`] } : createPlannerRuntimeState(plan);
     let attemptIndex = state.attempts[step.id] ?? 0;
