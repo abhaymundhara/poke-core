@@ -93,7 +93,7 @@ function words(value: string): string[] {
 
 function ratio(seed: string): number {
   const text = token(seed);
-  const total = Array.from(text).reduce((sum, char) => sum + (char.codePointAt(0) ?? 0), 0);
+  const total = Array.from(text).reduce((sum, char) => sum + (Number(char.codePointAt(0)) || 0), 0);
   return text.length === 0 ? 0 : total / text.length;
 }
 
@@ -105,11 +105,11 @@ function theoryCorpus(model: BehaviorModelBundle): string[] {
   const corpus = [
     model.summary,
     model.theory.summary,
-    ...model.theory.latentAxes.flatMap((axis) => [axis.axis, axis.direction, ...(axis.domains ?? []), ...(axis.examples ?? [])]),
-    ...model.theory.crossContextGeneralizations.flatMap((entry) => [entry.generalization, ...(entry.domains ?? []), ...(entry.evidence ?? [])]),
-    ...model.theory.persistentGoals.flatMap((entry) => [entry.goal, ...(entry.evidence ?? [])]),
-    ...model.policies.flatMap((policy) => [policy.name, policy.description, policy.rationale, policy.action.type, policy.action.value, ...(policy.contexts ?? [])]),
-    ...model.forecasts.flatMap((forecast) => [forecast.need, forecast.nextBestAction, forecast.rationale, ...(forecast.signals ?? []), ...(forecast.relatedPolicies ?? [])]),
+    ...model.theory.latentAxes.flatMap((axis) => [axis.axis, axis.direction, ...axis.domains, ...axis.examples]),
+    ...model.theory.crossContextGeneralizations.flatMap((entry) => [entry.generalization, ...entry.domains, ...entry.evidence]),
+    ...model.theory.persistentGoals.flatMap((entry) => [entry.goal, ...entry.evidence]),
+    ...model.policies.flatMap((policy) => [policy.name, policy.description, policy.rationale, policy.action.type, policy.action.value, ...policy.contexts]),
+    ...model.forecasts.flatMap((forecast) => [forecast.need, forecast.nextBestAction, forecast.rationale, ...forecast.signals, ...forecast.relatedPolicies]),
     ...model.nextBestActions,
   ];
   return corpus.flatMap((entry) => words(String(entry)));
