@@ -353,9 +353,9 @@ export class SignalBridge {
     const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
     const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: buildEpisodes(theory, now, localeHint), sourceDocuments: [] });
     const roleName = token(theory.summary, localeHint, timeZone, String(now));
+    const threadAnchor = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now)));
     const tabName = token(theory.summary, localeHint, timeZone, threadAnchor);
     const windowName = token(tabName, theory.summary, localeHint);
-    const threadAnchor = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now)));
     const subjectScope = token(threadAnchor, localeHint, timeZone);
     const rootMessageId = token(subjectScope, threadAnchor, localeHint);
     const timezoneLocal = wallClockString(new Date(now), timeZone);
