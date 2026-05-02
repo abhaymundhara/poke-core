@@ -113,7 +113,7 @@ export function reconcileAttendees(attendees: Attendee[], eventTimeZone: string,
 }
 
 function recurrenceSeed(spec: RecurrenceSpec): string {
-  return hashText(spec.startLocal, spec.timeZone, spec.rule, String(spec.durationMinutes ?? 0), spec.untilLocal ?? '');
+  return createHash('sha256').update([spec.startLocal, spec.timeZone, spec.rule, String(spec.durationMinutes ?? 0), spec.untilLocal ?? ''].join('|')).digest('hex');
 }
 
 function recurrenceCount(seed: string): number {
