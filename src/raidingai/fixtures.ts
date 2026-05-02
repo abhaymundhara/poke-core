@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { buildBehavioralModel } from '../memory/behavioral-theory';
-import { BehavioralLearningLayer, type BehavioralObservation, type BehavioralPattern } from '../memory/behavioral-learning';
+import { BehavioralLearningLayer, type BehavioralObservation, type BehavioralPattern, type LearnedBehaviorFact } from '../memory/behavioral-learning';
 import { createDriftingClock } from '../runtime/clock';
 import type { Attendee, RecurrenceSpec, ThreadIdentityInput } from '../deep-primitives';
 import type { VisionFrame } from '../skills/computer-use';
@@ -90,13 +90,19 @@ function buildBootstrapObservations(seed: string, rng: Rng): BehavioralObservati
   });
 }
 
-function buildBootstrapFacts(observations: BehavioralObservation[], seed: string, now: number): MemoryFact[] {
+function buildBootstrapFacts(observations: BehavioralObservation[], seed: string, now: number): LearnedBehaviorFact[] {
   return observations.map((observation, index) => ({
     key: hashText(seed, observation.subject, observation.category, String(index)).slice(0, 20),
-    value: `${observation.subject} ${observation.value}`.trim(),
+    value: (observation.subject + " " + observation.value).trim(),
     confidence: observation.confidence,
     source: observation.source,
     updatedAt: now - index * 11_000,
+    category: observation.category,
+    evidenceCount: observation.evidence?.length ?? 0,
+    firstObservedAt: observation.observedAt - 42_000,
+    lastObservedAt: observation.observedAt,
+    sources: [observation.source],
+    rationale: phraseFromText(observation.value, seed, index),
   }));
 }
 
@@ -236,7 +242,7 @@ function buildUiFrames(theory: UserBehaviorTheory, seed: string): VisionFrame[] 
           node('form', phraseFromTheory(theory, seed, `form-${mode}`, index + 4), `form-${mode}`, { action: `/${hashText(seed, 'draft').slice(0, 8)}` }, [
             node('textbox', phraseFromTheory(theory, seed, `search-${mode}`, index + 5), `search-${mode}`, { placeholder: phraseFromTheory(theory, seed, `placeholder-${mode}`, index + 6), 'aria-description': theory.summary }),
             node('textbox', phraseFromTheory(theory, seed, `bodybox-${mode}`, index + 7), `body-${mode}`, { placeholder: phraseFromTheory(theory, seed, `compose-${mode}`, index + 8) }),
-            node('button', phraseFromTheory(theory, seed, `save-${mode}`, index + 9), `save-${mode}`, { type: 'submit', 'data-action': hashText(seed, 'save').slice(0, 10) }),
+            ...(overlay ? [] : [node('button', phraseFromTheory(theory, seed, `save-${mode}`, index + 9), `save-${mode}`, { type: 'submit', 'data-action': hashText(seed, 'save').slice(0, 10) })]),
           ]),
         ]),
       ],
@@ -244,7 +250,6 @@ function buildUiFrames(theory: UserBehaviorTheory, seed: string): VisionFrame[] 
     if (overlay) {
       tree.children.push(node('dialog', phraseFromTheory(theory, seed, 'overlay', index + 10), `overlay-${mode}`, { 'aria-modal': 'true', 'data-overlay': hashText(seed, 'overlay').slice(0, 10) }, [
         node('paragraph', phraseFromTheory(theory, seed, 'overlay-copy', index + 11), `overlay-copy-${mode}`),
-        node('button', phraseFromTheory(theory, seed, 'overlay-return', index + 12), `overlay-return-${mode}`, { type: 'button', 'data-action': hashText(seed, 'return').slice(0, 10) }),
       ]));
     }
     return {
@@ -291,10 +296,55 @@ function buildRecurrence(seed: string): RecurrenceSpec {
   return { startLocal: `2026-03-09T${String(hour).padStart(2, '0')}:00:00`, timeZone: 'America/New_York', rule: `FREQ=WEEKLY;COUNT=3;BYDAY=${day}`, durationMinutes: 30 + (parseInt(token(seed, 'duration').slice(0, 2), 16) % 30) };
 }
 
+function parseOffsetMinutes(label: string): number {
+  const normalized = label.replace(/^utc/i, 'GMT').trim();
+  if (normalized === 'GMT' || normalized === 'UTC') return 0;
+  const match = normalized.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/i);
+  if (!match) return 0;
+  const sign = match[1] === '-' ? -1 : 1;
+  const hours = Number(match[2]);
+  const minutes = Number(match[3] ?? '0');
+  return sign * (hours * 60 + minutes);
+}
+
+function timePartsInZone(date: Date, timeZone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    hourCycle: 'h23',
+    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
+    timeZoneName: 'shortOffset',
+  }).formatToParts(date);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+  return {
+    year: Number(get('year')),
+    month: Number(get('month')),
+    day: Number(get('day')),
+    hour: Number(get('hour')),
+    minute: Number(get('minute')),
+    second: Number(get('second')),
+    offsetMinutes: parseOffsetMinutes(get('timeZoneName')),
+  };
+}
+
+function normalizeWallTimeLocal(localIso: string, timeZone: string): string {
+  const match = localIso.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
+  if (!match) throw new Error('invalid local datetime: ' + localIso);
+  const target = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]), hour: Number(match[4]), minute: Number(match[5]), second: Number(match[6] ?? '0') };
+  let adjusted = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, target.second);
+  for (let i = 0; i < 4; i += 1) {
+    const offsetMinutes = timePartsInZone(new Date(adjusted), timeZone).offsetMinutes;
+    const next = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, target.second) - offsetMinutes * 60_000;
+    if (Math.abs(next - adjusted) < 1_000) { adjusted = next; break; }
+    adjusted = next;
+  }
+  return new Date(adjusted).toISOString();
+}
+
 function buildTimezone(seed: string): { local: string; timeZone: string; expectedUtc: string } {
   const hour = 8 + (parseInt(token(seed, 'tz-hour').slice(0, 2), 16) % 3);
   const minute = [0, 15, 30, 45][parseInt(token(seed, 'tz-minute').slice(0, 2), 16) % 4];
-  return { local: `2026-03-08T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`, timeZone: 'America/New_York', expectedUtc: `2026-03-08T${String(hour + 4).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00.000Z` };
+  const local = `2026-03-08T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00`;
+  return { local, timeZone: 'America/New_York', expectedUtc: normalizeWallTimeLocal(local, 'America/New_York') };
 }
 
 function buildTaskHint(theory: UserBehaviorTheory, seed: string): string {
@@ -314,12 +364,16 @@ export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string
   const rng = createRng(seed);
   const now = input.now ?? Date.now();
   const initialObservations = buildBootstrapObservations(seed, rng);
-  const initialFacts = buildBootstrapFacts(initialObservations, seed, now);
+  const initialLearnedFacts = buildBootstrapFacts(initialObservations, seed, now);
+  const initialFacts = initialLearnedFacts.map(({ category, evidenceCount, firstObservedAt, lastObservedAt, sources, rationale, ...fact }) => ({ ...fact }));
   const initialPatterns = buildBootstrapPatterns(initialObservations);
-  const bootstrap = buildBehavioralModel({ now, observations: initialObservations, facts: initialFacts, patterns: initialPatterns, priorTheory: null });
+  const bootstrap = buildBehavioralModel({ now, observations: initialObservations, facts: initialLearnedFacts, patterns: initialPatterns, priorTheory: null });
   const learning = buildLearningLayer(seed);
-  const learned = learning.learn({ now, workingFacts: initialFacts, episodicItems: synthesizeEpisodesFromTheory(bootstrap.theory, seed, now), sourceDocuments: [] });
-  const theory = learned.theory ?? bootstrap.theory;
+  const probeEpisodes = synthesizeEpisodesFromTheory(bootstrap.theory, seed, now);
+  learning.observeFacts(initialFacts);
+  learning.observeEpisodes(probeEpisodes);
+  const snapshot = learning.snapshot();
+  const theory = snapshot.theory ?? bootstrap.theory;
   const taskHint = cleanText(input.taskHint?.trim() || buildTaskHint(theory, seed));
   const label = buildLabel(seed, taskHint);
   const frames = buildUiFrames(theory, seed);
@@ -390,61 +444,3 @@ export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string
 
 export const RAIDINGAI_CLOCK = createDriftingClock();
 export const RAIDINGAI_FIXTURES = buildRaidingAiScenario();
-
-function buildBootstrapObservations(seed: string, rng: Rng): BehavioralObservation[] {
-  const categories = ['tone', 'channel', 'relationship', 'preference', 'signal', 'habit'] as const;
-  return categories.map((category, index) => {
-    const subject = token(seed, 'subject', index);
-    const value = [token(seed, 'value', index), token(seed, 'value', index + 1), token(seed, 'value', index + 2)].join(' ');
-    return {
-      subject,
-      value,
-      category,
-      source: `scenario-${token(seed, 'source', index)}`,
-      confidence: Number((0.72 + rng() * 0.23).toFixed(3)),
-      observedAt: Date.now() - (index + 1) * 17_000,
-      evidence: [subject, value, token(seed, 'evidence', index)],
-      context: { seed, index },
-    };
-  });
-}
-
-function buildBootstrapFacts(observations: BehavioralObservation[], seed: string, now: number): MemoryFact[] {
-  return observations.map((observation, index) => ({
-    key: hashText(seed, observation.subject, observation.category, String(index)).slice(0, 20),
-    value: `${observation.subject} ${observation.value}`.trim(),
-    confidence: observation.confidence,
-    source: observation.source,
-    updatedAt: now - index * 11_000,
-  }));
-}
-
-function buildBootstrapPatterns(observations: BehavioralObservation[]): BehavioralPattern[] {
-  return observations.map((observation, index) => ({
-    key: hashText(observation.subject, observation.value, String(index)).slice(0, 24),
-    category: observation.category,
-    subject: observation.subject,
-    value: observation.value,
-    evidenceCount: observation.evidence?.length ?? 0,
-    sourceCount: 1,
-    confidence: observation.confidence,
-    firstObservedAt: observation.observedAt - 42_000,
-    lastObservedAt: observation.observedAt,
-    sources: [observation.source],
-    examples: observation.evidence?.slice(0, 3) ?? [],
-    contradictionScore: Number((0.04 + (index % 3) * 0.03).toFixed(3)),
-  }));
-}
-
-function synthesizeEpisodesFromTheory(theory: UserBehaviorTheory, seed: string, now: number): EpisodicMemoryItem[] {
-  const source = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
-  return source.slice(0, 3).map((text, index) => ({
-    id: `ep-${hashText(seed, text, String(index)).slice(0, 18)}`,
-    taskId: `task-${hashText(seed, 'task', String(index)).slice(0, 18)}`,
-    category: index === 0 ? 'decision' : index === 1 ? 'preference' : 'correction',
-    summary: phraseFromText(text, seed, index),
-    signals: words(text).slice(0, 5),
-    score: Number((0.78 + (index * 0.04)).toFixed(3)),
-    createdAt: now - index * 19_000,
-  }));
-}

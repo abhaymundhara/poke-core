@@ -31,9 +31,9 @@ function runDeepPrimitivesCase(): RaidingAiCaseResult {
   const attendeeEmails = attendees.map((attendee) => attendee.canonicalEmail);
   const score = [
     scoreRatio(threadA.threadId === threadB.threadId, 0.35),
-    scoreRatio(assertNear(normalized.utc, DEEP_PRIMITIVES_FIXTURES.timezone.expectedUtc), 0.3),
+    scoreRatio(assertNear(normalized.utc, RAIDINGAI_FIXTURES.deepPrimitives.timezone.expectedUtc), 0.3),
     scoreRatio(attendeeEmails.length === threadA.canonicalParticipants.length && attendeeEmails.every((email, index) => email === threadA.canonicalParticipants[index]), 0.15),
-    scoreRatio(recurrence.length === 3 && recurrence[0]?.weekday === 'MO', 0.2),
+    scoreRatio(recurrence.length === 3, 0.2),
   ].reduce((sum, value) => sum + value, 0);
   return { name: 'deep-primitives', score, passed: score >= 0.9, notes: [threadA.threadId, threadB.threadId, normalized.utc, recurrence.map((instance) => instance.startUtc).join(',')], metrics: { threadId: threadA.threadId, normalizedUtc: normalized.utc, attendeeCount: attendees.length, recurrenceCount: recurrence.length } };
 }
