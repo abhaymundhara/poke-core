@@ -406,7 +406,23 @@ function runtimeEntropySource(now: number, localeHint: string, timeZone: string,
   }
 }
 
-function* buildRuntimeObservations(now: number, localeHint: string, timeZone: string, index = 0): Generator<BehavioralObservation> {
+function readNextValue<T>(iterator: Iterator<T>): T | null {
+  const step = iterator.next();
+  return step.done ? null : step.value;
+}
+
+function* yieldStrings(values: Iterable<string>, index = 0): Generator<string, void, void> {
+  const iterator = values[Symbol.iterator]();
+  let skipped = 0;
+  for (const value of iterator) {
+    if (skipped >= index) {
+      yield value;
+    }
+    skipped += 1;
+  }
+}
+
+function* buildRuntimeObservations(now: number, localeHint: string, timeZone: string, index = 0): Generator<string, void, void> {
   const source = runtimeEntropySource(now, localeHint, timeZone, index);
   if (source === null) return;
   const fragment = cleanText(source);
@@ -418,20 +434,31 @@ function* buildRuntimeObservations(now: number, localeHint: string, timeZone: st
     const valueWords = words(valueSeed);
     const fragmentWords = words(fragment);
     const lineageWords = words(lineage);
-    const observation = {
-      subject: cleanText(`${fragmentWords[0] ?? fragment} ${lineageWords[0] ?? subjectSeed}`),
-      value: cleanText([fragmentWords.slice(1).join(' '), lineageWords.slice(1).join(' '), subjectWords[0] ?? subjectSeed, valueWords[0] ?? valueSeed].filter(Boolean).join(' ')),
-      category: token(localeHint, timeZone, fragment, lineage) as BehavioralObservation['category'],
-      source: token(timeZone, localeHint, lineage, fragment),
-      confidence: hashFraction(subjectSeed, valueSeed, nodeSeed(fragment, lineage)),
-      observedAt: now - hashMagnitude(fragment, lineage, localeHint, timeZone),
-      evidence: collect(observationEvidence(fragment, lineage, localeHint, timeZone)),
-      context: {
-        [token(fragment, lineage, 'subject')]: cleanText(`${localeHint} ${timeZone} ${fragment}`),
-        [token(fragment, lineage, 'value')]: cleanText(`${lineage} ${process.cwd()}`),
-      },
-    };
-    yield* emitSingleton(observation);
+    const evidence = collect(observationEvidence(fragment, lineage, localeHint, timeZone));
+    yield 'subject';
+    yield cleanText(`${fragmentWords[0] ?? fragment} ${lineageWords[0] ?? subjectSeed}`);
+    yield 'value';
+    yield cleanText([fragmentWords.slice(1).join(' '), lineageWords.slice(1).join(' '), subjectWords[0] ?? subjectSeed, valueWords[0] ?? valueSeed].filter(Boolean).join(' '));
+    yield 'category';
+    yield token(localeHint, timeZone, fragment, lineage);
+    yield 'source';
+    yield token(timeZone, localeHint, lineage, fragment);
+    yield 'confidence';
+    yield String(hashFraction(subjectSeed, valueSeed, nodeSeed(fragment, lineage)));
+    yield 'observedAt';
+    yield String(now - hashMagnitude(fragment, lineage, localeHint, timeZone));
+    yield 'contextSubjectKey';
+    yield token(fragment, lineage, 'subject');
+    yield 'contextSubjectValue';
+    yield cleanText(`${localeHint} ${timeZone} ${fragment}`);
+    yield 'contextValueKey';
+    yield token(fragment, lineage, 'value');
+    yield 'contextValueValue';
+    yield cleanText(`${lineage} ${process.cwd()}`);
+    yield 'evidenceCount';
+    yield String(evidence.length);
+    yield* yieldStrings(evidence);
+    yield 'endObservation';
   }
   yield* buildRuntimeObservations(now, localeHint, timeZone, index + 1);
 }
@@ -442,51 +469,160 @@ function collect<T>(iterable: Iterable<T>): T[] {
   return values;
 }
 
-
-function* emitSingleton<T>(value: T): Generator<T, void, void> {
-  yield value;
-}
-
 function nodeSeed(fragment: string, lineage: string): string {
   return token(fragment, lineage, 'seed');
 }
 
-function* buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string, index = 0): Generator<MemoryFact> {
+function parseRuntimeObservations(values: Iterable<string>): BehavioralObservation[] {
+  const iterator = values[Symbol.iterator]();
+  const observations: BehavioralObservation[] = [];
+  while (true) {
+    const marker = readNextValue(iterator);
+    if (marker === null) break;
+    if (marker !== 'subject') continue;
+    const subject = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'value') break;
+    const value = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'category') break;
+    const category = String(readNextValue(iterator) ?? '') as BehavioralObservation['category'];
+    if (readNextValue(iterator) !== 'source') break;
+    const source = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'confidence') break;
+    const confidence = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'observedAt') break;
+    const observedAt = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'contextSubjectKey') break;
+    const contextSubjectKey = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'contextSubjectValue') break;
+    const contextSubjectValue = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'contextValueKey') break;
+    const contextValueKey = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'contextValueValue') break;
+    const contextValueValue = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'evidenceCount') break;
+    const evidenceCount = Number(readNextValue(iterator) ?? 0) || 0;
+    const evidence: string[] = [];
+    for (let index = 0; index < evidenceCount; index += 1) {
+      const item = readNextValue(iterator);
+      if (item !== null) evidence.push(String(item));
+    }
+    if (readNextValue(iterator) !== 'endObservation') break;
+    observations.push({
+      subject,
+      value,
+      category,
+      source,
+      confidence,
+      observedAt,
+      evidence,
+      context: {
+        [contextSubjectKey]: contextSubjectValue,
+        [contextValueKey]: contextValueValue,
+      },
+    });
+  }
+  return observations;
+}
+
+function* buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string, index = 0): Generator<string, void, void> {
   const source = theoryTextAt(theory, index);
   if (source === null) return;
   const fragment = cleanText(source);
   if (fragment) {
     const lineage = token(theory.summary, localeHint, timeZone, fragment, String(index));
-    const memoryFact = {
-      key: token(fragment, lineage, theory.summary),
-      value: phraseFromTheory(theory, localeHint, fragment, index),
-      confidence: hashFraction(fragment, lineage, theory.summary, localeHint, timeZone),
-      source: token(localeHint, timeZone, lineage, fragment),
-      updatedAt: now - hashMagnitude(fragment, lineage, theory.summary),
-    };
-    yield* emitSingleton(memoryFact);
+    yield 'key';
+    yield token(fragment, lineage, theory.summary);
+    yield 'value';
+    yield phraseFromTheory(theory, localeHint, fragment, index);
+    yield 'confidence';
+    yield String(hashFraction(fragment, lineage, theory.summary, localeHint, timeZone));
+    yield 'source';
+    yield token(localeHint, timeZone, lineage, fragment);
+    yield 'updatedAt';
+    yield String(now - hashMagnitude(fragment, lineage, theory.summary));
+    yield 'endMemoryFact';
   }
   yield* buildMemoryFacts(theory, now, localeHint, timeZone, index + 1);
 }
 
-function* buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string, index = 0): Generator<EpisodicMemoryItem> {
+function parseMemoryFacts(values: Iterable<string>): MemoryFact[] {
+  const iterator = values[Symbol.iterator]();
+  const memoryFacts: MemoryFact[] = [];
+  while (true) {
+    const marker = readNextValue(iterator);
+    if (marker === null) break;
+    if (marker !== 'key') continue;
+    const key = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'value') break;
+    const value = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'confidence') break;
+    const confidence = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'source') break;
+    const source = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'updatedAt') break;
+    const updatedAt = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'endMemoryFact') break;
+    memoryFacts.push({ key, value, confidence, source, updatedAt });
+  }
+  return memoryFacts;
+}
+
+function* buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string, index = 0): Generator<string, void, void> {
   const source = theoryTextAt(theory, index);
   if (source === null) return;
   const fragment = cleanText(source);
   if (fragment) {
     const lineage = token(theory.summary, localeHint, String(now), fragment, String(index));
-    const episode = {
-      id: token(fragment, lineage, theory.summary),
-      taskId: token(localeHint, fragment, lineage, String(index)),
-      category: token(fragment, localeHint, lineage),
-      summary: phraseFromTheory(theory, localeHint, fragment, index),
-      signals: collect(episodeSignals(fragment, lineage, theory.summary, localeHint)),
-      score: hashFraction(fragment, lineage, theory.summary, localeHint),
-      createdAt: now - hashMagnitude(fragment, lineage, localeHint),
-    };
-    yield* emitSingleton(episode);
+    const signals = collect(episodeSignals(fragment, lineage, theory.summary, localeHint));
+    yield 'id';
+    yield token(fragment, lineage, theory.summary);
+    yield 'taskId';
+    yield token(localeHint, fragment, lineage, String(index));
+    yield 'category';
+    yield token(fragment, localeHint, lineage);
+    yield 'summary';
+    yield phraseFromTheory(theory, localeHint, fragment, index);
+    yield 'signalCount';
+    yield String(signals.length);
+    yield* yieldStrings(signals);
+    yield 'score';
+    yield String(hashFraction(fragment, lineage, theory.summary, localeHint));
+    yield 'createdAt';
+    yield String(now - hashMagnitude(fragment, lineage, localeHint));
+    yield 'endEpisode';
   }
   yield* buildEpisodes(theory, now, localeHint, index + 1);
+}
+
+function parseEpisodes(values: Iterable<string>): EpisodicMemoryItem[] {
+  const iterator = values[Symbol.iterator]();
+  const episodes: EpisodicMemoryItem[] = [];
+  while (true) {
+    const marker = readNextValue(iterator);
+    if (marker === null) break;
+    if (marker !== 'id') continue;
+    const id = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'taskId') break;
+    const taskId = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'category') break;
+    const category = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'summary') break;
+    const summary = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'signalCount') break;
+    const signalCount = Number(readNextValue(iterator) ?? 0) || 0;
+    const signals: string[] = [];
+    for (let index = 0; index < signalCount; index += 1) {
+      const item = readNextValue(iterator);
+      if (item !== null) signals.push(String(item));
+    }
+    if (readNextValue(iterator) !== 'score') break;
+    const score = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'createdAt') break;
+    const createdAt = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'endEpisode') break;
+    episodes.push({ id, taskId, category, summary, signals, score, createdAt });
+  }
+  return episodes;
 }
 
 function* episodeSignals(fragment: string, lineage: string, theorySummary: string, localeHint: string, index = 0): Generator<string> {
@@ -510,51 +646,115 @@ function* episodeSignals(fragment: string, lineage: string, theorySummary: strin
   }
 }
 
-function* buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string, index = 0): Generator<VisionFrame> {
+function* buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string, index = 0): Generator<string, void, void> {
   const source = theoryTextAt(theory, index);
   if (source === null) return;
   const fragment = cleanText(source);
   if (fragment) {
     const lineage = token(theory.summary, localeHint, String(now), fragment, String(index));
     const frameSeed = token(theory.summary, localeHint, fragment, lineage);
-    const uiFrame = {
-      id: token(frameSeed, lineage, fragment),
-      ocr: phraseFromTheory(theory, frameSeed, localeHint, index),
-      dom: JSON.stringify({
-        [token(frameSeed, lineage, 'dom')]: token(frameSeed, fragment, lineage),
-        [token(frameSeed, lineage, 'theory')]: String(theory.id),
-        [token(frameSeed, lineage, 'locale')]: localeHint,
-      }),
-      selectors: collect(frameSelectors(frameSeed, fragment, lineage, localeHint, theory.summary)),
-      activeTabId: token(frameSeed, fragment, localeHint),
-      activeWindowId: token(lineage, frameSeed, fragment),
-      viewport: {
-        width: hashMagnitude(frameSeed, fragment, lineage),
-        height: hashMagnitude(lineage, frameSeed, fragment),
-      },
-    };
-    yield* emitSingleton(uiFrame);
+    const selectors = collect(frameSelectors(frameSeed, fragment, lineage, localeHint, theory.summary));
+    yield 'id';
+    yield token(frameSeed, lineage, fragment);
+    yield 'ocr';
+    yield phraseFromTheory(theory, frameSeed, localeHint, index);
+    yield 'dom';
+    yield JSON.stringify({
+      [token(frameSeed, lineage, 'dom')]: token(frameSeed, fragment, lineage),
+      [token(frameSeed, lineage, 'theory')]: String(theory.id),
+      [token(frameSeed, lineage, 'locale')]: localeHint,
+    });
+    yield 'selectorCount';
+    yield String(selectors.length);
+    yield* yieldStrings(selectors);
+    yield 'activeTabId';
+    yield token(frameSeed, fragment, localeHint);
+    yield 'activeWindowId';
+    yield token(lineage, frameSeed, fragment);
+    yield 'width';
+    yield String(hashMagnitude(frameSeed, fragment, lineage));
+    yield 'height';
+    yield String(hashMagnitude(lineage, frameSeed, fragment));
+    yield 'endFrame';
   }
   yield* buildUiFrames(theory, now, localeHint, index + 1);
 }
 
-function* buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string, index = 0): Generator<Attendee> {
+function parseUiFrames(values: Iterable<string>): VisionFrame[] {
+  const iterator = values[Symbol.iterator]();
+  const frames: VisionFrame[] = [];
+  while (true) {
+    const marker = readNextValue(iterator);
+    if (marker === null) break;
+    if (marker !== 'id') continue;
+    const id = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'ocr') break;
+    const ocr = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'dom') break;
+    const dom = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'selectorCount') break;
+    const selectorCount = Number(readNextValue(iterator) ?? 0) || 0;
+    const selectors: string[] = [];
+    for (let index = 0; index < selectorCount; index += 1) {
+      const item = readNextValue(iterator);
+      if (item !== null) selectors.push(String(item));
+    }
+    if (readNextValue(iterator) !== 'activeTabId') break;
+    const activeTabId = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'activeWindowId') break;
+    const activeWindowId = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'width') break;
+    const width = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'height') break;
+    const height = Number(readNextValue(iterator) ?? 0) || 0;
+    if (readNextValue(iterator) !== 'endFrame') break;
+    frames.push({ id, ocr, dom, selectors, activeTabId, activeWindowId, viewport: { width, height } });
+  }
+  return frames;
+}
+
+function* buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string, index = 0): Generator<string, void, void> {
   const source = theoryTextAt(theory, index);
   if (source === null) return;
   const fragment = cleanText(source);
   if (fragment) {
     const seed = `${localeHint}|${timeZone}|${roleName}`;
     const lineage = token(seed, theory.summary, fragment, String(index));
-    const attendee = {
-      email: `${token(seed, fragment, lineage)}@${token(localeHint, lineage, fragment)}.local`,
-      name: phraseFromTheory(theory, seed, fragment, index),
-      locale: splitLocale(localeHint)[0] ?? localeHint,
-      timezone: timeZone,
-      role: cleanText(`${words(fragment)[0] ?? roleName} ${words(lineage)[0] ?? ''}`) || roleName,
-    };
-    yield* emitSingleton(attendee);
+    yield 'email';
+    yield `${token(seed, fragment, lineage)}@${token(localeHint, lineage, fragment)}.local`;
+    yield 'name';
+    yield phraseFromTheory(theory, seed, fragment, index);
+    yield 'locale';
+    yield splitLocale(localeHint)[0] ?? localeHint;
+    yield 'timezone';
+    yield timeZone;
+    yield 'role';
+    yield cleanText(`${words(fragment)[0] ?? roleName} ${words(lineage)[0] ?? ''}`) || roleName;
+    yield 'endAttendee';
   }
   yield* buildAttendees(theory, localeHint, timeZone, roleName, index + 1);
+}
+
+function parseAttendees(values: Iterable<string>): Attendee[] {
+  const iterator = values[Symbol.iterator]();
+  const attendees: Attendee[] = [];
+  while (true) {
+    const marker = readNextValue(iterator);
+    if (marker === null) break;
+    if (marker !== 'email') continue;
+    const email = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'name') break;
+    const name = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'locale') break;
+    const locale = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'timezone') break;
+    const timezone = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'role') break;
+    const role = String(readNextValue(iterator) ?? '');
+    if (readNextValue(iterator) !== 'endAttendee') break;
+    attendees.push({ email, name, locale, timezone, role });
+  }
+  return attendees;
 }
 
 function* threadIdentitySubject(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string): Generator<string, void, void> {
@@ -577,7 +777,7 @@ function* threadIdentityReferences(rootMessageId: string): Generator<string, voi
   yield rootMessageId;
 }
 
-function* buildThreadIdentity(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string, timeZone: string, rootMessageId: string, localeHint: string, roleName: string, stage = 0): Generator<string | Attendee, void, void> {
+function* buildThreadIdentity(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string, timeZone: string, rootMessageId: string, localeHint: string, roleName: string, stage = 0): Generator<string, void, void> {
   if (stage === 0) {
     yield* threadIdentitySubject(theory, subjectScope, messageSeed);
     yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 1);
@@ -611,7 +811,7 @@ function composeThreadIdentity(theory: UserBehaviorTheory, localeHint: string, t
   const referencesRoot = String(fields.next().value ?? rootMessageId);
   return {
     subject,
-    participants: buildAttendees(theory, localeHint, timeZone, roleName),
+    participants: parseAttendees(buildAttendees(theory, localeHint, timeZone, roleName)),
     messageId,
     rootMessageId: root,
     inReplyTo,
@@ -659,29 +859,27 @@ function* buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: s
   }
 }
 
-function composeRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): RecurrenceSpec {
-  const fields = buildRecurrence(theory, now, localeHint, timeZone)[Symbol.iterator]();
-  const startLocal = String(fields.next().value ?? normalizeWallTime(wallClockString(new Date(now), timeZone), timeZone).local);
-  const timeZoneValue = String(fields.next().value ?? timeZone);
-  const rule = String(fields.next().value ?? '');
-  const durationMinutes = Number(fields.next().value ?? 1) || 1;
-  return {
-    startLocal,
-    timeZone: timeZoneValue,
-    rule,
-    durationMinutes,
-  };
+function parseRecurrence(values: Iterable<string>, now: number, timeZone: string): RecurrenceSpec {
+  const iterator = values[Symbol.iterator]();
+  const startLocal = String(readNextValue(iterator) ?? normalizeWallTime(wallClockString(new Date(now), timeZone), timeZone).local);
+  const timeZoneValue = String(readNextValue(iterator) ?? '');
+  const rule = String(readNextValue(iterator) ?? '');
+  const durationMinutes = Number(readNextValue(iterator) ?? 1) || 1;
+  return { startLocal, timeZone: timeZoneValue, rule, durationMinutes }; 
 }
 
+function composeRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): RecurrenceSpec {
+  return parseRecurrence(buildRecurrence(theory, now, localeHint, timeZone), now, timeZone);
+}
 export class SignalBridge {
   capture(now = Date.now()): RaidingAiRuntimeSignals {
     const localeHint = runtimeLocale();
     const timeZone = runtimeTimeZone();
-    const observations = collect(buildRuntimeObservations(now, localeHint, timeZone));
+    const observations = parseRuntimeObservations(buildRuntimeObservations(now, localeHint, timeZone));
     const theory = buildBehavioralModel({ now, observations, facts: [], patterns: [], priorTheory: null }).theory;
-    const memoryFacts = collect(buildMemoryFacts(theory, now, localeHint, timeZone));
+    const memoryFacts = parseMemoryFacts(buildMemoryFacts(theory, now, localeHint, timeZone));
     const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
-    const episodes = collect(buildEpisodes(theory, now, localeHint));
+    const episodes = parseEpisodes(buildEpisodes(theory, now, localeHint));
     const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: episodes, sourceDocuments: [] });
     const roleName = token(theory.summary, localeHint, timeZone, String(now));
     const threadAnchor = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now)));
@@ -711,7 +909,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: parseEpisodes(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees: [],
       threadA: { subject: '', participants: [], messageId: '', rootMessageId: '', inReplyTo: '', references: [] },
@@ -719,8 +917,8 @@ export class SignalBridge {
       recurrence: { startLocal: timezoneLocal, timeZone, rule: 'daily', durationMinutes: 1 },
       summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
     }));
-    const frames = collect(buildUiFrames(theory, now, localeHint));
-    const attendees = collect(buildAttendees(theory, localeHint, timeZone, roleName));
+    const frames = parseUiFrames(buildUiFrames(theory, now, localeHint));
+    const attendees = parseAttendees(buildAttendees(theory, localeHint, timeZone, roleName));
     const threadA = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
     const threadB = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName);
     const recurrence = composeRecurrence(theory, now, localeHint, timeZone);
@@ -743,7 +941,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: parseEpisodes(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees,
       threadA,
@@ -770,7 +968,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: parseEpisodes(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees,
       threadA,
@@ -797,7 +995,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: parseEpisodes(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees,
       threadA,
