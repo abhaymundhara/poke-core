@@ -263,13 +263,15 @@ function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone
   const seed = `${localeHint}|${timeZone}|${roleName}`;
   const attendeeCount = Number.parseInt(token(seed, theory.summary, 'attendees').slice(0, 1), 16) % 3 + 2;
   const attendeeSeeds = recursiveSeedSeries(seed, 4, attendeeCount);
-  return recursiveSeries(attendeeSeeds.length, (index) => ({
+  return recursiveSeries(attendeeSeeds.length, (index) => {
     const fragment = attendeeSeeds[index] ?? seed.slice(index * 4, index * 4 + 4);
-    email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
-    name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
-    locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
-    timezone: timeZone,
-  }));
+    return {
+      email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
+      name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
+      locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
+      timezone: timeZone,
+    };
+  });
 }
 
 function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): ThreadIdentityInput {
