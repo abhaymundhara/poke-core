@@ -134,59 +134,46 @@ function buildCheckIn(label: string, minutes: number, channel: AutopilotCheckIn[
   };
 }
 
-function inferSources(objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSignalSource[] {
-  const haystack = `${objective} ${JSON.stringify(harnessState)} ${JSON.stringify(context)}`.toLowerCase();
+function inferSources(_objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSignalSource[] {
   const sources: AutopilotSignalSource[] = [];
-  if (/(email|inbox|thread|reply|forward|mail|gmail|outlook)/.test(haystack)) sources.push('email');
-  if (/(calendar|meeting|schedule|reschedule|availability|timezone|event)/.test(haystack)) sources.push('calendar');
-  if (/(browser|web|site|page|url|navigate|click|extract|screenshot|dom)/.test(haystack)) sources.push('browser');
-  if (/(file|filesystem|folder|directory|path|write|read|diff|export|scan)/.test(haystack)) sources.push('filesystem');
-  if (/(github|notion|linear|todoist|vercel|slack|integration|repo|issue)/.test(haystack)) sources.push('integration');
-  if (/(preference|profile|tone|style|memory|model|grounding)/.test(haystack)) sources.push('memory');
+  if (Array.isArray(context.signals) && context.signals.length > 0) sources.push('system');
+  if (Array.isArray(harnessState.relationships) && harnessState.relationships.length > 0) sources.push('email');
+  if (Array.isArray(harnessState.calendar) && harnessState.calendar.length > 0) sources.push('calendar');
+  if (Array.isArray(harnessState.threads) && harnessState.threads.length > 0) sources.push('email');
+  if (Array.isArray(harnessState.files) && harnessState.files.length > 0) sources.push('filesystem');
   return unique(sources.length > 0 ? sources : ['system']);
 }
 
-function defaultSubscriptions(objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSubscription[] {
+function defaultSubscriptions(_objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSubscription[] {
   const snapshot = summarizeHarnessState(harnessState);
-  const haystack = `${objective} ${JSON.stringify(harnessState)} ${JSON.stringify(context)}`.toLowerCase();
   const subs: AutopilotSubscription[] = [];
-  if (snapshot.relationshipWeight >= 0.4 || /(relationship|follow up|reply|contact|thread)/.test(haystack)) {
+  if (snapshot.relationshipWeight >= 0.4 || snapshot.openThreads > 0) {
     subs.push(createSubscription({ source: 'email', topic: 'relationship-watch', match: ['thread', 'reply', 'follow up', 'contact'], debounceMs: 300, throttleMs: 1_500 }));
-  }
-  if (snapshot.openThreads > 0 || /(inbox|thread|email|message)/.test(haystack)) {
     subs.push(createSubscription({ source: 'email', topic: 'thread-watch', match: ['inbox', 'thread', 'reply'], debounceMs: 250, throttleMs: 1_200 }));
   }
-  if (snapshot.calendarConflicts > 0 || /(calendar|meeting|schedule|availability|timezone)/.test(haystack)) {
+  if (snapshot.calendarConflicts > 0) {
     subs.push(createSubscription({ source: 'calendar', topic: 'schedule-watch', match: ['meeting', 'schedule', 'conflict', 'availability'], debounceMs: 200, throttleMs: 900 }));
   }
-  if (snapshot.staleTransactional > 0 || /(invoice|receipt|booking|payment|confirmation|deadline)/.test(haystack)) {
+  if (snapshot.staleTransactional > 0) {
     subs.push(createSubscription({ source: 'email', topic: 'transactional-watch', match: ['invoice', 'receipt', 'booking', 'payment', 'confirmation'], debounceMs: 500, throttleMs: 2_000 }));
   }
-  if (snapshot.signalIntensity > 0.25 || /(signal|telemetry|trend|monitor|observe|heartbeat)/.test(haystack)) {
+  if (snapshot.signalIntensity > 0.25 || (Array.isArray(context.observations) && context.observations.length > 0)) {
     subs.push(createSubscription({ source: 'system', topic: 'signal-watch', match: ['signal', 'telemetry', 'trend', 'heartbeat'], debounceMs: 150, throttleMs: 600 }));
   }
   return subs.length > 0 ? subs : [createSubscription({ source: 'system', topic: 'idle-watch', match: ['idle', 'resume'], debounceMs: 250, throttleMs: 1_000 })];
 }
 
 function signalFromObjective(source: AutopilotSignalSource, objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSignal {
-  const lower = `${objective} ${JSON.stringify(harnessState)} ${JSON.stringify(context)}`.toLowerCase();
-  const tags: string[] = [];
-  if (/(relationship|contact|follow up|reply)/.test(lower)) tags.push('relationship');
-  if (/(thread|inbox|email|message)/.test(lower)) tags.push('thread');
-  if (/(calendar|meeting|schedule|availability|timezone)/.test(lower)) tags.push('calendar');
-  if (/(signal|telemetry|trend|monitor|observe)/.test(lower)) tags.push('signal');
-  if (/(browser|web|page|click|extract)/.test(lower)) tags.push('browser');
-  if (/(file|filesystem|path|folder|diff|scan)/.test(lower)) tags.push('filesystem');
   return createSignal({
     source,
-    key: tags[0] ?? source,
+    key: source === 'calendar' ? 'schedule' : source === 'email' ? 'thread' : 'system',
     reason: normalizeText(context.reason) || objective,
     payload: { objective, harnessState, context },
-    priority: /(urgent|asap|today|tomorrow|soon)/.test(lower) ? 0.9 : 0.7,
-    debounceMs: /(signal|trend|monitor|observe|thread|calendar)/.test(lower) ? 220 : 120,
-    throttleMs: /(relationship|thread|calendar|email)/.test(lower) ? 1_200 : 900,
-    wakeMode: /(signal|thread|calendar|calendar conflict|inbox)/.test(lower) ? 'debounce' : 'immediate',
-    tags: tags.length > 0 ? tags : ['bootstrap'],
+    priority: 0.68,
+    debounceMs: 220,
+    throttleMs: 1_200,
+    wakeMode: 'debounce',
+    tags: ['semantic-bootstrap'],
   });
 }
 
@@ -233,7 +220,7 @@ export class AutopilotEngine {
         this.auditTrail.push(`live-wake:${reason}`);
         this.auditTrail.push(`live-wake-payload:${JSON.stringify(payload)}`);
       },
-      nluProvider: (this.context.nluProvider as typeof DEFAULT_SEMANTIC_NLU_PROVIDER | undefined) ?? DEFAULT_SEMANTIC_NLU_PROVIDER,
+      nluProvider: DEFAULT_SEMANTIC_NLU_PROVIDER,
     }, asNumber(this.context.daemonIntervalMs, 15_000));
     this.seed();
     if (this.context.liveDaemon !== false) this.startDaemon(asNumber(this.context.daemonIntervalMs, 15_000));
@@ -354,10 +341,6 @@ export class AutopilotEngine {
       this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
     };
 
-    const sources = inferSources(this.objective, this.harnessState, this.context);
-    for (const source of sources) {
-      recordSeedSignal(signalFromObjective(source, this.objective, this.harnessState, this.context));
-    }
     if (Array.isArray(this.context.signals)) {
       for (const item of this.context.signals) {
         if (typeof item === 'object' && item !== null) {
@@ -477,23 +460,23 @@ export class AutopilotEngine {
     const hasBrowserSubscription = this.subscriptions.some((subscription) => subscription.source === 'browser' && subscription.enabled);
     const schedulerSnapshot = this.scheduler.snapshot();
 
-    if (snapshot.relationshipWeight >= 0.55 || hasEmailSubscription || /relationship|contact|follow up|reply/i.test(this.objective)) {
+    if (snapshot.relationshipWeight >= 0.55 || hasEmailSubscription) {
       triggers.push(buildTrigger('relationship-recall', 'relationship context is active and should not rot', 1_440, 'recall relationships and compact stale thread noise', 'email', 'relationship', 'debounce'));
     }
 
-    if (snapshot.openThreads > 0 || hasEmailSubscription || /thread|inbox|reply|email|message/i.test(this.objective)) {
+    if (snapshot.openThreads > 0 || hasEmailSubscription) {
       triggers.push(buildTrigger('thread-watcher', 'open threads need a follow-up cycle', 360, 'compact the current thread and identify the next reply', 'email', 'thread', 'debounce'));
     }
 
-    if (snapshot.calendarConflicts > 0 || hasCalendarSubscription || /calendar|meeting|schedule|conflict|availability/i.test(this.objective)) {
+    if (snapshot.calendarConflicts > 0 || hasCalendarSubscription) {
       triggers.push(buildTrigger('calendar-conflict-watch', 'calendar state has unresolved overlap or scheduling risk', 180, 'run conflict detection and propose a reschedule', 'calendar', 'calendar', 'debounce'));
     }
 
-    if (snapshot.staleTransactional > 0 || /invoice|receipt|booking|payment|confirmation|deadline/i.test(this.objective)) {
+    if (snapshot.staleTransactional > 0) {
       triggers.push(buildTrigger('transactional-compaction', 'transactional records should not crowd the harness', 720, 'compact stale transactional data and preserve durable thread history', 'email', 'transactional', 'throttle'));
     }
 
-    if (snapshot.signalIntensity > 0.35 || this.signals.length > 3 || hasBrowserSubscription || /signal|telemetry|monitor|anomaly|trend/i.test(this.objective)) {
+    if (snapshot.signalIntensity > 0.35 || this.signals.length > 3 || hasBrowserSubscription) {
       triggers.push(buildTrigger('signal-observer', 'signal intensity suggests the loop should re-run without a user nudge', 90, 'observe signals, summarize drift, and refresh the working set', 'system', 'signal', 'debounce'));
     }
 
