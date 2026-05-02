@@ -222,7 +222,7 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
     const distribution = topPosterior.map((entry) => ({
       label: entry.label,
       probability: clamp(entry.probability / distributionNormalizer),
-      trajectory: [...entry.trajectory],
+      trajectory: [...(entry.trajectory ?? [entry.label])],
       source: entry.source,
     }));
     return {
