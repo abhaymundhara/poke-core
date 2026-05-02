@@ -68,15 +68,35 @@ export function signalKey(signal: Pick<AutopilotSignal, 'source' | 'key' | 'tags
   return `${normalizeToken(signal.source)}:${normalizeToken(signal.key)}:${tagPart}`;
 }
 
+export function tokenizeDiscoveryText(value: string): string[] {
+  return value
+    .toLowerCase()
+    .split(/[^a-z0-9@._:-]+/g)
+    .map((term) => term.trim())
+    .filter(Boolean);
+}
+
+export function scoreDiscoveryOverlap(left: string, right: string): number {
+  const leftTerms = new Set(tokenizeDiscoveryText(left));
+  const rightTerms = new Set(tokenizeDiscoveryText(right));
+  if (leftTerms.size === 0 || rightTerms.size === 0) return 0;
+  let matches = 0;
+  for (const term of leftTerms) if (rightTerms.has(term)) matches += 1;
+  return matches / Math.max(leftTerms.size, rightTerms.size);
+}
+
 export function isHighFrequencySignal(signal: Pick<AutopilotSignal, 'key' | 'tags' | 'priority'>): boolean {
-  const key = `${signal.key} ${signal.tags.join(' ')}`.toLowerCase();
-  return signal.priority <= 0.45 || /signal|telemetry|observe|monitor|heartbeat|refresh|poll|draft|thread|calendar/.test(key);
+  const signalText = [signal.key, ...signal.tags].join(' ');
+  const tokenCount = tokenizeDiscoveryText(signalText).length;
+  const density = tokenCount === 0 ? 0 : 1 / tokenCount;
+  return signal.priority <= 0.45 || density >= 0.45 || scoreDiscoveryOverlap(signalText, signal.tags.join(' ')) >= 0.72;
 }
 
 export function matchesSubscription(subscription: AutopilotSubscription, topic: string, payload: Record<string, unknown>): boolean {
   if (!subscription.enabled) return false;
-  const haystack = `${subscription.topic} ${topic} ${JSON.stringify(payload)}`.toLowerCase();
-  return subscription.match.length === 0 || subscription.match.some((entry) => entry.trim().length > 0 && haystack.includes(entry.toLowerCase()));
+  const topicText = [subscription.topic, topic, JSON.stringify(payload)].join(' ');
+  if (subscription.match.length === 0) return scoreDiscoveryOverlap(subscription.topic, topicText) >= 0.22;
+  return subscription.match.some((entry) => scoreDiscoveryOverlap(entry, topicText) >= 0.2 || scoreDiscoveryOverlap(entry, subscription.topic) >= 0.25);
 }
 
 export function mergeWake(existing: AutopilotWake, incoming: AutopilotWake): AutopilotWake {
