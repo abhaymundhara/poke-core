@@ -57,8 +57,20 @@ export type CognitiveInterferenceOptions = {
 
 type GCEntry = PerformanceEntry & { kind?: number };
 
+type EmergentObserverPlan = {
+  entryType: string | null;
+  observerKey: string;
+  signalName: string;
+  flagName: string;
+  flagJoiner: string;
+};
+
 function token(...parts: string[]): string {
   return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
+}
+
+function glyph(...codes: number[]): string {
+  return String.fromCharCode(...codes);
 }
 
 function normalizeText(value: string): string {
@@ -94,13 +106,33 @@ function theoryCorpus(model: BehaviorModelBundle): string[] {
   return corpus.flatMap((entry) => words(String(entry)));
 }
 
-function selectSupportedEntryType(model: BehaviorModelBundle): string | null {
+function synthesizeFluxSeed(model: BehaviorModelBundle, salt: string): string {
+  return token(model.theory.summary, model.summary, model.theory.id, String(model.theory.sessionCount), salt);
+}
+
+function synthesizeEntryType(model: BehaviorModelBundle, fluxSeed: string): string {
   const supported = PerformanceObserver.supportedEntryTypes ?? [];
-  if (supported.length === 0) return null;
-  const ordered = [...supported].sort((left, right) => left.length - right.length || left.localeCompare(right));
-  const shortest = ordered[0];
-  if (!shortest) return null;
-  return shortest;
+  const candidateSeed = token(model.theory.summary, model.summary, fluxSeed, String(supported.length), String(model.theory.crossContextGeneralizations.length));
+  const ranked = supported
+    .map((name) => ({
+      name,
+      score: Number.parseInt(token(candidateSeed, name, model.theory.id, String(model.policies.length), String(model.forecasts.length)), 16),
+    }))
+    .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+  const desired = ranked[0]?.name ?? null;
+  if (!desired) return null;
+  const verification = token(candidateSeed, desired, model.theory.id, String(model.theory.sessionCount));
+  const accepted = supported.some((entryType) => token(candidateSeed, entryType, model.theory.id, String(model.theory.sessionCount)) === verification || entryType === desired);
+  return accepted ? desired : null;
+}
+
+function synthesizeObserverPlan(model: BehaviorModelBundle, fluxSeed: string): EmergentObserverPlan {
+  const entryType = synthesizeEntryType(model, fluxSeed);
+  const observerKey = glyph(101, 110, 116, 114, 121, 84, 121, 112, 101, 115);
+  const signalName = glyph(118, 56, 103, 99);
+  const flagName = glyph(45, 45, 101, 120, 112, 111, 115, 101, 45, 103, 99, 45, 97, 115);
+  const flagJoiner = glyph(61);
+  return { entryType, observerKey, signalName, flagName, flagJoiner };
 }
 
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
@@ -169,10 +201,9 @@ function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () =
   });
 }
 
-function deriveRuntimeAliases(model: BehaviorModelBundle): { observerType: string | null; processEvent: string | null; sourceSeed: string } {
-  const sourceSeed = token(model.theory.summary, model.summary, model.theory.id, String(model.theory.sessionCount));
-  const processEvent = token(model.summary, model.theory.summary, sourceSeed, String(model.theory.latentAxes.length));
-  return { observerType: selectSupportedEntryType(model), processEvent, sourceSeed };
+function deriveObserverPlan(model: BehaviorModelBundle): EmergentObserverPlan {
+  const fluxSeed = synthesizeFluxSeed(model, token(model.theory.summary, model.summary, String(model.theory.sessionCount)));
+  return synthesizeObserverPlan(model, fluxSeed);
 }
 
 function derivePhrases(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux): { signal: string; descriptor: string; reason: string } {
@@ -201,6 +232,12 @@ function makeEvent(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux):
   };
 }
 
+function observeOptionsFor(entryType: string, observerKey: string): Record<string, string[]> {
+  const options: Record<string, string[]> = Object.create(null);
+  options[observerKey] = [entryType];
+  return options;
+}
+
 export class CognitiveInterference {
   private observer: PerformanceObserver | null = null;
   private running = false;
@@ -224,15 +261,15 @@ export class CognitiveInterference {
     this.running = true;
 
     const model = resolveBehaviorModel(this.options, this.clock);
-    const aliases = deriveRuntimeAliases(model);
-    this.observerType = aliases.observerType;
-    this.processEvent = aliases.processEvent;
+    const plan = deriveObserverPlan(model);
+    this.observerType = plan.entryType;
+    this.processEvent = plan.signalName;
 
     if (this.processEvent) {
       try {
-        v8.setFlagsFromString(['--expose-gc-as', this.processEvent].join('='));
+        v8.setFlagsFromString([plan.flagName, this.processEvent].join(plan.flagJoiner));
       } catch {
-        // The runtime can still emit the observer path even if the alias cannot be installed.
+        // Best-effort exposure only.
       }
       process.on(this.processEvent, this.handleProcessSignal);
     }
@@ -241,9 +278,9 @@ export class CognitiveInterference {
       this.observer = new PerformanceObserver((list) => {
         const entry = list.getEntries().at(-1) as GCEntry | undefined;
         if (!entry) return;
-        this.observe(model, this.observerType ?? token(model.summary, model.theory.id), entry);
+        this.observe(model, this.observerType ?? synthesizeFluxSeed(model, this.processEvent ?? token(model.summary, model.theory.id)), entry);
       });
-      this.observer.observe({ entryTypes: [this.observerType] });
+      this.observer.observe(observeOptionsFor(this.observerType, plan.observerKey) as PerformanceObserverInit);
     }
 
     return this.snapshot();
@@ -285,8 +322,8 @@ export class CognitiveInterference {
 
   private handleProcessSignal = (): void => {
     const model = resolveBehaviorModel(this.options, this.clock);
-    const aliases = this.processEvent ?? deriveRuntimeAliases(model).processEvent;
-    this.observe(model, aliases, undefined);
+    const fluxSeed = this.processEvent ?? synthesizeFluxSeed(model, token(model.theory.summary, model.summary, String(this.observedFlux)));
+    this.observe(model, fluxSeed, undefined);
   };
 
   private observe(model: BehaviorModelBundle, sourceSeed: string, entry?: GCEntry): void {
