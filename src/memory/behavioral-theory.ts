@@ -138,7 +138,7 @@ function corpusTokens(observations: BehavioralObservation[], facts: LearnedBehav
     ...facts.flatMap((fact) => [fact.key, fact.value, fact.rationale, fact.source, ...(fact.sources ?? [])]),
     ...patterns.flatMap((pattern) => [pattern.key, pattern.subject, pattern.value, pattern.category, ...(pattern.examples ?? []), ...(pattern.sources ?? [])]),
     ...episodes.flatMap((episode) => [episode.id, episode.taskId, episode.category, episode.summary, ...(episode.signals ?? [])]),
-    ...sourceDocuments.flatMap((doc) => [doc.title, doc.source, doc.summary, ...(doc.tags ?? [])]),
+    ...sourceDocuments.flatMap((doc) => [doc.title, doc.source, doc.body, ...(doc.tags ?? [])]),
     priorTheory?.summary ?? '',
     ...(priorTheory?.crossContextGeneralizations ?? []).flatMap((entry) => [entry.generalization, ...(entry.domains ?? []), ...(entry.evidence ?? [])]),
     ...(priorTheory?.persistentGoals ?? []).flatMap((entry) => [entry.goal, ...(entry.evidence ?? [])]),
@@ -217,7 +217,7 @@ function latentAxesFromObservations(observations: BehavioralObservation[], facts
   sourceDocuments.forEach((doc, index) => {
     const domain = normalize(doc.source ?? 'document');
     const source = normalize(doc.title ?? 'document');
-    register(`${doc.summary} ${doc.title} ${(doc.tags ?? []).join(' ')}`, domain, source, 1, `doc:${index}`);
+    register(`${doc.body} ${doc.title} ${(doc.tags ?? []).join(' ')}`, domain, source, 1, `doc:${index}`);
   });
 
   axisNames.slice(0, 2).forEach((axis, index) => {

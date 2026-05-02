@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import { buildBehavioralModel, type BehaviorForecast, type BehaviorPolicy, type UserBehaviorTheory } from './behavioral-theory';
+import { buildBehavioralModel, evaluateBehaviorPolicies, type BehaviorForecast, type BehaviorPolicy, type UserBehaviorTheory } from './behavioral-theory';
 import type { ChunkRecord, MemoryDocument } from '../rag/types';
 import type { EpisodicMemoryItem } from './episodic-memory';
 import type { MemoryFact } from './working-memory';

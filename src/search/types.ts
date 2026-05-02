@@ -121,6 +121,7 @@ export type ReasoningArchitecture = {
     trustSignals: string[];
     conflictSignals: string[];
   };
+  runtimeComposition?: RuntimeComposition;
   revisionLog?: Array<{ at: number; source: string; focus: 'search' | 'trust' | 'conflict' | 'strategy'; change: string }>;
 };
 
