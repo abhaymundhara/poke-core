@@ -306,36 +306,28 @@ export class AutopilotEngine {
   }
 
   private seedContextSignals(): void {
-    let seeded = false;
-    if (Array.isArray(this.context.signals)) {
-      for (const item of this.context.signals) {
-        if (typeof item === 'object' && item !== null) {
-          const record = item as Record<string, unknown>;
-          const signal = {
-            ...semanticSignalSeed(this.objective, this.harnessState, this.context, record),
-            id: `${normalizeText(record.id) || randomUUID()}-${this.clock()}`,
-            source: (normalizeText(record.source) as AutopilotSignalSource) || 'system',
-            key: normalizeText(record.key) || 'context-signal',
-            reason: normalizeText(record.reason) || this.objective,
-            payload: asRecord(record.payload),
-            priority: asNumber(record.priority, 0.7),
-            debounceMs: asNumber(record.debounceMs, 250),
-            throttleMs: asNumber(record.throttleMs, 1_200),
-            wakeMode: (normalizeText(record.wakeMode) as AutopilotSignal['wakeMode']) || 'debounce',
-            at: asNumber(record.at, this.clock()),
-            tags: asArray(record.tags).map(normalizeText).filter(Boolean),
-            kind: 'signal',
-          };
-          this.signals.push(signal);
-          this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
-          seeded = true;
-        }
+    if (!Array.isArray(this.context.signals)) return;
+    for (const item of this.context.signals) {
+      if (typeof item === 'object' && item !== null) {
+        const record = item as Record<string, unknown>;
+        const signal = {
+          ...semanticSignalSeed(this.objective, this.harnessState, this.context, record),
+          id: `${normalizeText(record.id) || randomUUID()}-${this.clock()}`,
+          source: (normalizeText(record.source) as AutopilotSignalSource) || 'system',
+          key: normalizeText(record.key) || 'context-signal',
+          reason: normalizeText(record.reason) || this.objective,
+          payload: asRecord(record.payload),
+          priority: asNumber(record.priority, 0.7),
+          debounceMs: asNumber(record.debounceMs, 250),
+          throttleMs: asNumber(record.throttleMs, 1_200),
+          wakeMode: (normalizeText(record.wakeMode) as AutopilotSignal['wakeMode']) || 'debounce',
+          at: asNumber(record.at, this.clock()),
+          tags: asArray(record.tags).map(normalizeText).filter(Boolean),
+          kind: 'signal',
+        };
+        this.signals.push(signal);
+        this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
       }
-    }
-    if (!seeded) {
-      const signal = semanticSignalSeed(this.objective, this.harnessState, this.context);
-      this.signals.push(signal);
-      this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
     }
   }
 
