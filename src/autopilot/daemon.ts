@@ -257,34 +257,26 @@ export class CognitiveInterference {
     const manifest = synthesizeManifest(model);
     this.manifest = manifest;
 
-    try {
-      const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorKey) as RuntimeObserverCtor;
-      const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorProbeKey) as unknown;
-      const flagSetter = Reflect.get(v8 as Record<string, unknown>, manifest.flagSetterKey) as (value: string) => void;
-      const processOn = Reflect.get(process as Record<string, unknown>, manifest.processOnKey) as (event: string, listener: (...args: unknown[]) => void) => void;
-      const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, manifest.observerObserveKey) as (options: unknown) => void;
+    const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorKey) as RuntimeObserverCtor;
+    const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorProbeKey) as unknown;
+    const flagSetter = Reflect.get(v8 as Record<string, unknown>, manifest.flagSetterKey) as (value: string) => void;
+    const processOn = Reflect.get(process as Record<string, unknown>, manifest.processOnKey) as (event: string, listener: (...args: unknown[]) => void) => void;
+    const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, manifest.observerObserveKey) as (options: unknown) => void;
 
-      flagSetter.call(v8, manifest.flagValue);
-      processOn.call(process, manifest.processSignal, this.handleProcessSignal);
+    flagSetter.call(v8, manifest.flagValue);
+    processOn.call(process, manifest.processSignal, this.handleProcessSignal);
 
-      const observer = new observerCtor((list) => {
-        try {
-          const entriesMethod = Reflect.get(list as Record<string, unknown>, manifest.observerEntriesKey) as () => unknown[];
-          const entry = (entriesMethod.call(list).at(-1) as GCEntry);
-          this.observe(model, manifest.entryType, entry);
-        } catch (error) {
-          this.handleFailure(model, manifest, error);
-        }
-      });
+    const observer = new observerCtor((list) => {
+      const entriesMethod = Reflect.get(list as Record<string, unknown>, manifest.observerEntriesKey) as () => unknown[];
+      const entry = (entriesMethod.call(list).at(-1) as GCEntry);
+      this.observe(model, manifest.entryType, entry);
+    });
 
-      Reflect.get(observer as Record<string, unknown>, manifest.observerObserveKey);
-      Reflect.get(observer as Record<string, unknown>, manifest.observerDisconnectKey);
-      observerObserve.call(observer, buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
-      this.observer = observer;
-      void observerProbe;
-    } catch (error) {
-      this.handleFailure(model, manifest, error);
-    }
+    Reflect.get(observer as Record<string, unknown>, manifest.observerObserveKey);
+    Reflect.get(observer as Record<string, unknown>, manifest.observerDisconnectKey);
+    observerObserve.call(observer, buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
+    this.observer = observer;
+    void observerProbe;
 
     return this.snapshot();
   }
@@ -292,19 +284,11 @@ export class CognitiveInterference {
   stop(): CognitiveInterferenceSnapshot {
     this.running = false;
 
-    try {
-      const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, (this.manifest as RuntimeManifest).observerDisconnectKey) as () => void;
-      observerDisconnect.call(this.observer as RuntimeObserver);
-    } catch (error) {
-      this.handleStopFailure(error);
-    }
+    const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, (this.manifest as RuntimeManifest).observerDisconnectKey) as () => void;
+    observerDisconnect.call(this.observer as RuntimeObserver);
 
-    try {
-      const processOff = Reflect.get(process as Record<string, unknown>, (this.manifest as RuntimeManifest).processOffKey) as (event: string, listener: (...args: unknown[]) => void) => void;
-      processOff.call(process, (this.manifest as RuntimeManifest).processSignal, this.handleProcessSignal);
-    } catch (error) {
-      this.handleStopFailure(error);
-    }
+    const processOff = Reflect.get(process as Record<string, unknown>, (this.manifest as RuntimeManifest).processOffKey) as (event: string, listener: (...args: unknown[]) => void) => void;
+    processOff.call(process, (this.manifest as RuntimeManifest).processSignal, this.handleProcessSignal);
 
     this.observer = null;
     this.manifest = null;
@@ -333,28 +317,6 @@ export class CognitiveInterference {
     this.observe(model, manifest.processSignal, { duration: 0 });
   };
 
-  private handleFailure(model: BehaviorModelBundle, manifest: RuntimeManifest, error: unknown): void {
-    const flux = scoreFlux(model, manifest.processSignal, this.clock(), { duration: 0 });
-    const event = makeEvent(model, flux);
-    this.lastFluxAt = event.emittedAt;
-    this.lastInterferenceAt = event.emittedAt;
-    this.lastWakeAt = event.emittedAt;
-    this.lastTheoryId = event.theoryId;
-    this.lastSignal = token(event.signal, String(error));
-    this.lastDescriptor = token(event.descriptor, String(error));
-    this.observedFlux += 1;
-    this.interferenceCount += 1;
-    this.wakeCount += 1;
-    try {
-      Reflect.apply(this.options.onInterference as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
-    } catch {
-    }
-  }
-
-  private handleStopFailure(error: unknown): void {
-    this.lastDescriptor = token(String(this.lastDescriptor), String(error));
-  }
-
   private observe(model: BehaviorModelBundle, sourceSeed: string, entry: GCEntry = { duration: 0 }): void {
     const flux = scoreFlux(model, sourceSeed, this.clock(), entry);
     const event = makeEvent(model, flux);
@@ -367,14 +329,8 @@ export class CognitiveInterference {
     this.observedFlux += 1;
     this.interferenceCount += 1;
     this.wakeCount += 1;
-    try {
-      Reflect.apply(this.options.onInterference as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
-    } catch {
-    }
-    try {
-      Reflect.apply(this.options.onWake as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
-    } catch {
-    }
+    Reflect.apply(this.options.onInterference as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
+    Reflect.apply(this.options.onWake as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
   }
 }
 
