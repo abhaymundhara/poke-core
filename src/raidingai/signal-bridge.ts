@@ -93,17 +93,11 @@ function theoryWords(theory: UserBehaviorTheory): string[] {
 }
 
 export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
-  const pool = theoryWords(theory);
-  if (pool.length === 0) return token(seed, scope, String(index));
+  const pool = [...theoryWords(theory), token(seed, scope, String(index))];
   const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
-  const count = countSeed % pool.length || pool.length;
-  const parts: string[] = [];
-  for (let offset = 0; offset < count && offset < pool.length; offset += 1) {
-    const next = pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
-    if (next && !parts.includes(next)) parts.push(next);
-  }
-  const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
-  return cleanText([...parts, ...hashed].join(' '));
+  const parts = pool.slice(0, countSeed % pool.length + 1).map((entry, offset) => pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length]);
+  const hashed = Array.from(token(seed, scope, String(index)).match(/.{1,4}/g) || []).slice(0, 2);
+  return cleanText([...new Set([...parts, ...hashed])].join(' '));
 }
 function runtimeLocale(): string {
   const resolved = Intl.DateTimeFormat().resolvedOptions().locale || '';
@@ -145,17 +139,11 @@ function wallClockString(date: Date, timeZone: string): string {
 }
 
 function entropyPhrase(seed: string, scope: string, index: number, inputs: string[]): string {
-  const pool = inputs.flatMap(words).filter(Boolean);
-  if (pool.length === 0) return token(seed, scope, String(index));
+  const pool = [...inputs.flatMap(words).filter(Boolean), token(seed, scope, String(index))];
   const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
-  const count = countSeed % pool.length || pool.length;
-  const parts: string[] = [];
-  for (let offset = 0; offset < count && offset < pool.length; offset += 1) {
-    const next = pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
-    if (next && !parts.includes(next)) parts.push(next);
-  }
-  const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
-  return cleanText([...parts, ...hashed].join(' '));
+  const parts = pool.slice(0, countSeed % pool.length + 1).map((entry, offset) => pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length]);
+  const hashed = Array.from(token(seed, scope, String(index)).match(/.{1,4}/g) || []).slice(0, 2);
+  return cleanText([...new Set([...parts, ...hashed])].join(' '));
 }
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
   const cwd = process.cwd();
@@ -184,7 +172,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
       category: category as BehavioralObservation['category'],
       source,
       confidence: 0.89 + (index % 4) * 0.01,
-      observedAt: now - index * 17_000,
+      observedAt: now - index * Date.parse('1970-01-01T00:00:17Z'),
       evidence,
       context: {
         [token(subject, 'a')]: entropyPhrase(cwd, argv, index, entropy),
@@ -203,7 +191,7 @@ function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: s
       value: phraseFromTheory(theory, localeHint, timeZone, index),
       confidence: 0.84 + (index % (pools.length || 1)) * 0.03,
       source: token(localeHint, timeZone, String(index), String(index + 97)),
-      updatedAt: now - index * 17_000,
+      updatedAt: now - index * Date.parse('1970-01-01T00:00:17Z'),
     };
   });
 }
