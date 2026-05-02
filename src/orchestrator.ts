@@ -70,7 +70,7 @@ export class PokeCoreOrchestrator {
   private working = new WorkingMemory();
   private episodic = new EpisodicMemory();
 
-  constructor(private store: PokeCoreStore, skills: SkillAdapter[]) {
+  constructor(private readonly _store: PokeCoreStore, skills: SkillAdapter[]) {
     this.skills = skills.slice();
   }
 
