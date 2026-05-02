@@ -54,72 +54,146 @@ function labelFromEvent(event: BehaviorTrajectoryEvent): string {
   return String(event.topic ?? event.category ?? event.subject ?? event.action ?? 'latent-need').toLowerCase();
 }
 
-function updateCounts(counts: Record<string, number>, key: string, amount = 1): void {
-  counts[key] = (counts[key] ?? 0) + amount;
+function sessionTrajectories(observations: BehaviorTrajectoryEvent[]): string[][] {
+  const grouped = new Map<string, BehaviorTrajectoryEvent[]>();
+  for (const event of observations) {
+    const key = event.sessionId ?? 'global';
+    grouped.set(key, [...(grouped.get(key) ?? []), event]);
+  }
+  return [...grouped.values()].map((events) => events.sort((left, right) => Number(left.at ?? 0) - Number(right.at ?? 0)).map(labelFromEvent));
+}
+
+function buildTrajectoryModel(observations: BehaviorTrajectoryEvent[]) {
+  const transitions = new Map<string, Map<string, number>>();
+  const endings = new Map<string, number>();
+  const labels = new Set<string>();
+  for (const trajectory of sessionTrajectories(observations)) {
+    for (let i = 0; i < trajectory.length; i += 1) {
+      labels.add(trajectory[i]);
+      if (i < trajectory.length - 1) {
+        const from = trajectory[i];
+        const to = trajectory[i + 1];
+        const row = transitions.get(from) ?? new Map<string, number>();
+        row.set(to, (row.get(to) ?? 0) + 1);
+        transitions.set(from, row);
+      } else if (trajectory[i]) {
+        endings.set(trajectory[i], (endings.get(trajectory[i]) ?? 0) + 1);
+      }
+    }
+  }
+  return { transitions, endings, labels: [...labels] };
+}
+
+function recencyWeight(event?: BehaviorTrajectoryEvent): number {
+  if (!event?.at) return 0.2;
+  const ageDays = Math.max(0, (Date.now() - Number(event.at)) / 86_400_000);
+  return clamp(Math.exp(-ageDays / 7));
+}
+
+function latentNeedLabel(event: BehaviorTrajectoryEvent): string {
+  return String(event.topic ?? event.category ?? event.subject ?? event.action ?? 'latent-need').toLowerCase();
+}
+
+function statePosterior(intent: SearchIntent, event: BehaviorTrajectoryEvent, evidenceGraph?: SearchEvidenceGraph): number {
+  const sourceLift = intent.sourcePriors.find((prior) => prior.source === sourceFor(latentNeedLabel(event), event.source))?.weight ?? 0.5;
+  const confidence = Number(event.confidence ?? 0.5);
+  const utility = Number(event.value ?? (event.outcome === 'success' ? 1 : event.outcome === 'failure' ? -0.6 : 0.1));
+  const recency = recencyWeight(event);
+  const graphLift = evidenceGraph ? clamp(evidenceGraph.confidence * 0.1 + (evidenceGraph.communities.length > 0 ? 0.08 : 0)) : 0;
+  return clamp(0.22 + sourceLift * 0.22 + confidence * 0.18 + (utility + 1) * 0.12 + recency * 0.18 + graphLift);
+}
+
+function proposeNeedDistribution(intent: SearchIntent, observations: BehaviorTrajectoryEvent[], trajectoryModel: ReturnType<typeof buildTrajectoryModel>, evidenceGraph?: SearchEvidenceGraph) {
+  const currentLabels = new Set(observations.slice(-16).map(latentNeedLabel));
+  const candidateSeeds = uniq([
+    intent.topics[0] ?? intent.focus,
+    ...observations.map(latentNeedLabel).slice(-12),
+    ...intent.entities.slice(0, 3),
+    ...intent.querySeeds.slice(0, 3),
+  ].map((value) => value.toLowerCase()));
+  const candidates = new Map<string, { label: string; trajectory: string[]; source: SearchSource | string; score: number; path: string[] }>();
+
+  for (const seed of candidateSeeds) {
+    const source = sourceFor(seed, observations.find((event) => latentNeedLabel(event) === seed)?.source);
+    const trajectory = [...currentLabels].filter((label) => label !== seed).slice(0, 4);
+    const path = [seed];
+    let frontier = seed;
+    for (let depth = 0; depth < 3; depth += 1) {
+      const row = trajectoryModel.transitions.get(frontier);
+      if (!row || row.size === 0) break;
+      const next = [...row.entries()].sort((left, right) => right[1] - left[1])[0]?.[0];
+      if (!next || path.includes(next)) break;
+      path.push(next);
+      frontier = next;
+    }
+    const localScore = path.reduce((sum, label, index) => sum + (trajectoryModel.endings.get(label) ?? 0.5) * (index === 0 ? 1 : 0.7), 0);
+    candidates.set(seed, { label: seed, trajectory, source, score: localScore, path });
+  }
+
+  const scored = [...candidates.values()].map((candidate) => {
+    const supportingEvents = observations.filter((event) => latentNeedLabel(event) === candidate.label);
+    const posterior = clamp(0.05 + supportingEvents.reduce((sum, event) => sum + statePosterior(intent, event, evidenceGraph), 0) / Math.max(1, supportingEvents.length || 1) + candidate.score * 0.06 + (evidenceGraph?.confidence ?? 0) * 0.05);
+    return { ...candidate, posterior, support: supportingEvents.length };
+  });
+
+  const weights = softmax(scored.map((entry) => entry.posterior + entry.path.length * 0.03));
+  return scored.map((entry, index) => ({
+    label: entry.label,
+    source: entry.source,
+    trajectory: entry.path,
+    probability: weights[index] ?? 0,
+    posterior: entry.posterior,
+  })).sort((left, right) => right.probability - left.probability);
+}
+
+function horizonFor(probability: number, support: number): 'immediate' | 'near-term' | 'later' {
+  if (probability >= 0.55 || support >= 4) return 'immediate';
+  if (probability >= 0.25 || support >= 2) return 'near-term';
+  return 'later';
 }
 
 export function updateLatentIntentModel(model: NonNullable<SearchPolicyState['latentIntentModel']> | undefined, intent: SearchIntent, observations: BehaviorTrajectoryEvent[]): NonNullable<SearchPolicyState['latentIntentModel']> {
-  const next = model ?? { version: 1, archetypes: [], transitions: {}, lastUpdatedAt: Date.now() };
-  const buckets = new Map<string, { count: number; success: number; failure: number; ignored: number; sources: Record<string, number>; lastObservedAt: number; confidence: number; value: number; durationMs: number; transitions: Record<string, number> }>();
-  let previous = '';
-  for (const event of observations) {
-    const label = labelFromEvent(event);
-    const bucket = buckets.get(label) ?? { count: 0, success: 0, failure: 0, ignored: 0, sources: {}, lastObservedAt: 0, confidence: 0, value: 0, durationMs: 0, transitions: {} };
-    bucket.count += 1;
-    if (event.outcome === 'success') bucket.success += 1;
-    if (event.outcome === 'failure') bucket.failure += 1;
-    if (event.outcome === 'ignored') bucket.ignored += 1;
-    updateCounts(bucket.sources, sourceFor(label, event.source));
-    bucket.lastObservedAt = Math.max(bucket.lastObservedAt, Number(event.at ?? 0));
-    bucket.confidence += Number(event.confidence ?? 0.5);
-    bucket.value += Number(event.value ?? (event.outcome === 'success' ? 1 : event.outcome === 'failure' ? -0.6 : 0.1));
-    bucket.durationMs += Math.max(0, Number(event.durationMs ?? 0));
-    if (previous && previous !== label) updateCounts(bucket.transitions, previous);
-    buckets.set(label, bucket);
-    previous = label;
+  const next = model ?? { version: 2, archetypes: [], transitions: {}, lastUpdatedAt: Date.now() };
+  const trajectories = sessionTrajectories(observations);
+  const nextStateCounts = new Map<string, number>();
+  const labels = new Set<string>();
+  for (const trajectory of trajectories) {
+    for (let i = 0; i < trajectory.length; i += 1) {
+      labels.add(trajectory[i]);
+      if (i < trajectory.length - 1) {
+        const key = `${trajectory[i]}→${trajectory[i + 1]}`;
+        next.transitions[key] = (next.transitions[key] ?? 0) + 1;
+        nextStateCounts.set(trajectory[i + 1], (nextStateCounts.get(trajectory[i + 1]) ?? 0) + 1);
+      }
+    }
   }
-  const scores = [...buckets.entries()].map(([label, bucket]) => {
-    const reliability = intent.sourcePriors.find((prior) => prior.source === sourceFor(label))?.weight ?? 0.5;
-    const successRate = bucket.success / Math.max(1, bucket.count);
-    const failureRate = bucket.failure / Math.max(1, bucket.count);
-    const recency = bucket.lastObservedAt ? Math.exp(-Math.max(0, Date.now() - bucket.lastObservedAt) / 86_400_000) : 0;
-    const durationLift = clamp(bucket.durationMs / Math.max(1, bucket.count) / 300_000) * 0.12;
-    const transitionLift = clamp(Object.keys(bucket.transitions).length / Math.max(1, bucket.count)) * 0.1;
-    const evidencePressure = clamp((bucket.count + successRate * 1.6 - failureRate * 0.9) / 8);
+  next.archetypes = [...labels].map((label) => {
+    const relevant = observations.filter((event) => latentNeedLabel(event) === label);
+    const successRate = relevant.filter((event) => event.outcome === 'success').length / Math.max(1, relevant.length);
+    const failureRate = relevant.filter((event) => event.outcome === 'failure').length / Math.max(1, relevant.length);
+    const probability = clamp(0.05 + successRate * 0.35 - failureRate * 0.18 + (nextStateCounts.get(label) ?? 0) * 0.05 + recencyWeight(relevant[relevant.length - 1]) * 0.2);
     return {
       label,
-      bucket,
-      score: 0.34 + reliability * 0.16 + successRate * 0.18 - failureRate * 0.08 + recency * 0.14 + durationLift + transitionLift + evidencePressure * 0.16,
+      features: {
+        frequency: relevant.length,
+        successRate,
+        failureRate,
+        ignoredRate: relevant.filter((event) => event.outcome === 'ignored').length / Math.max(1, relevant.length),
+        confidence: relevant.reduce((sum, event) => sum + Number(event.confidence ?? 0.5), 0) / Math.max(1, relevant.length),
+        value: relevant.reduce((sum, event) => sum + Number(event.value ?? 0), 0),
+        durationMs: relevant.reduce((sum, event) => sum + Number(event.durationMs ?? 0), 0) / Math.max(1, relevant.length),
+        transitionCount: trajectories.filter((trajectory) => trajectory.includes(label)).length,
+        sourceVariety: new Set(relevant.map((event) => sourceFor(label, event.source))).size,
+        probability,
+      },
+      probability,
+      horizon: horizonFor(probability, relevant.length),
+      intervention: failureRate > successRate ? 'clarify-before-acting' : relevant.length > 2 ? 'prepare-evidence-backed-action' : 'monitor-for-confirming-signals',
+      sources: [...new Set(relevant.map((event) => sourceFor(label, event.source)))].slice(0, 4),
+      lastObservedAt: relevant.reduce((max, event) => Math.max(max, Number(event.at ?? 0)), 0) || null,
+      support: relevant.length,
     };
-  });
-  const probabilities = softmax(scores.map((entry) => entry.score));
-  next.archetypes = scores.map((entry, index) => ({
-    label: entry.label,
-    features: {
-      frequency: entry.bucket.count,
-      successRate: entry.bucket.success / Math.max(1, entry.bucket.count),
-      failureRate: entry.bucket.failure / Math.max(1, entry.bucket.count),
-      ignoredRate: entry.bucket.ignored / Math.max(1, entry.bucket.count),
-      confidence: entry.bucket.confidence / Math.max(1, entry.bucket.count),
-      value: entry.bucket.value,
-      durationMs: entry.bucket.durationMs / Math.max(1, entry.bucket.count),
-      transitionCount: Object.keys(entry.bucket.transitions).length,
-      sourceVariety: Object.keys(entry.bucket.sources).length,
-      probability: probabilities[index] ?? 0,
-    },
-    probability: probabilities[index] ?? 0,
-    horizon: entry.bucket.count > 6 || entry.bucket.success > entry.bucket.failure * 1.5 ? 'immediate' : entry.bucket.count > 2 ? 'near-term' : 'later',
-    intervention: entry.bucket.failure > entry.bucket.success ? 'clarify-before-acting' : entry.bucket.ignored > entry.bucket.success ? 'lower-priority-monitor' : 'prepare-evidence-backed-action',
-    sources: Object.keys(entry.bucket.sources).slice(0, 4),
-    lastObservedAt: entry.bucket.lastObservedAt || null,
-    support: entry.bucket.count,
-  })).sort((left, right) => right.probability - left.probability).slice(0, 8);
-  next.transitions = { ...(next.transitions ?? {}) };
-  for (const event of observations) {
-    const label = labelFromEvent(event);
-    const key = `${label}:${event.outcome ?? 'pending'}`;
-    next.transitions[key] = (next.transitions[key] ?? 0) + 1;
-  }
+  }).sort((left, right) => right.probability - left.probability).slice(0, 8);
   next.lastUpdatedAt = Date.now();
   return next;
 }
@@ -128,47 +202,32 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
   const observations = observationsFrom(behaviorSeed);
   const evidenceGraph = behaviorSeed?.evidenceGraph as SearchEvidenceGraph | undefined;
   const latentModel = updateLatentIntentModel(policy.latentIntentModel, intent, observations);
-  const distribution = latentModel.archetypes.length > 0 ? latentModel.archetypes : [{ label: intent.topics[0] ?? intent.focus, probability: 1, features: { fallback: 1 }, horizon: 'near-term' as const, intervention: 'monitor-for-confirming-signals', sources: intent.sourceHints, lastObservedAt: null, support: 1 }];
-  const newest = Math.max(0, ...observations.map((event) => Number(event.at ?? 0)));
-  const forecasts = distribution.map((archetype, index) => {
-    const source = archetype.sources[0] ?? intent.sourceHints[0] ?? sourceFor(archetype.label);
-    const relevantObs = observations.filter((event) => labelFromEvent(event) === archetype.label);
-    const avgConfidence = relevantObs.length ? relevantObs.reduce((sum, event) => sum + Number(event.confidence ?? 0.5), 0) / relevantObs.length : 0.5;
-    const recency = archetype.lastObservedAt && newest ? Math.exp(-(newest - archetype.lastObservedAt) / 86_400_000) : 0.1;
-    const graphLift = evidenceGraph ? clamp((evidenceGraph.communities.filter((community) => community.label.includes(archetype.label.split(/\s+/)[0] ?? archetype.label)).length * 0.08) + (evidenceGraph.synthesis.stance === 'contested' ? 0.06 : 0) + evidenceGraph.confidence * 0.08) : 0;
-    const probability = clamp(archetype.probability + graphLift * 0.4 + recency * 0.08 + avgConfidence * 0.08);
-    const predictedNeed = {
-      label: archetype.label,
-      features: {
-        ...archetype.features,
-        posterior: probability,
-        recency,
-        evidencePressure: relevantObs.length / Math.max(1, observations.length),
-        graphConfidence: evidenceGraph?.confidence ?? 0,
-      },
-      horizon: archetype.horizon,
-      intervention: archetype.intervention,
-    };
+  const trajectoryModel = buildTrajectoryModel(observations);
+  const distribution = proposeNeedDistribution(intent, observations, trajectoryModel, evidenceGraph);
+  const fallbackDistribution = distribution.length > 0 ? distribution : [{ label: intent.topics[0] ?? intent.focus, source: intent.sourceHints[0] ?? 'web', trajectory: [intent.semanticQuery], probability: 1, posterior: 0.5 }];
+  return fallbackDistribution.slice(0, 6).map((entry, index) => {
+    const relevantObs = observations.filter((event) => latentNeedLabel(event) === entry.label);
+    const confidence = clamp((entry.probability ?? 0.5) * 0.7 + (entry.posterior ?? 0.5) * 0.3 + (evidenceGraph?.confidence ?? 0) * 0.05 - index * 0.02);
     return {
-      source,
-      topic: archetype.label,
-      confidence: probability,
-      reason: `posterior=${probability.toFixed(2)} horizon=${archetype.horizon} support=${archetype.support} observed=${relevantObs.length} transition=${Object.keys(latentModel.transitions).length}`,
-      suggestedQueries: uniq([`${intent.objective} ${archetype.label}`, `${archetype.label} ${intent.entities[0] ?? ''}`.trim(), intent.semanticQuery]).slice(0, 3),
-      priority: clamp(probability + (intent.freshness === 'live' ? 0.08 : 0) - index * 0.02),
-      latentNeed: predictedNeed,
+      source: entry.source,
+      topic: entry.label,
+      confidence,
+      reason: `posterior=${(entry.posterior ?? confidence).toFixed(2)} trajectory=${entry.trajectory.join('>')} support=${relevantObs.length} transitions=${Object.keys(latentModel.transitions).length}`,
+      suggestedQueries: uniq([`${intent.objective} ${entry.label}`, `${entry.label} ${intent.entities[0] ?? ''}`.trim(), intent.semanticQuery]).slice(0, 3),
+      priority: clamp(confidence + (intent.freshness === 'live' ? 0.08 : 0) - index * 0.02),
+      distribution: fallbackDistribution.slice(0, 6).map((candidate) => ({ label: candidate.label, probability: candidate.probability, trajectory: candidate.trajectory, source: candidate.source })),
+      latentNeed: {
+        label: entry.label,
+        features: {
+          probability: entry.probability ?? confidence,
+          posterior: entry.posterior ?? confidence,
+          support: relevantObs.length,
+          graphConfidence: evidenceGraph?.confidence ?? 0,
+        },
+        horizon: horizonFor(confidence, relevantObs.length),
+        intervention: relevantObs.length > 0 && relevantObs.every((event) => event.outcome === 'failure') ? 'clarify-before-acting' : 'monitor-for-confirming-signals',
+        posterior: entry.posterior ?? confidence,
+      },
     };
   });
-  if (forecasts.length === 0) {
-    forecasts.push({
-      source: intent.sourceHints[0] ?? 'web',
-      topic: intent.topics[0] ?? intent.focus,
-      confidence: 0.5,
-      reason: 'posterior=0.50 fallback distribution from current intent',
-      suggestedQueries: uniq([intent.semanticQuery, ...intent.querySeeds]).slice(0, 3),
-      priority: 0.5,
-      latentNeed: { label: intent.topics[0] ?? intent.focus, features: { fallback: 1, posterior: 0.5 }, horizon: 'near-term', intervention: 'monitor-for-confirming-signals' },
-    });
-  }
-  return forecasts.sort((left, right) => right.priority - left.priority).slice(0, 6);
 }

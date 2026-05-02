@@ -1,11 +1,13 @@
 import { resolve } from 'node:path';
 import type { PolicyDecision, SearchFocus, SearchIntent, SearchOutcome, SearchPolicyRule, SearchPolicyState, SearchSignalForecast, SearchSource, SearchSourceReliability, SearchStrategyProfile } from './types.ts';
-import { clamp, nowMs, readJson, writeJson, stableHash } from './utils.ts';
+import { clamp, nowMs, readJson, writeJson } from './utils.ts';
 import { updateEpistemicTrustModel } from './trust.ts';
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.poke-core', 'search-policy.json');
 
 type PolicySnapshot = Omit<SearchPolicyState, 'history'>;
+
+type StrategyLogic = NonNullable<NonNullable<SearchPolicyState['reasoningArchitecture']>['strategyLogic']>;
 
 export type PolicyRewriteProvider = {
   name: string;
@@ -22,6 +24,8 @@ export type SearchPolicyFeedback = {
   rules?: SearchPolicyRule[];
   sourceReliability?: Record<string, number>;
   forecasts?: SearchSignalForecast[];
+  strategyLogic?: Partial<StrategyLogic>;
+  architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>>;
 };
 
 function snapshotPolicy(state: SearchPolicyState): PolicySnapshot {
@@ -36,20 +40,10 @@ function strategyTemplate(id: string, name: string, description: string, sourceW
 function reliability(source: SearchSource, score: number): SearchSourceReliability {
   return { source, score, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] };
 }
-function architectureBias(policy: SearchPolicyState, strategy: SearchStrategyProfile): number {
-  const logic = policy.reasoningArchitecture?.strategyLogic;
-  if (!logic) return 1;
-  let bias = 1;
-  if (logic.search.includes('semantic') && strategy.id === 'semantic-first') bias += 0.14;
-  if (logic.trust.includes('bayesian') && strategy.id === 'trust-first') bias += 0.16;
-  if (logic.conflict.includes('proposition') && strategy.id === 'multi-hop') bias += 0.12;
-  if (logic.search.includes('distribution') && strategy.id === 'blend') bias += 0.08;
-  return bias;
-}
 
 function ensureArchitecture(state: SearchPolicyState): NonNullable<SearchPolicyState['reasoningArchitecture']> {
   return state.reasoningArchitecture ?? (state.reasoningArchitecture = {
-    version: 1,
+    version: 2,
     name: 'llm-first-adaptive-architecture',
     activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'],
     primaryReasoner: 'llm-default',
@@ -58,27 +52,49 @@ function ensureArchitecture(state: SearchPolicyState): NonNullable<SearchPolicyS
     explanationStyle: 'balanced',
     rewriteHistory: [],
     guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'],
-    strategyLogic: { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: ['web', 'realtime-web', 'scholar', 'github'], trustSignals: ['corroboration', 'recency', 'domainMemory'], conflictSignals: ['negation', 'entailment', 'counterevidence'] },
+    strategyLogic: { search: 'semantic-decomposition', trust: 'epistemic-calibration', conflict: 'graph-conditioned-entailment', searchSources: ['web', 'realtime-web', 'scholar', 'github'], trustSignals: ['corroboration', 'recency', 'domainMemory'], conflictSignals: ['contradiction', 'entailment', 'graph-consistency'] },
     revisionLog: [],
   });
 }
 
-function rewriteArchitectureFromFeedback(architecture: NonNullable<SearchPolicyState['reasoningArchitecture']>, summary: string, source: string): string[] {
+function baseStrategyLogic(): StrategyLogic {
+  return { search: 'semantic-decomposition', trust: 'epistemic-calibration', conflict: 'graph-conditioned-entailment', searchSources: ['web', 'realtime-web', 'scholar', 'github'], trustSignals: ['corroboration', 'recency', 'domainMemory'], conflictSignals: ['contradiction', 'entailment', 'graph-consistency'] };
+}
+
+function mergeStrategyLogic(current: StrategyLogic | undefined, patch: Partial<StrategyLogic> | undefined, summary: string): StrategyLogic {
+  const next = { ...(current ?? baseStrategyLogic()), ...(patch ?? {}) };
+  if (/semantic|intent|ambigu/i.test(summary)) next.search = 'llm-semantic-decomposition';
+  if (/trust|reliable|verify|hallucinat/i.test(summary)) next.trust = 'epistemic-corroboration-learning';
+  if (/conflict|contradict|entail|claim|proposition/i.test(summary)) next.conflict = 'graph-conditioned-logical-reconciliation';
+  return {
+    search: next.search,
+    trust: next.trust,
+    conflict: next.conflict,
+    searchSources: [...new Set(next.searchSources ?? baseStrategyLogic().searchSources)],
+    trustSignals: [...new Set(next.trustSignals ?? baseStrategyLogic().trustSignals)],
+    conflictSignals: [...new Set(next.conflictSignals ?? baseStrategyLogic().conflictSignals)],
+  };
+}
+
+function rewriteArchitectureFromFeedback(architecture: NonNullable<SearchPolicyState['reasoningArchitecture']>, feedback: SearchPolicyFeedback, source: string): string[] {
   const changes: string[] = [];
-  if (/semantic|intent|ambiguous|nlu/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: 'llm-semantic-decomposition', trust: architecture.strategyLogic?.trust ?? 'bayesian-domain-learning', conflict: architecture.strategyLogic?.conflict ?? 'proposition-entailment', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: architecture.strategyLogic?.trustSignals ?? [], conflictSignals: architecture.strategyLogic?.conflictSignals ?? [] }; changes.push('search->llm-semantic-decomposition'); architecture.explanationStyle = 'thorough'; architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.08); }
-  if (/trust|verify|reliable|hallucinat|wrong|source/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: architecture.strategyLogic?.search ?? 'semantic-decomposition', trust: 'epistemic-calibration-with-domain-memory', conflict: architecture.strategyLogic?.conflict ?? 'proposition-entailment', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: ['domainMemory', 'outcomeFeedback', 'corroboration'], conflictSignals: architecture.strategyLogic?.conflictSignals ?? [] }; changes.push('trust->epistemic-calibration-with-domain-memory'); architecture.strategyBias['trust-first'] = clamp((architecture.strategyBias['trust-first'] ?? 0.08) + 0.1); architecture.strategyBias['multi-hop'] = clamp((architecture.strategyBias['multi-hop'] ?? 0.08) + 0.04); }
-  if (/conflict|contradict|entail|proposition|claim/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: architecture.strategyLogic?.search ?? 'semantic-decomposition', trust: architecture.strategyLogic?.trust ?? 'bayesian-domain-learning', conflict: 'proposition-graph-reconciliation', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: architecture.strategyLogic?.trustSignals ?? [], conflictSignals: ['entailment', 'contradiction', 'propositionGraph'] }; changes.push('conflict->proposition-graph-reconciliation'); architecture.strategyBias['multi-hop'] = clamp((architecture.strategyBias['multi-hop'] ?? 0.08) + 0.08); }
-  if (/forecast|predict|future|trajectory/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: 'distributional-trajectory-search', trust: architecture.strategyLogic?.trust ?? 'bayesian-domain-learning', conflict: architecture.strategyLogic?.conflict ?? 'proposition-entailment', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: architecture.strategyLogic?.trustSignals ?? [], conflictSignals: architecture.strategyLogic?.conflictSignals ?? [] }; changes.push('search->distributional-trajectory-search'); architecture.strategyBias['freshness-first'] = clamp((architecture.strategyBias['freshness-first'] ?? 0.08) + 0.06); }
+  const summary = `${feedback.summary} ${feedback.desiredBehavior ?? ''}`;
+  const logic = mergeStrategyLogic(architecture.strategyLogic, feedback.strategyLogic, summary);
+  architecture.strategyLogic = logic;
+  if (feedback.architecture?.explanationStyle) architecture.explanationStyle = feedback.architecture.explanationStyle;
+  if (/semantic|intent|nlu|ambiguous/i.test(summary)) { architecture.explanationStyle = 'thorough'; architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.08); changes.push('search-logic'); }
+  if (/trust|verify|reliable|source/i.test(summary)) { architecture.strategyBias['trust-first'] = clamp((architecture.strategyBias['trust-first'] ?? 0.08) + 0.1); changes.push('trust-logic'); }
+  if (/conflict|contradict|entail|claim|proposition/i.test(summary)) { architecture.strategyBias['multi-hop'] = clamp((architecture.strategyBias['multi-hop'] ?? 0.08) + 0.08); changes.push('conflict-logic'); }
+  if (/forecast|predict|future|trajectory/i.test(summary)) { architecture.strategyBias['freshness-first'] = clamp((architecture.strategyBias['freshness-first'] ?? 0.08) + 0.06); changes.push('forecast-logic'); }
   architecture.revisionLog = [...(architecture.revisionLog ?? []), { at: nowMs(), source, focus: 'strategy', change: changes.join(';') || summary }].slice(-25);
   architecture.rewriteHistory.push({ at: nowMs(), source, change: summary });
   architecture.selfModificationCount += 1;
   return changes;
 }
 
-
 export function defaultPolicy(): SearchPolicyState {
   return {
-    version: 1,
+    version: 2,
     updatedAt: nowMs(),
     strategies: [
       strategyTemplate('semantic-first', 'semantic-first', 'favor semantic expansion', { web: 1.1, 'realtime-web': 0.9 }, 0.8, 0.7, 0.6, 1.2),
@@ -99,20 +115,22 @@ export function defaultPolicy(): SearchPolicyState {
       integration: reliability('integration', 0.74),
     },
     epistemicModel: {
-      version: 1,
+      version: 2,
       calibration: 0.68,
-      classPriors: { primary: 0.88, expert: 0.82, institutional: 0.76, community: 0.6, unknown: 0.5 },
+      classPriors: { primary: 0.9, expert: 0.84, institutional: 0.76, community: 0.62, unknown: 0.5 },
       sourceMemory: {},
       domainMemory: {},
+      corroborationMatrix: {},
+      expertiseBasis: 0.65,
     },
     latentIntentModel: {
-      version: 1,
+      version: 2,
       archetypes: [],
       transitions: {},
       lastUpdatedAt: nowMs(),
     },
     reasoningArchitecture: {
-      version: 1,
+      version: 2,
       name: 'llm-first-adaptive-architecture',
       activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'],
       primaryReasoner: 'llm-default',
@@ -121,7 +139,7 @@ export function defaultPolicy(): SearchPolicyState {
       explanationStyle: 'balanced',
       rewriteHistory: [],
       guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'],
-      strategyLogic: { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: ['web', 'realtime-web', 'scholar', 'github'], trustSignals: ['corroboration', 'recency', 'domainMemory'], conflictSignals: ['negation', 'entailment', 'counterevidence'] },
+      strategyLogic: baseStrategyLogic(),
       revisionLog: [],
     },
     queryProfiles: {},
@@ -161,12 +179,12 @@ function scoreStrategy(intent: SearchIntent, strategy: SearchStrategyProfile, po
   const semanticBoost = strategy.semanticBias * (intent.focus === 'semantic' ? 1.1 : 1);
   const profile = policy.queryProfiles[intent.sessionKey];
   const historicalBoost = profile ? 0.8 + profile.averageScore * 0.4 : 1;
-  return sourceScore * freshnessBoost * trustBoost * hopBoost * semanticBoost * historicalBoost * architectureBias(policy, strategy);
+  return sourceScore * freshnessBoost * trustBoost * hopBoost * semanticBoost * historicalBoost;
 }
 
 export function chooseStrategy(intent: SearchIntent, policy: SearchPolicyState): SearchStrategyProfile {
   const architecture = policy.reasoningArchitecture ?? ensureArchitecture(policy);
-  const scored = policy.strategies.map((strategy) => ({ strategy, score: scoreStrategy(intent, strategy, policy) * (0.7 + strategy.lastScore * 0.3) * architectureBias(policy, strategy) }));
+  const scored = policy.strategies.map((strategy) => ({ strategy, score: scoreStrategy(intent, strategy, policy) * (0.7 + strategy.lastScore * 0.3) * (architecture.strategyBias[strategy.id] ?? 1) }));
   scored.sort((left, right) => right.score - left.score);
   return scored[0]?.strategy ?? defaultPolicy().strategies[0];
 }
@@ -248,14 +266,22 @@ function rulesFromFeedback(feedback: SearchPolicyFeedback): SearchPolicyRule[] {
   return rules;
 }
 
-function asFeedback(value: SearchPolicyFeedback | { summary: string; rules?: SearchPolicyRule[]; sourceReliability?: Record<string, number>; forecasts?: SearchSignalForecast[] }): SearchPolicyFeedback {
+function asFeedback(value: SearchPolicyFeedback): SearchPolicyFeedback {
   return value;
 }
 
-function asSynthesizedRules(value: unknown): SearchPolicyRule[] | null {
-  const candidate = value && typeof value === 'object' && 'rules' in value ? (value as { rules?: unknown }).rules : value;
-  if (!Array.isArray(candidate)) return null;
-  return candidate.filter((entry): entry is SearchPolicyRule => Boolean(entry) && typeof entry === 'object' && typeof (entry as SearchPolicyRule).id === 'string' && typeof (entry as SearchPolicyRule).description === 'string');
+function asSynthesizedOutput(value: unknown): SearchPolicyFeedback & { rules?: SearchPolicyRule[]; strategyLogic?: Partial<StrategyLogic>; architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>> } | null {
+  if (!value || typeof value !== 'object') return null;
+  return value as SearchPolicyFeedback & { rules?: SearchPolicyRule[]; strategyLogic?: Partial<StrategyLogic>; architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>> };
+}
+
+function applySynthesizedArchitecture(state: SearchPolicyState, synthesized: SearchPolicyFeedback & { rules?: SearchPolicyRule[]; strategyLogic?: Partial<StrategyLogic>; architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>> }, source: string): void {
+  const architecture = ensureArchitecture(state);
+  architecture.strategyLogic = mergeStrategyLogic(architecture.strategyLogic, synthesized.strategyLogic, synthesized.summary);
+  if (synthesized.architecture?.explanationStyle) architecture.explanationStyle = synthesized.architecture.explanationStyle;
+  if (synthesized.architecture?.activeModules?.length) architecture.activeModules = synthesized.architecture.activeModules as NonNullable<SearchPolicyState['reasoningArchitecture']>['activeModules'];
+  architecture.rewriteHistory.push({ at: nowMs(), source, change: synthesized.summary });
+  architecture.selfModificationCount += 1;
 }
 
 export class SearchPolicyStore {
@@ -312,8 +338,7 @@ export class SearchPolicyStore {
       entry.notes.push(`rewrite:${feedback.summary}`);
     }
     if (feedback.forecasts) next.forecasts = feedback.forecasts;
-    const architecture = ensureArchitecture(next);
-    rewriteArchitectureFromFeedback(architecture, feedback.summary, 'rewrite');
+    applySynthesizedArchitecture(next, feedback, 'rewrite');
     const violations = validateRules(next.rules);
     next.auditLog.push({ at: nowMs(), action: 'rewrite-from-feedback', version: next.version, summary: feedback.summary, accepted: violations.length === 0, guardrails: violations });
     if (violations.length > 0) {
@@ -329,8 +354,18 @@ export class SearchPolicyStore {
     if (!provider) return this.rewriteFromFeedback(feedback);
     const current = this.load();
     try {
-      const generated = asSynthesizedRules(await provider.synthesize({ feedback, current, guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] }));
-      return this.rewriteFromFeedback({ ...feedback, rules: generated ?? rulesFromFeedback(feedback) });
+      const payload = asSynthesizedOutput(await provider.synthesize({ feedback, current, guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] }));
+      if (!payload) return this.rewriteFromFeedback(feedback);
+      const mergedFeedback: SearchPolicyFeedback = {
+        ...feedback,
+        summary: payload.summary ?? feedback.summary,
+        rules: payload.rules ?? feedback.rules,
+        sourceReliability: payload.sourceReliability ?? feedback.sourceReliability,
+        forecasts: payload.forecasts ?? feedback.forecasts,
+        strategyLogic: payload.strategyLogic ?? feedback.strategyLogic,
+        architecture: payload.architecture ?? feedback.architecture,
+      };
+      return this.rewriteFromFeedback(mergedFeedback);
     } catch {
       return this.rewriteFromFeedback(feedback);
     }
@@ -345,3 +380,24 @@ export class SearchPolicyStore {
     return next;
   }
 }
+
+export function createDefaultPolicyRewriteProvider(): PolicyRewriteProvider {
+  return {
+    name: 'local-llm-policy-rewrite',
+    async synthesize({ feedback, current, guardrails }) {
+      return {
+        summary: feedback.summary,
+        guardrails,
+        rules: feedback.rules ?? current.rules,
+        sourceReliability: feedback.sourceReliability ?? {},
+        forecasts: feedback.forecasts ?? current.forecasts,
+        strategyLogic: feedback.strategyLogic ?? current.reasoningArchitecture?.strategyLogic,
+        architecture: {
+          explanationStyle: /semantic|ambigu/i.test(feedback.summary) ? 'thorough' : current.reasoningArchitecture?.explanationStyle,
+          activeModules: current.reasoningArchitecture?.activeModules,
+        },
+      };
+    },
+  };
+}
+

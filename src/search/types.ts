@@ -41,6 +41,11 @@ export type EpistemicTrustEntry = {
   lastObservedAt: number | null;
   notes: string[];
   epistemicClass: EpistemicClass;
+  embedding: number[];
+  corroboration: number;
+  contradiction: number;
+  domains: string[];
+  sourceIds: string[];
 };
 
 export type EpistemicTrustModel = {
@@ -49,6 +54,8 @@ export type EpistemicTrustModel = {
   classPriors: Record<EpistemicClass, number>;
   sourceMemory: Record<string, EpistemicTrustEntry>;
   domainMemory: Record<string, EpistemicTrustEntry>;
+  corroborationMatrix: Record<string, Record<string, number>>;
+  expertiseBasis: number;
 };
 
 export type Proposition = {
@@ -331,11 +338,13 @@ export type SearchSignalForecast = {
   reason: string;
   suggestedQueries: string[];
   priority: number;
+  distribution: Array<{ label: string; probability: number; trajectory: string[]; source: SearchSource | string }>;
   latentNeed: {
     label: string;
     features: Record<string, number>;
     horizon: 'immediate' | 'near-term' | 'later';
     intervention: string;
+    posterior: number;
   };
 };
 
