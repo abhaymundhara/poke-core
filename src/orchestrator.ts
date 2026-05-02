@@ -1,15 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER } from './search/nlu';
-import { buildPlan, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState } from './planner';
+import { buildPlan, resolvePlannerIntent } from './planner';
 import { parseModelJson } from './llm-bridge';
 import { buildPokeGraph, type PokeGraphState } from './graph';
 import { RagCorpus } from './rag/retriever';
 import { EpisodicMemory } from './memory/episodic-memory';
 import { WorkingMemory } from './memory/working-memory';
 import { getSkillPlaybook, listSkillPlaybooks } from './skill-playbooks';
-import { validatePlan, validateSkillResult } from './validator';
-import { classifyTransition, isTerminal, transition } from './state-machine';
-import type { ExecutionContext, ExecutionProfile, RuntimeState, StepAttempt, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
+import type { ExecutionContext, ExecutionProfile, PlannerRuntimeState, RuntimeState, StepAttempt, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
 import type { PokeCoreStore } from './store';
 import type { SkillAdapter } from './skills/types';
 
@@ -45,6 +43,42 @@ const AFFORDANCE_EVALUATION_SCHEMA = {
   },
 } as const;
 
+const PLANNER_RUNTIME_STATE_SCHEMA = {
+  type: 'object',
+  required: ['strategy', 'provider', 'fallbackUsed', 'confidence', 'currentNodeId', 'completedNodeIds', 'blockedNodeIds', 'notes'],
+  properties: {
+    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
+    provider: { type: 'string' },
+    fallbackUsed: { type: 'boolean' },
+    confidence: { type: 'number' },
+    currentNodeId: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    completedNodeIds: { type: 'array', items: { type: 'string' } },
+    blockedNodeIds: { type: 'array', items: { type: 'string' } },
+    lastRecovery: {
+      type: 'object',
+      properties: {
+        stepId: { type: 'string' },
+        reason: { type: 'string' },
+        at: { type: 'number' },
+      },
+    },
+    notes: { type: 'array', items: { type: 'string' } },
+  },
+} as const;
+
+const EXECUTION_PROFILE_SCHEMA = {
+  type: 'object',
+  required: ['primarySource', 'secondarySources', 'parallelizable', 'rationale'],
+  properties: {
+    primarySource: { type: 'string' },
+    secondarySources: { type: 'array', items: { type: 'string' } },
+    parallelizable: { type: 'boolean' },
+    rationale: { type: 'array', items: { type: 'string' } },
+    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
+    affordanceSignals: { type: 'array' },
+  },
+} as const;
+
 type AffordanceEvaluation = {
   selectedAdapterName: string;
   confidence: number;
@@ -52,8 +86,22 @@ type AffordanceEvaluation = {
   rankedAdapters: Array<{ name: string; score: number; reason: string[]; invoke: boolean }>;
 };
 
+type ModelPlannerFrame = {
+  planner: PlannerRuntimeState;
+  executionProfile: ExecutionProfile;
+};
+
+async function runModelExtraction<T>(provider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): Promise<T> {
+  const raw = await provider.extract({ objective, context, schema });
+  return parseModelJson<T>(raw);
+}
+
 function cloneIntentGraph(graph: TaskPlan['intentGraph'] | undefined): TaskPlan['intentGraph'] | undefined {
   return graph ? JSON.parse(JSON.stringify(graph)) as TaskPlan['intentGraph'] : undefined;
+}
+
+function stepKindLabel(step: TaskPlan['steps'][number]): string {
+  return step.kind + ':' + step.id;
 }
 
 export class PokeCoreOrchestrator {
@@ -86,9 +134,36 @@ export class PokeCoreOrchestrator {
     return this.episodic;
   }
 
+  private async synthesizeModelFrame(input: { plan: TaskPlan; task?: TaskRecord | null; state?: RuntimeState | null; step?: TaskPlan['steps'][number] | null; phase: string; note?: string | null; }): Promise<ModelPlannerFrame> {
+    const draft = await runModelExtraction<ModelPlannerFrame>(DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, 'synthesize runtime planner state and execution profile from the current orchestration context', {
+      objective: input.plan.objective,
+      task: input.task ? { taskId: input.task.taskId, status: input.task.status, currentStepIndex: input.task.currentStepIndex, activeStepId: input.task.activeStepId, revision: input.task.revision } : null,
+      state: input.state ?? null,
+      step: input.step ?? null,
+      phase: input.phase,
+      note: input.note ?? null,
+      plan: {
+        taskId: input.plan.taskId,
+        objective: input.plan.objective,
+        semanticIntent: input.plan.semanticIntent,
+        intentGraph: input.plan.intentGraph,
+        planner: input.plan.planner,
+        steps: input.plan.steps.map((step) => ({ id: step.id, position: step.position, kind: step.kind, title: step.title, skill: step.skill, dependsOn: step.dependsOn ?? [], retryPolicy: step.retryPolicy })),
+      },
+      skillCatalog: this.skillCatalog,
+    }, {
+      type: 'object',
+      required: ['planner', 'executionProfile'],
+      properties: {
+        planner: PLANNER_RUNTIME_STATE_SCHEMA,
+        executionProfile: EXECUTION_PROFILE_SCHEMA,
+      },
+    });
+    return draft;
+  }
+
   private async evaluateSkillAdapterAffordance(adapterCandidates: SkillAdapter[], step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): Promise<AffordanceEvaluation> {
-    const provider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
-    const raw = await provider.extract({
+    const raw = await DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.extract({
       objective: 'select the best skill adapter for the current step',
       context: {
         objective: plan.objective,
@@ -122,13 +197,13 @@ export class PokeCoreOrchestrator {
     });
     const evaluation = parseModelJson<AffordanceEvaluation>(raw);
     if (!evaluation || typeof evaluation !== 'object' || !Array.isArray(evaluation.rankedAdapters) || evaluation.rankedAdapters.length === 0) {
-      throw new Error('invalid-affordance-evaluation:' + provider.name);
+      throw new Error('invalid-affordance-evaluation:' + DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name);
     }
     if (typeof evaluation.selectedAdapterName !== 'string' || typeof evaluation.confidence !== 'number' || !Array.isArray(evaluation.rationale)) {
-      throw new Error('invalid-affordance-evaluation:' + provider.name);
+      throw new Error('invalid-affordance-evaluation:' + DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name);
     }
     const selected = evaluation.rankedAdapters.find((entry) => entry.name === evaluation.selectedAdapterName);
-    if (!selected || !selected.invoke) throw new Error('no-adapter-selected:' + provider.name);
+    if (!selected || !selected.invoke) throw new Error('no-adapter-selected:' + DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name);
     return evaluation;
   }
 
@@ -143,13 +218,12 @@ export class PokeCoreOrchestrator {
 
   private async ensurePlan(input: TaskInput): Promise<TaskPlan> {
     const plan = await buildPlan(input);
-    const validation = validatePlan(plan.steps);
-    if (!validation.ok) throw new Error(validation.reasons.join('; '));
     this.store.savePlan(plan);
     return plan;
   }
 
-  private buildContextState(input: TaskInput, plan: TaskPlan, executionProfile: ExecutionProfile): PokeGraphState {
+  private async buildContextState(input: TaskInput, plan: TaskPlan): Promise<PokeGraphState> {
+    const frame = await this.synthesizeModelFrame({ plan, phase: 'initial' });
     return {
       objective: plan.objective,
       cursor: 0,
@@ -159,25 +233,27 @@ export class PokeCoreOrchestrator {
       breadcrumbs: [],
       recovery: [],
       query: input.objective + '\n' + JSON.stringify(input.context ?? {}),
-      executionProfile,
+      executionProfile: frame.executionProfile,
       semanticIntent: plan.semanticIntent,
       intentGraph: cloneIntentGraph(plan.intentGraph),
-      planner: createPlannerRuntimeState(plan),
+      planner: frame.planner,
       sessionKey: plan.semanticIntent?.sessionKey,
     };
   }
 
-  private loadOrCreateState(task: TaskRecord, plan: TaskPlan, profile: ExecutionProfile): RuntimeState {
+  private async loadOrCreateState(task: TaskRecord, plan: TaskPlan, profile: ExecutionProfile): Promise<RuntimeState> {
     const existing = task.resultJson ? JSON.parse(task.resultJson) as RuntimeState : null;
     if (existing) {
+      const planner = existing.planner ?? (await this.synthesizeModelFrame({ plan, task, state: existing, phase: 'resume' })).planner;
       return {
         ...existing,
         executionProfile: existing.executionProfile ?? profile,
         semanticIntent: existing.semanticIntent ?? plan.semanticIntent,
         intentGraph: existing.intentGraph ?? cloneIntentGraph(plan.intentGraph),
-        planner: existing.planner ?? createPlannerRuntimeState(plan),
+        planner,
       };
     }
+    const frame = await this.synthesizeModelFrame({ plan, task, phase: 'seed' });
     return {
       objective: plan.objective,
       cursor: task.currentStepIndex,
@@ -186,15 +262,14 @@ export class PokeCoreOrchestrator {
       artifacts: {},
       breadcrumbs: [],
       recovery: [],
-      executionProfile: profile,
+      executionProfile: frame.executionProfile ?? profile,
       semanticIntent: plan.semanticIntent,
       intentGraph: cloneIntentGraph(plan.intentGraph),
-      planner: createPlannerRuntimeState(plan),
+      planner: frame.planner,
     };
   }
 
-  private persistTransition(taskId: string, from: TaskStatus | null, to: TaskStatus | null, detail: unknown) {
-    const kind = from && to ? classifyTransition(from, to) : 'validate';
+  private recordLifecycle(taskId: string, kind: 'plan' | 'route' | 'execute' | 'validate' | 'recover' | 'complete' | 'fail' | 'rollback', from: TaskStatus | null, to: TaskStatus | null, detail: unknown) {
     this.store.recordEvent(taskId, kind, from, to, detail);
   }
 
@@ -205,7 +280,7 @@ export class PokeCoreOrchestrator {
   private async runStep(task: TaskRecord, plan: TaskPlan, state: RuntimeState, stepIndex: number): Promise<{ ok: boolean; state: RuntimeState; error?: string }> {
     const step = plan.steps[stepIndex];
     const beforeSnapshot = this.store.recordSnapshot(task.taskId, 'executing', state);
-    this.persistTransition(task.taskId, task.status, 'executing', { stepId: step.id, snapshotId: beforeSnapshot.snapshotId, stepIndex });
+    this.recordLifecycle(task.taskId, 'execute', task.status, 'executing', { stepId: step.id, snapshotId: beforeSnapshot.snapshotId, stepIndex });
 
     let skill: SkillAdapter;
     try {
@@ -213,12 +288,12 @@ export class PokeCoreOrchestrator {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       state.recovery.push({ stepId: step.id, reason, at: Date.now() });
-      this.persistTransition(task.taskId, 'executing', 'recovering', { stepId: step.id, phase: 'affordance-evaluation', error: reason, recoveryEvent: (err as any)?.recoveryEvent ?? null });
+      this.recordLifecycle(task.taskId, 'recover', 'executing', 'recovering', { stepId: step.id, phase: 'affordance-evaluation', error: reason, recoveryEvent: (err as any)?.recoveryEvent ?? null });
       throw err;
     }
 
     const ctx: ExecutionContext = { taskId: task.taskId, task, plan, step, state };
-    state.planner = state.planner ? { ...state.planner, currentNodeId: step.id, notes: [...state.planner.notes, 'active:' + step.id] } : createPlannerRuntimeState(plan);
+    state.planner = state.planner ? { ...state.planner, currentNodeId: step.id, notes: [...state.planner.notes, 'active:' + step.id] } : (await this.synthesizeModelFrame({ plan, task, state, step, phase: 'active' })).planner;
     let attemptIndex = state.attempts[step.id] ?? 0;
     let lastError: string | null = null;
 
@@ -227,18 +302,15 @@ export class PokeCoreOrchestrator {
       this.store.recordAttempt(attempt);
       try {
         const result = await skill.execute(ctx);
-        const validation = validateSkillResult(result);
-        if (!validation.ok) throw new Error(validation.reasons.join('; '));
         this.store.finalizeAttempt(attempt.attemptId, { status: 'succeeded', outputJson: JSON.stringify(result.output), endedAt: Date.now() });
         state.cursor = stepIndex + 1;
         state.attempts[step.id] = attemptIndex + 1;
         state.outputs[step.id] = result.output;
         state.breadcrumbs.push({ stepId: step.id, kind: step.kind, skill: skill.descriptor.name, status: 'done' });
         state.artifacts[step.id] = { note: result.note ?? null, trace: result.trace ?? null };
-        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, plan, step.id, 'done', result.note ?? ('completed ' + step.kind));
-        state.planner = updatePlannerRuntimeState(state.planner, plan, step.id, 'done', result.note ?? ('completed ' + step.kind));
+        state.planner = (await this.synthesizeModelFrame({ plan, task, state, step, phase: 'success', note: result.note ?? ('completed ' + step.kind) })).planner;
         this.store.recordSnapshot(task.taskId, 'routing', state);
-        this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, stepIndex, validation, planner: state.planner?.strategy });
+        this.recordLifecycle(task.taskId, 'route', 'executing', 'routing', { stepId: step.id, stepIndex, planner: state.planner?.strategy, note: result.note ?? null });
         return { ok: true, state };
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
@@ -246,10 +318,9 @@ export class PokeCoreOrchestrator {
         attemptIndex += 1;
         state.attempts[step.id] = attemptIndex;
         state.recovery.push({ stepId: step.id, reason: lastError, at: Date.now() });
-        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, plan, step.id, 'failed', lastError);
-        state.planner = notePlannerRecovery(state.planner, plan, step.id, lastError);
+        state.planner = (await this.synthesizeModelFrame({ plan, task, state, step, phase: 'failure', note: lastError })).planner;
         this.store.recordSnapshot(task.taskId, 'recovering', state);
-        this.persistTransition(task.taskId, 'executing', 'recovering', { stepId: step.id, attemptIndex, error: lastError, planner: state.planner?.lastRecovery });
+        this.recordLifecycle(task.taskId, 'recover', 'executing', 'recovering', { stepId: step.id, attemptIndex, error: lastError, planner: state.planner?.lastRecovery ?? null });
         if (attemptIndex >= step.retryPolicy.maxAttempts) break;
       }
     }
@@ -262,7 +333,7 @@ export class PokeCoreOrchestrator {
 
     const rollbackState = { restoredFrom: beforeSnapshot.snapshotId, state, error: lastError, compensation: compensation?.output ?? null };
     this.store.recordSnapshot(task.taskId, 'rolled_back', state);
-    this.persistTransition(task.taskId, 'recovering', 'rolled_back', rollbackState);
+    this.recordLifecycle(task.taskId, 'rollback', 'recovering', 'rolled_back', rollbackState);
     this.store.updateTask(task.taskId, { status: 'rolled_back', currentStepIndex: stepIndex, activeStepId: step.id, resultJson: JSON.stringify(state), errorJson: JSON.stringify({ message: lastError, stepId: step.id, stepIndex }), revision: task.revision + 1 });
     return { ok: false, state, error: lastError ?? 'step failed' };
   }
@@ -275,28 +346,19 @@ export class PokeCoreOrchestrator {
       const semanticIntent = await resolvePlannerIntent(input.objective, plannerContext);
       const planInput: TaskInput = { ...input, context: { ...plannerContext, semanticIntent } };
       let plan = this.store.getPlan(input.id) ?? await this.ensurePlan(planInput);
-      if (!plan.semanticIntent || !plan.intentGraph || !plan.planner) {
-        const hydrated = await buildPlan(planInput);
-        plan = { ...plan, semanticIntent: plan.semanticIntent ?? hydrated.semanticIntent, intentGraph: plan.intentGraph ?? hydrated.intentGraph, planner: plan.planner ?? hydrated.planner };
-        this.store.savePlan(plan);
-      }
-
       task = this.store.getTask(input.id)!;
-      if (isTerminal(task.status)) throw new Error('task ' + input.id + ' is already terminal: ' + task.status);
 
-      const planValidation = validatePlan(plan.steps);
-      if (!planValidation.ok) throw new Error(planValidation.reasons.join('; '));
-
-      const executionProfile = deriveExecutionProfile(plan);
+      const profileFrame = await this.synthesizeModelFrame({ plan, task, phase: 'profile' });
+      const executionProfile = profileFrame.executionProfile;
       const graph = buildPokeGraph({ rag: this.rag, working: this.working, episodic: this.episodic });
       let contextPack;
       try {
-        contextPack = await graph.run(this.buildContextState(input, plan, executionProfile));
+        contextPack = await graph.run(await this.buildContextState(input, plan));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        this.persistTransition(task.taskId, 'routing', 'recovering', { phase: 'graph', error: message, recoveryEvent: (err as any)?.recoveryEvent ?? null });
+        this.recordLifecycle(task.taskId, 'recover', 'routing', 'recovering', { phase: 'graph', error: message, recoveryEvent: (err as any)?.recoveryEvent ?? null });
         this.store.updateTask(task.taskId, { status: 'failed', currentStepIndex: task.currentStepIndex, activeStepId: task.activeStepId, errorJson: JSON.stringify({ message }), revision: task.revision + 1 });
-        return { ok: false, taskId: input.id, status: 'failed', plan, state: this.loadOrCreateState(task, plan, executionProfile), error: message };
+        return { ok: false, taskId: input.id, status: 'failed', plan, state: await this.loadOrCreateState(task, plan, executionProfile), error: message };
       }
 
       if (contextPack.state.retrieval) this.store.recordRetrieval(input.objective, contextPack.state.retrieval);
@@ -306,27 +368,25 @@ export class PokeCoreOrchestrator {
       const episode = this.episodic.add({ id: randomUUID(), taskId: input.id, category: 'decision', summary: 'built context pack for ' + input.id + ' using ' + (contextPack.state.executionProfile?.primarySource ?? 'integration'), signals: ['graph', 'retrieval', contextPack.state.executionProfile?.primarySource ?? 'integration'], metadata: { planId: plan.taskId, strategy: plan.planner?.strategy } });
       this.store.upsertEpisodicItem(episode);
 
-      this.persistTransition(task.taskId, 'draft', 'planning', { steps: plan.steps.length, score: planValidation.score, executionProfile, semanticProvider: semanticIntent.nlu.provider });
+      this.recordLifecycle(task.taskId, 'plan', 'draft', 'planning', { steps: plan.steps.length, executionProfile, semanticProvider: semanticIntent.nlu.provider });
       this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify({ ...contextPack.state, objective: plan.objective }), errorJson: null, revision: task.revision + 1 });
-      this.persistTransition(task.taskId, 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id), executionProfile, playbookPaths: this.skillPlaybooks.map((playbook) => playbook.instructionPath), planner: plan.planner });
+      this.recordLifecycle(task.taskId, 'route', 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id), executionProfile, playbookPaths: this.skillPlaybooks.map((playbook) => playbook.instructionPath), planner: plan.planner });
 
-      let state = this.loadOrCreateState(this.store.getTask(input.id)!, plan, executionProfile);
+      let state = await this.loadOrCreateState(this.store.getTask(input.id)!, plan, executionProfile);
 
       while (true) {
         task = this.store.getTask(input.id)!;
         if (task.currentStepIndex >= plan.steps.length) {
           this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: plan.steps.at(-1)?.id ?? null, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
           this.store.recordSnapshot(task.taskId, 'completed', state);
-          this.persistTransition(task.taskId, 'routing', 'completed', { totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
+          this.recordLifecycle(task.taskId, 'complete', 'routing', 'completed', { totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
           return { ok: true, taskId: input.id, status: 'completed', plan, state };
         }
 
         const stepIndex = task.currentStepIndex;
         const step = plan.steps[stepIndex];
-        const routeTransition = transition(task.status, 'executing');
-        if (!routeTransition.ok) throw new Error(routeTransition.reason ?? 'unable to advance to executing');
         this.store.updateTask(task.taskId, { status: 'executing', activeStepId: step.id, resultJson: JSON.stringify(state), revision: task.revision + 1 });
-        this.persistTransition(task.taskId, 'routing', 'executing', { stepId: step.id, stepIndex, playbook: getSkillPlaybook(step.skill as any), planner: state.planner?.strategy });
+        this.recordLifecycle(task.taskId, 'execute', 'routing', 'executing', { stepId: step.id, stepIndex, playbook: getSkillPlaybook(step.skill as any), planner: state.planner?.strategy, kind: stepKindLabel(step) });
 
         const outcome = await this.runStep(this.store.getTask(input.id)!, plan, state, stepIndex);
         state = outcome.state;
@@ -336,18 +396,16 @@ export class PokeCoreOrchestrator {
         if (stepIndex === plan.steps.length - 1) {
           this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: step.id, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
           this.store.recordSnapshot(task.taskId, 'completed', state);
-          this.persistTransition(task.taskId, 'routing', 'completed', { stepId: step.id, totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
+          this.recordLifecycle(task.taskId, 'complete', 'routing', 'completed', { stepId: step.id, totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
           return { ok: true, taskId: input.id, status: 'completed', plan, state };
         }
 
-        const backToRouting = transition(task.status, 'routing');
-        if (!backToRouting.ok) throw new Error(backToRouting.reason ?? 'unable to return to routing');
         this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: stepIndex + 1, activeStepId: plan.steps[stepIndex + 1]?.id ?? null, resultJson: JSON.stringify(state), revision: task.revision + 1 });
-        this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, nextStepId: plan.steps[stepIndex + 1]?.id ?? null, executionProfile: state.executionProfile, planner: state.planner?.strategy });
+        this.recordLifecycle(task.taskId, 'route', 'executing', 'routing', { stepId: step.id, nextStepId: plan.steps[stepIndex + 1]?.id ?? null, executionProfile: state.executionProfile, planner: state.planner?.strategy });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.persistTransition(task.taskId, 'draft', 'recovering', { phase: 'planning', error: message, recoveryEvent: (err as any)?.recoveryEvent ?? null });
+      this.recordLifecycle(task.taskId, 'fail', 'draft', 'failed', { phase: 'planning', error: message, recoveryEvent: (err as any)?.recoveryEvent ?? null });
       this.store.updateTask(task.taskId, { status: 'failed', errorJson: JSON.stringify({ message }), revision: task.revision + 1 });
       throw err;
     }

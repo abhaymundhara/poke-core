@@ -1,10 +1,7 @@
 import type {
-  ExecutionProfile,
-  PlanStep,
   PlannerIntentGraph,
   PlannerPlanMetadata,
   PlannerRecoveryPolicy,
-  PlannerRuntimeState,
   PlannerStrategy,
   PlannerToolAffordance,
   SkillDescriptor,
@@ -13,7 +10,7 @@ import type {
 } from './types';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from './search/nlu';
 import type { SearchIntent } from './search/types';
-import { extractWithDefaultProviderSync, parseModelJson } from './llm-bridge';
+import { parseModelJson } from './llm-bridge';
 
 export type PlannerResolveContext = Record<string, unknown> & {
   semanticIntent?: SearchIntent;
@@ -27,7 +24,7 @@ export type PlannerResolveContext = Record<string, unknown> & {
 type PlannerSynthesisDraft = {
   strategy: PlannerStrategy;
   toolAffordances: PlannerToolAffordance[];
-  steps: PlanStep[];
+  steps: TaskPlan['steps'];
   recoveryPolicy: PlannerRecoveryPolicy;
   planner: PlannerPlanMetadata;
   intentGraph: PlannerIntentGraph;
@@ -92,19 +89,6 @@ const PLANNER_SYNTHESIS_SCHEMA = {
   },
 };
 
-const EXECUTION_PROFILE_SCHEMA = {
-  type: 'object',
-  required: ['primarySource', 'secondarySources', 'parallelizable', 'rationale'],
-  properties: {
-    primarySource: { type: 'string' },
-    secondarySources: { type: 'array', items: { type: 'string' } },
-    parallelizable: { type: 'boolean' },
-    rationale: { type: 'array', items: { type: 'string' } },
-    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
-    affordanceSignals: { type: 'array' },
-  },
-};
-
 async function runPlannerExtraction<T>(provider: SemanticNluProvider, objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): Promise<T> {
   const raw = await provider.extract({ objective, context, schema });
   return parseModelJson<T>(raw);
@@ -138,107 +122,4 @@ export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
     const reason = err instanceof Error ? err.message : String(err);
     throw new RecoveryRequired({ phase: 'plan', provider: provider.name, objective: input.objective, reason, at: Date.now() });
   }
-}
-
-
-const PLANNER_RUNTIME_STATE_SCHEMA = {
-  type: 'object',
-  required: ['strategy', 'provider', 'fallbackUsed', 'confidence', 'currentNodeId', 'completedNodeIds', 'blockedNodeIds', 'notes'],
-  properties: {
-    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
-    provider: { type: 'string' },
-    fallbackUsed: { type: 'boolean' },
-    confidence: { type: 'number' },
-    currentNodeId: { anyOf: [{ type: 'string' }, { type: 'null' }] },
-    completedNodeIds: { type: 'array', items: { type: 'string' } },
-    blockedNodeIds: { type: 'array', items: { type: 'string' } },
-    lastRecovery: {
-      type: 'object',
-      properties: {
-        stepId: { type: 'string' },
-        reason: { type: 'string' },
-        at: { type: 'number' },
-      },
-    },
-    notes: { type: 'array', items: { type: 'string' } },
-  },
-};
-
-const PLANNER_INTENT_GRAPH_SCHEMA = {
-  type: 'object',
-  required: ['id', 'objective', 'normalizedObjective', 'semanticQuery', 'strategy', 'semanticProvider', 'confidence', 'nodes', 'edges', 'frontier', 'stepOrder', 'stateAnchorByStepId', 'toolAffordances', 'recoveryPolicy', 'warnings'],
-  properties: {
-    id: { type: 'string' },
-    objective: { type: 'string' },
-    normalizedObjective: { type: 'string' },
-    semanticQuery: { type: 'string' },
-    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
-    semanticProvider: { type: 'string' },
-    confidence: { type: 'number' },
-    nodes: { type: 'array' },
-    edges: { type: 'array' },
-    frontier: { type: 'array', items: { type: 'string' } },
-    stepOrder: { type: 'array', items: { type: 'string' } },
-    stateAnchorByStepId: { type: 'object' },
-    toolAffordances: { type: 'array' },
-    recoveryPolicy: { type: 'object' },
-    warnings: { type: 'array', items: { type: 'string' } },
-  },
-};
-
-function runPlannerRuntimeExtraction<T>(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): T {
-  return extractWithDefaultProviderSync<T>({ objective, context, schema });
-}
-
-export function createPlannerRuntimeState(plan: TaskPlan): PlannerRuntimeState {
-  return runPlannerRuntimeExtraction<PlannerRuntimeState>(
-    'derive the initial planner runtime state for a task execution',
-    { plan },
-    PLANNER_RUNTIME_STATE_SCHEMA,
-  );
-}
-
-export function markPlannerStepOutcome(
-  graph: PlannerIntentGraph | undefined,
-  plan: TaskPlan,
-  stepId: string,
-  status: PlannerIntentGraph['nodes'][number]['status'],
-  note?: string,
-): PlannerIntentGraph | undefined {
-  if (!graph) return graph;
-  return runPlannerRuntimeExtraction<PlannerIntentGraph>(
-    'update the planner intent graph after a step outcome',
-    { currentGraph: graph, plan, stepId, status, note: note ?? null },
-    PLANNER_INTENT_GRAPH_SCHEMA,
-  );
-}
-
-export function updatePlannerRuntimeState(
-  state: PlannerRuntimeState | undefined,
-  plan: TaskPlan,
-  stepId: string,
-  status: PlannerIntentGraph['nodes'][number]['status'],
-  note?: string,
-): PlannerRuntimeState {
-  return runPlannerRuntimeExtraction<PlannerRuntimeState>(
-    'update the planner runtime state after a step outcome',
-    { currentState: state ?? null, plan, stepId, status, note: note ?? null },
-    PLANNER_RUNTIME_STATE_SCHEMA,
-  );
-}
-
-export function notePlannerRecovery(state: PlannerRuntimeState | undefined, plan: TaskPlan, stepId: string, reason: string): PlannerRuntimeState {
-  return runPlannerRuntimeExtraction<PlannerRuntimeState>(
-    'record planner recovery details in the planner runtime state',
-    { currentState: state ?? null, plan, stepId, reason },
-    PLANNER_RUNTIME_STATE_SCHEMA,
-  );
-}
-
-export function deriveExecutionProfile(plan: TaskPlan): ExecutionProfile {
-  return runPlannerRuntimeExtraction<ExecutionProfile>(
-    'derive the execution profile for a completed task plan',
-    { plan, semanticIntent: plan.semanticIntent ?? null, intentGraph: plan.intentGraph ?? null, planner: plan.planner ?? null },
-    EXECUTION_PROFILE_SCHEMA,
-  );
 }
