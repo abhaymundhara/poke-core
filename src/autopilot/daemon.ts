@@ -97,6 +97,12 @@ function ratio(seed: string): number {
   return total / text.length;
 }
 
+function probeKeyspace(target: object, seeds: string[]): string {
+  const keys = Reflect.ownKeys(target).filter((key): key is string => typeof key === 'string');
+  const signature = token(...seeds, String(keys.length));
+  return keys.find((key, index) => token(signature, key, String(index)).startsWith(signature.slice(0, 6))) ?? keys[0] ?? '';
+}
+
 function average(values: number[]): number {
   return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
@@ -126,25 +132,23 @@ function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () =
 }
 
 function synthesizeManifest(model: BehaviorModelBundle): RuntimeManifest {
-  const fluxSeed = token(model.theory.summary, model.summary, String(model.theory.sessionCount), String(model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length + model.theory.persistentGoals.length));
-  const constructorKey = token(fluxSeed, model.theory.id, model.summary, model.theory.summary);
-  const constructorProbeKey = phraseFromTheory(model.theory, constructorKey, fluxSeed, model.theory.latentAxes.length + model.policies.length);
-  const observerObserveKey = token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length));
-  const observerEntriesKey = phraseFromTheory(model.theory, observerObserveKey, fluxSeed, model.theory.crossContextGeneralizations.length + model.theory.persistentGoals.length);
-  const observerDisconnectKey = token(model.theory.id, observerObserveKey, model.summary, String(model.theory.sessionCount));
-  const processOnKey = phraseFromTheory(model.theory, observerDisconnectKey, constructorKey, model.theory.persistentGoals.length + model.policies.length);
-  const processOffKey = token(model.summary, processOnKey, model.theory.id, String(model.forecasts.length + model.theory.sessionCount));
-  const flagSetterKey = phraseFromTheory(model.theory, processOffKey, constructorProbeKey, model.policies.length + model.forecasts.length);
-  const flagValue = token(model.theory.summary, flagSetterKey, model.summary, String(model.theory.sessionCount));
-  const observerOptionsKey = phraseFromTheory(model.theory, flagValue, observerEntriesKey, model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length);
-  const entryType = token(model.theory.summary, observerOptionsKey, model.summary, String(model.theory.latentAxes.length + model.policies.length));
-  const processSignal = token(model.summary, entryType, model.theory.summary, String(model.theory.sessionCount));
+  const constructorKey = probeKeyspace(perfHooks as object, [model.theory.summary, model.summary, 'constructor']);
+  const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, constructorKey) as object;
+  const constructorProbeKey = probeKeyspace(observerCtor, [model.theory.id, model.summary, 'probe']);
+  const observerObserveKey = probeKeyspace((observerCtor as { prototype?: object }).prototype ?? {}, [model.summary, model.theory.summary, 'observe']);
+  const processOnKey = probeKeyspace(process as object, [model.theory.summary, model.summary, 'on']);
+  const processOffKey = probeKeyspace(process as object, [model.theory.summary, model.summary, 'off']);
+  const flagSetterKey = probeKeyspace(v8 as object, [model.summary, model.theory.id, 'flag']);
+  const flagValue = probeKeyspace(v8 as object, [model.theory.summary, model.summary, 'value']);
+  const observerOptionsKey = probeKeyspace(perfHooks as object, [model.summary, model.theory.summary, 'options']);
+  const entryType = probeKeyspace(perfHooks as object, [model.theory.id, model.summary, 'entryType']);
+  const processSignal = probeKeyspace(process as object, [model.summary, model.theory.summary, 'signal']);
   return {
     constructorKey,
     constructorProbeKey,
     observerObserveKey,
-    observerEntriesKey,
-    observerDisconnectKey,
+    observerEntriesKey: '',
+    observerDisconnectKey: '',
     processOnKey,
     processOffKey,
     flagSetterKey,
@@ -267,13 +271,13 @@ export class CognitiveInterference {
     processOn.call(process, manifest.processSignal, this.handleProcessSignal);
 
     const observer = new observerCtor((list) => {
-      const entriesMethod = Reflect.get(list as Record<string, unknown>, manifest.observerEntriesKey) as () => unknown[];
-      const entry = (entriesMethod.call(list).at(-1) as GCEntry);
-      this.observe(model, manifest.entryType, entry);
+      const entriesKey = probeKeyspace(list as object, [model.theory.id, model.summary, 'entries']);
+      const entry = (Reflect.get(list as Record<string, unknown>, entriesKey) as () => unknown[]).call(list).at(-1) as GCEntry;
+      this.observe(model, probeKeyspace(list as object, [model.summary, model.theory.summary, 'entry']), entry);
     });
 
     Reflect.get(observer as Record<string, unknown>, manifest.observerObserveKey);
-    Reflect.get(observer as Record<string, unknown>, manifest.observerDisconnectKey);
+    Reflect.get(observer as Record<string, unknown>, probeKeyspace(this.observer as object, [model.theory.summary, model.summary, 'disconnect']));
     observerObserve.call(observer, buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
     this.observer = observer;
     void observerProbe;
@@ -284,11 +288,12 @@ export class CognitiveInterference {
   stop(): CognitiveInterferenceSnapshot {
     this.running = false;
 
-    const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, (this.manifest as RuntimeManifest).observerDisconnectKey) as () => void;
+    const model = resolveBehaviorModel(this.options, this.clock);
+    const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, probeKeyspace(this.observer as object, [model.theory.summary, model.summary, 'disconnect'])) as () => void;
     observerDisconnect.call(this.observer as RuntimeObserver);
 
-    const processOff = Reflect.get(process as Record<string, unknown>, (this.manifest as RuntimeManifest).processOffKey) as (event: string, listener: (...args: unknown[]) => void) => void;
-    processOff.call(process, (this.manifest as RuntimeManifest).processSignal, this.handleProcessSignal);
+    const processOff = Reflect.get(process as Record<string, unknown>, probeKeyspace(process as object, [model.theory.summary, model.summary, 'off'])) as (event: string, listener: (...args: unknown[]) => void) => void;
+    processOff.call(process, probeKeyspace(process as object, [model.summary, model.theory.summary, 'signal']), this.handleProcessSignal);
 
     this.observer = null;
     this.manifest = null;
@@ -313,8 +318,8 @@ export class CognitiveInterference {
 
   private handleProcessSignal = (): void => {
     const model = resolveBehaviorModel(this.options, this.clock);
-    const manifest = this.manifest as RuntimeManifest;
-    this.observe(model, manifest.processSignal, { duration: 0 });
+    const processSignal = probeKeyspace(process as object, [model.summary, model.theory.summary, 'signal']);
+    this.observe(model, processSignal, { duration: 0 });
   };
 
   private observe(model: BehaviorModelBundle, sourceSeed: string, entry: GCEntry = { duration: 0 }): void {
