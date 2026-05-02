@@ -1,11 +1,10 @@
-import { BehavioralLearningLayer } from "../memory/behavioral-learning";
 import { createDriftingClock } from '../runtime/clock';
 import type { Attendee, RecurrenceSpec, ThreadIdentityInput } from '../deep-primitives';
 import type { VisionFrame } from '../skills/computer-use';
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
 import type { MemoryFact } from '../memory/working-memory';
 import type { UserBehaviorTheory } from '../memory/behavioral-theory';
-import { SignalBridge, type RaidingAiRuntimeSignals, type RaidingAiTrace } from './signal-bridge';
+import { SignalBridge, phraseFromTheory, type RaidingAiRuntimeSignals, type RaidingAiTrace } from './signal-bridge';
 
 export type RaidingAiScenario = {
   seed: string;
@@ -41,8 +40,8 @@ function projectSignals(signals: RaidingAiRuntimeSignals): RaidingAiScenario {
   return {
     seed: signals.threadAnchor,
     now: signals.now,
-    label: `${signals.theory.summary} ${signals.localeHint}`.trim(),
-    taskHint: `${signals.theory.summary} ${signals.timeZone}`.trim(),
+    label: phraseFromTheory(signals.theory, signals.threadAnchor, signals.localeHint, 0),
+    taskHint: phraseFromTheory(signals.theory, signals.threadAnchor, signals.timeZone, 1),
     theory: signals.theory,
     computerUse: {
       frames: signals.frames,
@@ -79,9 +78,7 @@ function projectSignals(signals: RaidingAiRuntimeSignals): RaidingAiScenario {
 let cachedScenario: RaidingAiScenario | null = null;
 
 function ensureScenario(): RaidingAiScenario {
-  if (!cachedScenario) {
-    cachedScenario = projectSignals(new SignalBridge().capture());
-  }
+  if (!cachedScenario) cachedScenario = projectSignals(new SignalBridge().capture());
   return cachedScenario;
 }
 
