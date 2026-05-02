@@ -72,12 +72,25 @@ export type RaidingAiTrace = {
   };
 };
 
-function hashText(...parts: string[]): string {
+function hashText(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): string {
+  const parts: string[] = [];
+  if (a !== undefined) parts.push(a);
+  if (b !== undefined) parts.push(b);
+  if (c !== undefined) parts.push(c);
+  if (d !== undefined) parts.push(d);
+  if (e !== undefined) parts.push(e);
+  if (f !== undefined) parts.push(f);
+  if (g !== undefined) parts.push(g);
+  if (h !== undefined) parts.push(h);
+  if (i !== undefined) parts.push(i);
+  if (j !== undefined) parts.push(j);
+  if (k !== undefined) parts.push(k);
+  if (l !== undefined) parts.push(l);
   return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
-function token(...parts: string[]): string {
-  return hashText(...parts).slice(0, 12);
+function token(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): string {
+  return hashText(a, b, c, d, e, f, g, h, i, j, k, l).slice(0, 12);
 }
 
 function cleanText(value: string): string {
@@ -88,13 +101,13 @@ function words(value: string): string[] {
   return value.toLowerCase().split(/[^a-z0-9]+/).filter((entry) => entry.length > 0);
 }
 
-function hashFraction(...parts: string[]): number {
-  const value = Number.parseInt(token(...parts).slice(0, 8), 16);
+function hashFraction(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): number {
+  const value = Number.parseInt(token(a, b, c, d, e, f, g, h, i, j, k, l).slice(0, 8), 16);
   return value / 0xffffffff;
 }
 
-function hashMagnitude(...parts: string[]): number {
-  return Number.parseInt(token(...parts).slice(0, 8), 16) % 1000;
+function hashMagnitude(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): number {
+  return Number.parseInt(token(a, b, c, d, e, f, g, h, i, j, k, l).slice(0, 8), 16) % 1000;
 }
 
 function theoryWords(theory: UserBehaviorTheory): string[] {
@@ -528,163 +541,119 @@ function* buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZon
   yield* buildAttendees(theory, localeHint, timeZone, roleName, index + 1);
 }
 
-function* threadIdentitySubject(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string, index = 0): Generator<string> {
-  if (index === 0) {
-    yield phraseFromTheory(theory, subjectScope, messageSeed, 0);
-    yield* threadIdentitySubject(theory, subjectScope, messageSeed, 1);
-  }
+function* threadIdentitySubject(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string): Generator<string, void, void> {
+  yield phraseFromTheory(theory, subjectScope, messageSeed, 0);
 }
 
-function* threadIdentityParticipants(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string, index = 0): Generator<Attendee> {
-  if (index === 0) {
-    yield* buildAttendees(theory, localeHint, timeZone, roleName);
-  }
+function* threadIdentityMessageId(subjectScope: string, messageSeed: string, timeZone: string): Generator<string, void, void> {
+  yield token(subjectScope, messageSeed, timeZone);
 }
 
-function* threadIdentityMessageId(subjectScope: string, messageSeed: string, timeZone: string, index = 0): Generator<string> {
-  if (index === 0) {
-    yield token(subjectScope, messageSeed, timeZone);
-    yield* threadIdentityMessageId(subjectScope, messageSeed, timeZone, 1);
-  }
+function* threadIdentityRoot(rootMessageId: string): Generator<string, void, void> {
+  yield rootMessageId;
 }
 
-function* threadIdentityRoot(rootMessageId: string, index = 0): Generator<string> {
-  if (index === 0) {
-    yield rootMessageId;
-    yield* threadIdentityRoot(rootMessageId, 1);
-  }
+function* threadIdentityInReplyTo(rootMessageId: string): Generator<string, void, void> {
+  yield rootMessageId;
 }
 
-function* threadIdentityReferences(rootMessageId: string, index = 0): Generator<string> {
-  if (index === 0) {
-    yield rootMessageId;
-    yield* threadIdentityReferences(rootMessageId, 1);
-  }
+function* threadIdentityReferences(rootMessageId: string): Generator<string, void, void> {
+  yield rootMessageId;
 }
 
-function* buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string, stage = 0): Generator<unknown, ThreadIdentityInput, void> {
+function* buildThreadIdentity(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string, timeZone: string, rootMessageId: string, stage = 0): Generator<string, void, void> {
   if (stage === 0) {
     yield* threadIdentitySubject(theory, subjectScope, messageSeed);
-    yield* buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, messageSeed, roleName, 1);
-    return {
-      subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
-      participants: Array.from(buildAttendees(theory, localeHint, timeZone, roleName)),
-      messageId: token(subjectScope, messageSeed, timeZone),
-      rootMessageId,
-      inReplyTo: rootMessageId,
-      references: [rootMessageId],
-    };
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 1);
+    return;
   }
   if (stage === 1) {
-    yield* threadIdentityParticipants(theory, localeHint, timeZone, roleName);
-    yield* buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, messageSeed, roleName, 2);
-    return {
-      subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
-      participants: Array.from(buildAttendees(theory, localeHint, timeZone, roleName)),
-      messageId: token(subjectScope, messageSeed, timeZone),
-      rootMessageId,
-      inReplyTo: rootMessageId,
-      references: [rootMessageId],
-    };
+    yield* threadIdentityMessageId(subjectScope, messageSeed, timeZone);
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 2);
+    return;
   }
   if (stage === 2) {
-    yield* threadIdentityMessageId(subjectScope, messageSeed, timeZone);
-    yield* buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, messageSeed, roleName, 3);
-    return {
-      subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
-      participants: Array.from(buildAttendees(theory, localeHint, timeZone, roleName)),
-      messageId: token(subjectScope, messageSeed, timeZone),
-      rootMessageId,
-      inReplyTo: rootMessageId,
-      references: [rootMessageId],
-    };
+    yield* threadIdentityRoot(rootMessageId);
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 3);
+    return;
   }
   if (stage === 3) {
-    yield* threadIdentityRoot(rootMessageId);
-    yield* buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, messageSeed, roleName, 4);
-    return {
-      subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
-      participants: Array.from(buildAttendees(theory, localeHint, timeZone, roleName)),
-      messageId: token(subjectScope, messageSeed, timeZone),
-      rootMessageId,
-      inReplyTo: rootMessageId,
-      references: [rootMessageId],
-    };
+    yield* threadIdentityInReplyTo(rootMessageId);
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 4);
+    return;
   }
   yield* threadIdentityReferences(rootMessageId);
+}
+
+function composeThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): ThreadIdentityInput {
+  const fields = buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId)[Symbol.iterator]();
+  const subject = String(fields.next().value ?? '');
+  const messageId = String(fields.next().value ?? token(subjectScope, messageSeed, timeZone));
+  const root = String(fields.next().value ?? rootMessageId);
+  const inReplyTo = String(fields.next().value ?? rootMessageId);
+  const referencesRoot = String(fields.next().value ?? rootMessageId);
   return {
-    subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
+    subject,
     participants: Array.from(buildAttendees(theory, localeHint, timeZone, roleName)),
-    messageId: token(subjectScope, messageSeed, timeZone),
-    rootMessageId,
-    inReplyTo: rootMessageId,
-    references: [rootMessageId],
+    messageId,
+    rootMessageId: root,
+    inReplyTo,
+    references: [referencesRoot],
   };
 }
 
-function* recurrenceRuleFragments(theory: UserBehaviorTheory, basis: string, anchor: string, index = 0): Generator<string> {
-  const fragments = Array.from(stringFragments(basis));
-  if (index < fragments.length) {
-    yield phraseFromTheory(theory, fragments[index] ?? basis, anchor, 0);
-    yield* recurrenceRuleFragments(theory, basis, anchor, index + 1);
-  }
+function* recurrenceStartLocal(now: number, timeZone: string): Generator<string, void, void> {
+  const start = wallClockString(new Date(now), timeZone);
+  yield normalizeWallTime(start, timeZone).local;
 }
 
-function* buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string, stage = 0, basis = '', anchor = '', startLocal = ''): Generator<unknown, RecurrenceSpec, void> {
+function* recurrenceTimeZone(timeZone: string): Generator<string, void, void> {
+  yield timeZone;
+}
+
+function* recurrenceRule(theory: UserBehaviorTheory, basis: string, anchor: string): Generator<string, void, void> {
+  yield cleanText(Array.from(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-');
+}
+
+function* recurrenceDuration(now: number, localeHint: string, timeZone: string, basis: string, anchor: string): Generator<string, void, void> {
+  yield String(hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1);
+}
+
+function* buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string, basis = '', anchor = '', stage = 0): Generator<string, void, void> {
+  const nextBasis = basis || phraseFromTheory(theory, localeHint, timeZone, Number.parseInt(token(theory.summary, localeHint, String(now)).slice(0, 2), 16));
+  const nextAnchor = anchor || token(nextBasis, theory.summary, localeHint, String(now));
   if (stage === 0) {
-    const nextBasis = phraseFromTheory(theory, localeHint, timeZone, Number.parseInt(token(theory.summary, localeHint, String(now)).slice(0, 2), 16));
-    yield* buildRecurrence(theory, now, localeHint, timeZone, 1, nextBasis, anchor, startLocal);
-    return {
-      startLocal,
-      timeZone,
-      rule: cleanText(Array.from(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-'),
-      durationMinutes: hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1,
-    };
+    yield* recurrenceStartLocal(now, timeZone);
+    yield* buildRecurrence(theory, now, localeHint, timeZone, nextBasis, nextAnchor, 1);
+    return;
   }
   if (stage === 1) {
-    const nextAnchor = token(basis, theory.summary, localeHint, String(now));
-    yield* buildRecurrence(theory, now, localeHint, timeZone, 2, basis, nextAnchor, startLocal);
-    return {
-      startLocal,
-      timeZone,
-      rule: cleanText(Array.from(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-'),
-      durationMinutes: hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1,
-    };
+    yield* recurrenceTimeZone(timeZone);
+    yield* buildRecurrence(theory, now, localeHint, timeZone, nextBasis, nextAnchor, 2);
+    return;
   }
   if (stage === 2) {
-    const start = wallClockString(new Date(now), timeZone);
-    const nextStartLocal = normalizeWallTime(start, timeZone).local;
-    yield* buildRecurrence(theory, now, localeHint, timeZone, 3, basis, anchor, nextStartLocal);
-    return {
-      startLocal: nextStartLocal,
-      timeZone,
-      rule: cleanText(Array.from(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-'),
-      durationMinutes: hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1,
-    };
+    yield* recurrenceRule(theory, nextBasis, nextAnchor);
+    yield* buildRecurrence(theory, now, localeHint, timeZone, nextBasis, nextAnchor, 3);
+    return;
   }
   if (stage === 3) {
-    yield* buildRecurrence(theory, now, localeHint, timeZone, 4, basis, anchor, startLocal);
-    return {
-      startLocal,
-      timeZone,
-      rule: cleanText(Array.from(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-'),
-      durationMinutes: hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1,
-    };
+    yield* recurrenceDuration(now, localeHint, timeZone, nextBasis, nextAnchor);
   }
-  return {
-    startLocal,
-    timeZone,
-    rule: cleanText(Array.from(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-'),
-    durationMinutes: hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1,
-  };
 }
 
-function drainGenerator<T>(generator: Generator<unknown, T, unknown>): T {
-  let step = generator.next();
-  while (!step.done) {
-    step = generator.next();
-  }
-  return step.value;
+function composeRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): RecurrenceSpec {
+  const fields = buildRecurrence(theory, now, localeHint, timeZone)[Symbol.iterator]();
+  const startLocal = String(fields.next().value ?? normalizeWallTime(wallClockString(new Date(now), timeZone), timeZone).local);
+  const timeZoneValue = String(fields.next().value ?? timeZone);
+  const rule = String(fields.next().value ?? '');
+  const durationMinutes = Number(fields.next().value ?? 1) || 1;
+  return {
+    startLocal,
+    timeZone: timeZoneValue,
+    rule,
+    durationMinutes,
+  };
 }
 
 export class SignalBridge {
@@ -735,9 +704,9 @@ export class SignalBridge {
     }));
     const frames = Array.from(buildUiFrames(theory, now, localeHint));
     const attendees = Array.from(buildAttendees(theory, localeHint, timeZone, roleName));
-    const threadA = drainGenerator(buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName));
-    const threadB = drainGenerator(buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName));
-    const recurrence = drainGenerator(buildRecurrence(theory, now, localeHint, timeZone));
+    const threadA = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
+    const threadB = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName);
+    const recurrence = composeRecurrence(theory, now, localeHint, timeZone);
     const keys = Array.from(runtimeKeyFragments({
       now,
       capturedAt: new Date(now).toISOString(),

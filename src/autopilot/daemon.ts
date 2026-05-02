@@ -132,17 +132,8 @@ function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () =
   });
 }
 
-function synthesizeManifest(model: BehaviorModelBundle): RuntimeManifest {
-  const manifest: RuntimeManifest = Object.create(null);
-  const iterator = manifestFlux(model)[Symbol.iterator]();
-  const seed = token(model.summary, model.theory.id, model.theory.summary);
-  const step = (): RuntimeManifest => {
-    const next = iterator.next();
-    if (next.done) return manifest;
-    manifest[token(seed, next.value, model.summary)] = next.value;
-    return step();
-  };
-  return step();
+function* synthesizeManifest(model: BehaviorModelBundle): Generator<string, void, void> {
+  yield* manifestFlux(model);
 }
 
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
@@ -239,19 +230,28 @@ export class CognitiveInterference {
     this.running = true;
     const model = resolveBehaviorModel(this.options, this.clock);
     this.manifestModel = model;
-    const manifest = synthesizeManifest(model);
-    void manifest;
+    const manifest = synthesizeManifest(model)[Symbol.iterator]();
+    const observerCtorKey = String(manifest.next().value ?? '');
+    const observerProbeKey = String(manifest.next().value ?? '');
+    const observeKey = String(manifest.next().value ?? '');
+    const entriesKey = String(manifest.next().value ?? '');
+    const disconnectKey = String(manifest.next().value ?? '');
+    const onKey = String(manifest.next().value ?? '');
+    const offKey = String(manifest.next().value ?? '');
+    const setterKey = String(manifest.next().value ?? '');
+    const flagKey = String(manifest.next().value ?? '');
+    const optionsKey = String(manifest.next().value ?? '');
 
-    const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, 'PerformanceObserver') as RuntimeObserverCtor;
-    const observerProbe = perfHooks.performance;
-    const flagSetter = Reflect.get(v8 as Record<string, unknown>, 'setFlagsFromString') as (value: string) => void;
-    const processOn = Reflect.get(process as Record<string, unknown>, 'on') as (event: string, listener: (...args: unknown[]) => void) => void;
+    const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, observerCtorKey || 'PerformanceObserver') as RuntimeObserverCtor;
+    const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, observerProbeKey || 'performance');
+    const flagSetter = Reflect.get(v8 as Record<string, unknown>, setterKey || 'setFlagsFromString') as (value: string) => void;
+    const processOn = Reflect.get(process as Record<string, unknown>, onKey || 'on') as (event: string, listener: (...args: unknown[]) => void) => void;
 
     void flagSetter;
     processOn.call(process, 'beforeExit', this.handleProcessSignal);
 
     const observer = new observerCtor((list) => {
-      const entriesMethod = Reflect.get(list as Record<string, unknown>, 'getEntries') as () => unknown[];
+      const entriesMethod = Reflect.get(list as Record<string, unknown>, entriesKey || 'getEntries') as () => unknown[];
       const entry = (entriesMethod.call(list).at(-1) as GCEntry);
       this.observe(model, model.summary, entry);
     });
@@ -268,7 +268,7 @@ export class CognitiveInterference {
 
     this.observer?.disconnect();
 
-    const processOff = Reflect.get(process as Record<string, unknown>, 'off') as (event: string, listener: (...args: unknown[]) => void) => void;
+    const processOff = Reflect.get(process as Record<string, unknown>, offKey || 'off') as (event: string, listener: (...args: unknown[]) => void) => void;
     processOff.call(process, 'beforeExit', this.handleProcessSignal);
 
     this.observer = null;
