@@ -1,6 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
 import v8 from 'node:v8';
-import { PerformanceObserver, constants as perfConstants, type PerformanceEntry } from 'node:perf_hooks';
+import { PerformanceObserver, type PerformanceEntry } from 'node:perf_hooks';
 import { buildBehavioralModel, type BehaviorModelBundle, type UserBehaviorTheory } from '../memory/behavioral-theory.ts';
 import type { BehavioralObservation, BehavioralPattern, LearnedBehaviorFact } from '../memory/behavioral-learning.ts';
 import { phraseFromTheory } from '../raidingai/signal-bridge.ts';
