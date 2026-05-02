@@ -170,28 +170,3 @@ export function expandRecurrence(spec: RecurrenceSpec): RecurrenceInstance[] {
   return instances;
 }
 
-const RUNTIME_LOCALE = Intl.DateTimeFormat().resolvedOptions().locale || '';
-const RUNTIME_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
-const REQUIRED_ROLE = ['re', 'quired'].join('');
-
-export const DEEP_PRIMITIVES_FIXTURES = {
-  thread: {
-    a: { subject: 'Re: Project sync', participants: [{ email: 'Abhay@Example.com' }, { email: 'jane@example.com' }], messageId: '<abc@1>', references: '<root@0>', inReplyTo: '<root@0>' },
-    b: { subject: 'project sync', participants: [{ email: 'jane@example.com' }, { email: 'abhay@example.com' }], messageId: '<def@2>', references: ['<root@0>', '<abc@1>'], inReplyTo: '<abc@1>' },
-  },
-  timezone: {
-    local: '2026-03-08T09:00:00',
-    timeZone: RUNTIME_TIMEZONE,
-    expectedUtc: '2026-03-08T13:00:00.000Z',
-  },
-  attendees: [
-    { email: 'abhay@example.com', name: 'Abhay Mundhara', timezone: RUNTIME_TIMEZONE || RUNTIME_TIMEZONE, locale: RUNTIME_LOCALE },
-    { email: 'jane@example.com', name: 'Jane Doe', role: REQUIRED_ROLE },
-  ] satisfies Attendee[],
-  recurrence: {
-    startLocal: '2026-03-09T09:00:00',
-    timeZone: RUNTIME_TIMEZONE,
-    rule: 'FREQ=WEEKLY;COUNT=3;BYDAY=MO,WE',
-    durationMinutes: 45,
-  } satisfies RecurrenceSpec,
-};

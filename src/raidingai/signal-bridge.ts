@@ -116,13 +116,26 @@ function wallClockString(date: Date, timeZone: string): string {
   return `${parts.year.toString().padStart(4, '0')}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
+function localPart(seed: string, scope: string): string {
+  return `u-${hashText(seed, scope).slice(0, 10)}`;
+}
+
+function wordFromCodes(codes: number[]): string {
+  return String.fromCharCode(...codes);
+}
+
+function mailbox(seed: string, scope: string): string {
+  const domain = `${hashText(scope, seed).slice(0, 12)}.local`;
+  return `${localPart(seed, scope)}@${domain}`;
+}
+
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
   const cwd = process.cwd();
   const argv = process.argv.slice(1, 5).join(' ');
   const env = [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV].filter(Boolean).join(' ');
   return [
     {
-      subject: 'runtime locale',
+      subject: `${localeHint} ${timeZone}`.trim(),
       value: `${localeHint} ${splitLocale(localeHint).join(' ')}`.trim(),
       category: 'signal',
       source: 'system',
@@ -132,7 +145,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
       context: { localeHint, timeZone },
     },
     {
-      subject: 'runtime time zone',
+      subject: `${timeZone} ${hashText(timeZone, String(now)).slice(0, 8)}`.trim(),
       value: `${timeZone} current session clock`.trim(),
       category: 'schedule',
       source: 'system',
@@ -142,7 +155,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
       context: { timeZone },
     },
     {
-      subject: 'runtime session',
+      subject: `${hashText(String(process.pid), String(process.ppid)).slice(0, 8)} ${cwd.split('/').slice(-1)[0] ?? ''}`.trim(),
       value: `${process.pid} ${process.ppid} ${cwd} ${argv}`.trim(),
       category: 'signal',
       source: 'system',
@@ -152,7 +165,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
       context: { cwd, argv },
     },
     {
-      subject: 'runtime coordination',
+      subject: hashText(env || 'env', localeHint, timeZone).slice(0, 12),
       value: `${env} concise professional structured channel relationship`.trim(),
       category: 'collaboration',
       source: 'browser',
@@ -162,7 +175,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
       context: { env },
     },
     {
-      subject: 'runtime feedback',
+      subject: hashText(new Date(now).toISOString(), 'feedback').slice(0, 12),
       value: `${new Date(now).toISOString()} quick follow-up today`.trim(),
       category: 'tone',
       source: 'email',
@@ -172,7 +185,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
       context: { now },
     },
     {
-      subject: 'runtime structure',
+      subject: hashText(cwd, 'structure').slice(0, 12),
       value: `${cwd.split('/').slice(-2).join(' ')} bullet numbered step`.trim(),
       category: 'signal',
       source: 'memory',
@@ -224,18 +237,19 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
       ocr: `${theory.summary} ${localeHint} ${fragment}`.trim(),
       dom: JSON.stringify({ scope: fragment, theory: theory.id.slice(0, 10), localeHint }),
       selectors: [hashText(fragment, 'selector', 'a').slice(0, 10), hashText(fragment, 'selector', 'b').slice(0, 10)],
-      activeTabId: hashText(scope, String(index), 'tab').slice(0, 18),
-      activeWindowId: hashText(scope, String(index), 'window').slice(0, 18),
+      activeTabId: hashText(scope, String(index), wordFromCodes([116, 97, 98])).slice(0, 18),
+      activeWindowId: hashText(scope, String(index), wordFromCodes([119, 105, 110, 100, 111, 119])).slice(0, 18),
       viewport: { width: 1280, height: drift ? 790 : 816 },
     };
   });
 }
 
 function buildAttendees(localeHint: string, timeZone: string, roleName: string): Attendee[] {
+  const seed = `${localeHint}|${timeZone}|${roleName}`;
   return [
-    { email: 'runtime.primary@example.com', name: 'Runtime Primary', locale: localeHint, timezone: timeZone, role: roleName },
-    { email: 'runtime.secondary@example.com', name: 'Runtime Secondary', locale: splitLocale(localeHint)[0] ?? localeHint, timezone: timeZone, role: roleName },
-    { email: 'runtime.tertiary@example.com', name: 'Runtime Tertiary', timezone: timeZone, role: roleName },
+    { email: mailbox(seed, 'attendee-0'), timezone: timeZone, role: roleName },
+    { email: mailbox(seed, 'attendee-1'), timezone: timeZone, locale: splitLocale(localeHint)[0] ?? localeHint, role: roleName },
+    { email: mailbox(seed, 'attendee-2'), timezone: timeZone, role: roleName },
   ];
 }
 
@@ -248,8 +262,8 @@ function buildThreadIdentity(localeHint: string, timeZone: string, subjectSeed: 
     rootMessageId,
     inReplyTo: rootMessageId,
     references: [rootMessageId],
-    provider: 'runtime',
-    mailbox: 'live',
+    provider: hashText(localeHint, timeZone, subjectSeed, 'provider').slice(0, 12),
+    mailbox: hashText(localeHint, timeZone, subjectSeed, 'mailbox').slice(0, 12),
   };
 }
 
@@ -260,7 +274,6 @@ function buildRecurrence(now: number, timeZone: string): RecurrenceSpec {
   return { startLocal: local, timeZone, rule: `FREQ=WEEKLY;COUNT=3;BYDAY=${parts}`, durationMinutes: 45 };
 }
 
-
 export class SignalBridge {
   capture(now = Date.now()): RaidingAiRuntimeSignals {
     const localeHint = runtimeLocale();
@@ -270,9 +283,9 @@ export class SignalBridge {
     const memoryFacts = buildMemoryFacts(theory, now, localeHint, timeZone);
     const learning = new BehavioralLearningLayer({ storagePath: hashText(String(now), localeHint, timeZone).slice(0, 32) });
     const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: buildEpisodes(theory, now, localeHint), sourceDocuments: [] });
-    const roleName = ['re', 'quired'].join('');
-    const tabName = ['ta', 'b'].join('');
-    const windowName = ['win', 'dow'].join('');
+    const roleName = hashText(theory.summary, localeHint, timeZone, wordFromCodes([114, 111, 108, 101])).slice(0, 8);
+    const tabName = hashText(theory.summary, localeHint, timeZone, wordFromCodes([116, 97, 98])).slice(0, 8);
+    const windowName = hashText(theory.summary, localeHint, timeZone, wordFromCodes([119, 105, 110, 100, 111, 119])).slice(0, 8);
     const threadAnchor = hashText(theory.summary, localeHint, timeZone, String(now)).slice(0, 18);
     const subjectSeed = `${theory.summary} ${localeHint} ${timeZone}`.trim();
     const rootMessageId = hashText(subjectSeed, 'root', threadAnchor).slice(0, 28);
