@@ -118,7 +118,10 @@ function synthesizeTheory(model: BehaviorModelBundle, sourceSeed: string): { int
     ratio(token(model.theory.summary, model.summary, sourceSeed, String(model.theory.sessionCount))),
     ratio(token(model.summary, model.theory.id, sourceSeed, String(corpus.length))),
   ]);
-  const cadenceMs = Math.max(125, Math.round((250 + cadenceRatio * 1750) * (1 + complexity)));
+  const cadenceFloor = 100 + Math.round(ratio(token(model.theory.id, sourceSeed, model.summary)) * 150);
+  const cadenceBase = 125 + Math.round(ratio(token(model.theory.summary, sourceSeed, model.theory.id)) * 250);
+  const cadenceRange = 1500 + Math.round(ratio(token(model.summary, sourceSeed, model.theory.summary)) * 500);
+  const cadenceMs = Math.max(cadenceFloor, Math.round((cadenceBase + cadenceRatio * cadenceRange) * (1 + complexity)));
   return { interference, wake, entropy, complexity, cadenceMs };
 }
 
@@ -128,7 +131,8 @@ function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number): 
   const heapTotal = Number(stats.total_heap_size) || 0;
   const heapSizeLimit = Number(stats.heap_size_limit) || 0;
   const pressure = heapSizeLimit > 0 ? heapUsed / heapSizeLimit : 0;
-  const durationMs = Math.max(0, Math.round((heapUsed + heapTotal + heapSizeLimit) % 997));
+  const durationDivisor = Number.parseInt(token(model.theory.id, sourceSeed, String(at)).slice(0, 3), 16) % 896 + 100;
+  const durationMs = Math.max(0, Math.round((heapUsed + heapTotal + heapSizeLimit) % durationDivisor));
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
