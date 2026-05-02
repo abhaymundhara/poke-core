@@ -98,7 +98,6 @@ export class SearchSession {
   }
 
   run(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): SearchPlan {
-    if (this.options.strictSemanticNlu) return this.buildPlan(understandSearchIntent(objective, context), context, results, true);
     return this.buildPlan(understandSearchIntent(objective, context), context, results, true);
   }
 

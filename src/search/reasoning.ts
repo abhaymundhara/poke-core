@@ -54,22 +54,17 @@ function semanticSlots(text: string): { subject: string; predicate: string; obje
   return { subject, predicate, object };
 }
 
-function clausePolarity(text: string): 'affirmed' | 'negated' | 'conditional' {
-  const lower = text.toLowerCase();
-  if (lower.includes(' if ') || lower.includes(' when ') || lower.includes(' unless ') || lower.includes(' should ') || lower.includes(' could ') || lower.includes(' would ') || lower.includes(' might ')) return 'conditional';
-  if (lower.includes(' not ') || lower.includes("n't") || lower.includes(' no longer ') || lower.includes(' cannot ') || lower.includes("can't") || lower.includes("won't") || lower.includes(' without ')) return 'negated';
-  return 'affirmed';
-}
-function graphNeighborhoodConsistency(graph: SearchEvidenceGraph, proposition: Proposition): number {
-  const claimNodes = graph.nodes.filter((node) => node.type === 'claim' || node.type === 'result');
-  if (claimNodes.length === 0) return 0.5;
-  const propositionVectorValue = propositionVector(`${proposition.text} ${proposition.subject} ${proposition.predicate} ${proposition.object}`);
-  const scored = claimNodes.map((node) => {
-    const nodeVector = propositionVector(`${node.label} ${JSON.stringify(node.metadata ?? {})}`);
-    const linkWeight = graph.edges.filter((edge) => edge.from === node.id || edge.to === node.id).reduce((sum, edge) => sum + edge.weight, 0);
-    return cosineSimilarity(propositionVectorValue, nodeVector) * 0.72 + clamp(linkWeight / Math.max(1, graph.edges.length)) * 0.28;
-  });
-  return clamp(average(scored));
+const POLARITY_PROTOTYPES = {
+  affirmed: vectorize('affirmed supported corroborated consistent true valid'),
+  negated: vectorize('negated denied absent incompatible false invalid impossible'),
+  conditional: vectorize('conditional hypothetical contingent uncertain possible dependent'),
+} as const;
+
+function semanticPolarity(text: string): 'affirmed' | 'negated' | 'conditional' {
+  const value = propositionVector(text);
+  const scored = Object.entries(POLARITY_PROTOTYPES).map(([label, prototype]) => ({ label, score: cosineSimilarity(value, prototype) }));
+  scored.sort((left, right) => right.score - left.score);
+  return (scored[0]?.label as 'affirmed' | 'negated' | 'conditional') ?? 'affirmed';
 }
 
 function propositionSignature(text: string): string {
@@ -85,7 +80,7 @@ function parseProposition(text: string, sourceId: string, confidence: number): P
     subject,
     predicate,
     object,
-    polarity: clausePolarity(text),
+    polarity: semanticPolarity(text),
     confidence: clamp(confidence),
     support: clamp(confidence),
     contradiction: 0,
@@ -107,7 +102,8 @@ function propositionEntails(left: Proposition, right: Proposition, graph: Search
   const refinement = left.object.length >= right.object.length ? 0.08 : 0;
   const polarityPenalty = left.polarity === 'negated' && right.polarity === 'affirmed' ? 0.3 : left.polarity !== right.polarity ? 0.18 : 0;
   const sharedContext = cosineSimilarity(propositionVector(left.text), propositionVector(right.text));
-  return clamp(similarity * 0.34 + graphAffinity * 0.28 + supportBias * 0.16 + sharedContext * 0.16 + refinement - polarityPenalty);
+  const supportEcho = Math.max(graphNeighborhoodConsistency(graph, left), graphNeighborhoodConsistency(graph, right)) * 0.08;
+  return clamp(similarity * 0.32 + graphAffinity * 0.26 + supportBias * 0.16 + sharedContext * 0.16 + refinement + supportEcho - polarityPenalty);
 }
 
 function propositionContradicts(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
@@ -125,39 +121,9 @@ function propositionContradicts(left: Proposition, right: Proposition, graph: Se
   }, 0) / tensionEdges.length;
   const neighborhood = Math.abs(graphNeighborhoodConsistency(graph, left) - graphNeighborhoodConsistency(graph, right));
   const numericalDivergence = /\d/.test(left.text) && /\d/.test(right.text) && left.text !== right.text ? 0.08 : 0;
-  const polarityConflict = left.polarity !== right.polarity ? 0.24 : 0;
-  const antonymic = /(increase|more|higher|up|faster|better)/i.test(left.object) && /(decrease|less|lower|down|slower|worse)/i.test(right.object) ? 0.18 : 0;
-  return clamp(similarity * 0.26 + graphTension * 0.3 + neighborhood * 0.22 + numericalDivergence + polarityConflict + antonymic);
-}
-
-function assessClaim(premise: Proposition, hypothesis: Proposition, graph: SearchEvidenceGraph): ClaimAssessment {
-  const contradiction = propositionContradicts(premise, hypothesis, graph);
-  if (contradiction >= 0.55) {
-    return {
-      premise: premise.text,
-      hypothesis: hypothesis.text,
-      relation: 'contradicts',
-      confidence: clamp(0.42 + contradiction * 0.5),
-      rationale: 'semantic proximity is high, but the proposition model and graph context indicate incompatible assertions',
-    };
-  }
-  const entailment = propositionEntails(premise, hypothesis, graph);
-  if (entailment >= 0.55) {
-    return {
-      premise: premise.text,
-      hypothesis: hypothesis.text,
-      relation: 'entails',
-      confidence: clamp(0.38 + entailment * 0.54),
-      rationale: 'the proposition embedding and graph neighborhood preserve the hypothesis under stronger evidence',
-    };
-  }
-  return {
-    premise: premise.text,
-    hypothesis: hypothesis.text,
-    relation: 'unknown',
-    confidence: clamp(0.22 + propositionSimilarity(premise, hypothesis) * 0.34),
-    rationale: 'the proposition model places the claims in the same semantic neighborhood, but graph support is not decisive',
-  };
+  const polarityConflict = left.polarity !== right.polarity ? 0.22 : 0;
+  const directVectorDivergence = 1 - cosineSimilarity(leftVector, rightVector);
+  return clamp(similarity * 0.22 + graphTension * 0.32 + neighborhood * 0.2 + directVectorDivergence * 0.12 + numericalDivergence + polarityConflict);
 }
 
 export function buildQueries(intent: SearchIntent, strategy: SearchStrategyProfile): string[] {
