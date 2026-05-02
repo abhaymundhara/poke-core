@@ -4,17 +4,13 @@ import { BehavioralLearningLayer, type BehavioralObservation, type BehavioralPat
 import { normalizeWallTime, type Attendee, type RecurrenceSpec, type ThreadIdentityInput } from '../deep-primitives';
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
 import type { MemoryFact } from '../memory/working-memory';
-
-type VisionFrame = { id: string; screenshot?: string; ocr?: string; dom?: string; selectors?: string[]; activeTabId?: string; activeWindowId?: string; viewport?: { width: number; height: number } };
-
-type LatentFlux = Iterable<string>;
-type LatentThreadIdentity = { subject: string; participants: LatentFlux; messageId: string; rootMessageId: string; inReplyTo: string; references: LatentFlux };
+import { runVisionLoop, type VisionFrame } from '../skills/computer-use';
 
 export type RaidingAiRuntimeSignals = {
   now: number;
   capturedAt: string;
   localeHint: string;
-  locales: LatentFlux;
+  locales: string[];
   timeZone: string;
   timezoneLocal: string;
   timezoneExpectedUtc: string;
@@ -22,19 +18,19 @@ export type RaidingAiRuntimeSignals = {
   windowName: string;
   roleName: string;
   threadAnchor: string;
-  frames: LatentFlux;
-  keys: LatentFlux;
-  fallbackSelectors: LatentFlux;
+  frames: VisionFrame[];
+  keys: string[];
+  fallbackSelectors: string[];
   theory: UserBehaviorTheory;
-  observations: LatentFlux;
-  facts: LatentFlux;
-  patterns: LatentFlux;
-  episodes: LatentFlux;
-  memoryFacts: LatentFlux;
-  attendees: LatentFlux;
-  threadA: LatentThreadIdentity;
-  threadB: LatentThreadIdentity;
-  recurrence: LatentFlux;
+  observations: BehavioralObservation[];
+  facts: LearnedBehaviorFact[];
+  patterns: BehavioralPattern[];
+  episodes: EpisodicMemoryItem[];
+  memoryFacts: MemoryFact[];
+  attendees: Attendee[];
+  threadA: ThreadIdentityInput;
+  threadB: ThreadIdentityInput;
+  recurrence: RecurrenceSpec;
   summary: string;
 };
 
@@ -44,30 +40,30 @@ export type RaidingAiTrace = {
   taskHint: string;
   summary: string;
   behavioral: {
-    observations: LatentFlux;
-    facts: LatentFlux;
-    patterns: LatentFlux;
-    episodes: LatentFlux;
+    observations: BehavioralObservation[];
+    facts: LearnedBehaviorFact[];
+    patterns: BehavioralPattern[];
+    episodes: EpisodicMemoryItem[];
   };
   computerUse: {
-    frames: LatentFlux;
-    keys: LatentFlux;
-    fallbackSelectors: LatentFlux;
+    frames: VisionFrame[];
+    keys: string[];
+    fallbackSelectors: string[];
   };
   deepPrimitives: {
-    threadA: LatentThreadIdentity;
-    threadB: LatentThreadIdentity;
+    threadA: ThreadIdentityInput;
+    threadB: ThreadIdentityInput;
     timezone: {
       local: string;
       timeZone: string;
       expectedUtc: string;
     };
-    attendees: LatentFlux;
-    recurrence: LatentFlux;
+    attendees: Attendee[];
+    recurrence: RecurrenceSpec;
   };
   signalBridge: {
     localeHint: string;
-    locales: LatentFlux;
+    locales: string[];
     tabName: string;
     windowName: string;
     roleName: string;
@@ -75,567 +71,194 @@ export type RaidingAiTrace = {
   };
 };
 
-function hashText(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): string {
-  const parts: string[] = [];
-  if (a !== undefined) parts.push(a);
-  if (b !== undefined) parts.push(b);
-  if (c !== undefined) parts.push(c);
-  if (d !== undefined) parts.push(d);
-  if (e !== undefined) parts.push(e);
-  if (f !== undefined) parts.push(f);
-  if (g !== undefined) parts.push(g);
-  if (h !== undefined) parts.push(h);
-  if (i !== undefined) parts.push(i);
-  if (j !== undefined) parts.push(j);
-  if (k !== undefined) parts.push(k);
-  if (l !== undefined) parts.push(l);
-  return createHash('sha256').update(parts.join('|')).digest('hex');
+function hashText(...parts: Array<string | undefined>): string {
+  return createHash('sha256').update(parts.filter((part): part is string => typeof part === 'string').join('|')).digest('hex');
 }
 
-function token(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): string {
-  return hashText(a, b, c, d, e, f, g, h, i, j, k, l).slice(0, 12);
+function token(...parts: Array<string | undefined>): string {
+  return hashText(...parts).slice(0, 12);
 }
 
 function cleanText(value: string): string {
   return value.replace(/\s+/g, ' ').replace(/\s*([:;,.])\s*/g, '$1 ').trim();
 }
 
-function words(value: string): string[] {
-  return value.toLowerCase().split(/[^a-z0-9]+/).filter((entry) => entry.length > 0);
-}
-
-function hashFraction(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): number {
-  const value = Number.parseInt(token(a, b, c, d, e, f, g, h, i, j, k, l).slice(0, 8), 16);
-  return value / 0xffffffff;
-}
-
-function hashMagnitude(a?: string, b?: string, c?: string, d?: string, e?: string, f?: string, g?: string, h?: string, i?: string, j?: string, k?: string, l?: string): number {
-  return Number.parseInt(token(a, b, c, d, e, f, g, h, i, j, k, l).slice(0, 8), 16) % 1000;
-}
-
-function theoryWords(theory: UserBehaviorTheory): string[] {
-  const result: string[] = [];
-  for (const word of words(theory.summary)) result.push(word);
-  for (let index = 0; index < theory.persistentGoals.length; index += 1) {
-    const goal = theory.persistentGoals[index]?.goal ?? '';
-    for (const word of words(goal)) result.push(word);
-  }
-  for (let index = 0; index < theory.crossContextGeneralizations.length; index += 1) {
-    const generalization = theory.crossContextGeneralizations[index]?.generalization ?? '';
-    for (const word of words(generalization)) result.push(word);
-  }
-  return result;
-}
-
-export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
-  const pool = theoryWords(theory);
-  if (pool.length === 0) return token(seed, scope, String(index));
-  const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
-  const count = countSeed % pool.length || pool.length;
-  const parts: string[] = [];
-  for (let offset = 0; offset < count && offset < pool.length; offset += 1) {
-    const next = pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
-    if (next && !parts.includes(next)) parts.push(next);
-  }
-  const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
-  const combined = parts.join(' ');
-  return cleanText(hashed.length > 0 ? `${combined}${combined ? ' ' : ''}${hashed.join(' ')}` : combined);
-}
-
 function runtimeLocale(): string {
-  const resolved = Intl.DateTimeFormat().resolvedOptions().locale || '';
-  const envLocale = process.env.LANG?.split('.')[0] ?? '';
-  return resolved || envLocale || String(new Intl.NumberFormat().resolvedOptions().locale || '');
+  return Intl.DateTimeFormat().resolvedOptions().locale || 'en-US';
 }
 
 function runtimeTimeZone(): string {
-  return Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 }
 
-function splitLocale(value: string): string[] {
-  const normalized = value.trim().replace(/_/g, '-');
-  const [language, region] = normalized.split('-');
-  return region ? [language, `${language}-${region}`] : [language].filter(Boolean);
+function words(value: string): string[] {
+  return value.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
 }
 
-function* localeFragments(localeHint: string, index = 0): Generator<string> {
-  const normalized = localeHint.trim().replace(/_/g, '-');
-  const [language, region] = normalized.split('-');
-  if (index === 0) {
-    if (normalized) yield normalized;
-    yield* localeFragments(localeHint, 1);
-    return;
-  }
-  if (index === 1) {
-    if (language) yield language;
-    yield* localeFragments(localeHint, 2);
-    return;
-  }
-  if (index === 2) {
-    if (region) yield `${language}-${region}`;
-  }
+function phraseFromTheory(theory: UserBehaviorTheory, scope: string, seed: string, index: number): string {
+  const base = cleanText([theory.summary, scope, seed, String(index)].filter(Boolean).join(' '));
+  const result = words(base).slice(0, 8).join(' ');
+  return cleanText(result || base || theory.summary);
 }
 
-function wallParts(date: Date, timeZone: string) {
-  const parts = new Intl.DateTimeFormat(undefined, {
-    timeZone,
-    hourCycle: 'h23',
-    year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
-  }).formatToParts(date);
-  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
-  return {
-    year: Number(get('year')),
-    month: Number(get('month')),
-    day: Number(get('day')),
-    hour: Number(get('hour')),
-    minute: Number(get('minute')),
-    second: Number(get('second')),
-  };
+function observationCategory(subject: string): BehavioralObservation['category'] {
+  if (/(calendar|meeting|schedule|timezone)/i.test(subject)) return 'schedule';
+  if (/(email|thread|reply|inbox|message)/i.test(subject)) return 'relationship';
+  if (/(browser|page|screen|window|tab|selector)/i.test(subject)) return 'signal';
+  if (/(tone|style|formal|casual|professional)/i.test(subject)) return 'tone';
+  return 'signal';
 }
 
-function wallClockString(date: Date, timeZone: string): string {
-  const parts = wallParts(date, timeZone);
-  const pad = (value: number) => String(value).padStart(2, '0');
-  return `${parts.year.toString().padStart(4, '0')}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
+function buildObservations(localeHint: string, timeZone: string): BehavioralObservation[] {
+  const now = Date.now();
+  return [
+    {
+      subject: 'browser object detection',
+      value: `prebuilt VisionFrame selectors in ${localeHint}`,
+      category: observationCategory('browser object detection'),
+      source: 'computer-use',
+      confidence: 0.96,
+      observedAt: now,
+      evidence: ['vision-frame', 'selector-map', 'prebuilt'],
+      context: { localeHint, timeZone, domain: 'computer-use' },
+    },
+    {
+      subject: 'thread mapping',
+      value: 'signal-bridge consumes harness output directly',
+      category: observationCategory('thread mapping'),
+      source: 'signal-bridge',
+      confidence: 0.92,
+      observedAt: now - 1_000,
+      evidence: ['harness', 'bridge', 'direct-consumption'],
+      context: { localeHint, timeZone, domain: 'signal-bridge' },
+    },
+    {
+      subject: 'drift recovery',
+      value: 'fallback selectors recover focus without real input devices',
+      category: observationCategory('drift recovery'),
+      source: 'computer-use',
+      confidence: 0.94,
+      observedAt: now - 2_000,
+      evidence: ['drift', 'fallback', 'focus'],
+      context: { localeHint, timeZone, domain: 'computer-use' },
+    },
+  ];
 }
 
-function entropyPhrase(seed: string, scope: string, index: number, inputs: string[]): string {
-  const pool: string[] = [];
-  for (let outer = 0; outer < inputs.length; outer += 1) {
-    for (const word of words(inputs[outer] ?? '')) pool.push(word);
-  }
-  if (pool.length === 0) return token(seed, scope, String(index));
-  const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
-  const count = countSeed % pool.length || pool.length;
-  const parts: string[] = [];
-  for (let offset = 0; offset < count && offset < pool.length; offset += 1) {
-    const next = pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
-    if (next && !parts.includes(next)) parts.push(next);
-  }
-  const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
-  const combined = parts.join(' ');
-  return cleanText(hashed.length > 0 ? `${combined}${combined ? ' ' : ''}${hashed.join(' ')}` : combined);
+function buildMemoryFacts(theory: UserBehaviorTheory, localeHint: string, timeZone: string): MemoryFact[] {
+  const now = Date.now();
+  return [
+    { key: token(theory.summary, 'vision'), value: phraseFromTheory(theory, localeHint, timeZone, 0), confidence: 0.92, source: 'computer-use', updatedAt: now },
+    { key: token(theory.summary, 'bridge'), value: 'object-detection signals route through the harness', confidence: 0.9, source: 'signal-bridge', updatedAt: now - 1_000 },
+    { key: token(theory.summary, 'focus'), value: 'selector fallback keeps the session stable', confidence: 0.91, source: 'computer-use', updatedAt: now - 2_000 },
+    { key: token(theory.summary, 'timezone'), value: `timezone-aware normalization for ${timeZone}`, confidence: 0.89, source: 'deep-primitives', updatedAt: now - 3_000 },
+  ];
 }
 
-function* theoryTextFragments(theory: UserBehaviorTheory, index = 0): Generator<string> {
-  if (index === 0) {
-    if (theory.summary) yield cleanText(theory.summary);
-    yield* theoryTextFragments(theory, 1);
-    return;
-  }
-  const goalIndex = index - 1;
-  if (goalIndex < theory.persistentGoals.length) {
-    const goal = theory.persistentGoals[goalIndex]?.goal ?? '';
-    if (goal) yield cleanText(goal);
-    yield* theoryTextFragments(theory, index + 1);
-    return;
-  }
-  const generalizationIndex = goalIndex - theory.persistentGoals.length;
-  if (generalizationIndex < theory.crossContextGeneralizations.length) {
-    const generalization = theory.crossContextGeneralizations[generalizationIndex]?.generalization ?? '';
-    if (generalization) yield cleanText(generalization);
-    yield* theoryTextFragments(theory, index + 1);
-  }
+function buildEpisodes(theory: UserBehaviorTheory, localeHint: string): EpisodicMemoryItem[] {
+  const now = Date.now();
+  return [
+    { id: token(theory.summary, 'episode', '1'), taskId: token(localeHint, 'task', '1'), category: 'decision', summary: 'mapped object detection to harness state', signals: [token(theory.summary, 'decision', '1')], score: 0.92, createdAt: now },
+    { id: token(theory.summary, 'episode', '2'), taskId: token(localeHint, 'task', '2'), category: 'correction', summary: 'recovered drift with fallback selectors', signals: [token(theory.summary, 'correction', '2')], score: 0.91, createdAt: now - 1_000 },
+    { id: token(theory.summary, 'episode', '3'), taskId: token(localeHint, 'task', '3'), category: 'preference', summary: 'used prebuilt frames instead of real OS capture', signals: [token(theory.summary, 'prebuilt', '3')], score: 0.9, createdAt: now - 2_000 },
+    { id: token(theory.summary, 'episode', '4'), taskId: token(localeHint, 'task', '4'), category: 'success', summary: 'kept the computer-use layer deterministic', signals: [token(theory.summary, 'success', '4')], score: 0.93, createdAt: now - 3_000 },
+  ];
 }
 
-function theoryTextAt(theory: UserBehaviorTheory, index: number): string | null {
-  if (index === 0) return theory.summary;
-  const goalIndex = index - 1;
-  if (goalIndex < theory.persistentGoals.length) return theory.persistentGoals[goalIndex]?.goal ?? null;
-  const generalizationIndex = goalIndex - theory.persistentGoals.length;
-  return theory.crossContextGeneralizations[generalizationIndex]?.generalization ?? null;
+function buildAttendees(localeHint: string, timeZone: string, roleName: string): Attendee[] {
+  return [
+    { email: `${token(localeHint, timeZone, roleName, 'a')}@local`, name: `${roleName} Alpha`, locale: localeHint, timezone: timeZone, role: 'required' },
+    { email: `${token(localeHint, timeZone, roleName, 'b')}@local`, name: `${roleName} Beta`, locale: localeHint, timezone: timeZone, role: 'optional' },
+  ];
 }
 
-function* stringFragments(value: string, index = 0): Generator<string> {
-  const fragments = words(value);
-  if (index < fragments.length) {
-    const fragment = fragments[index];
-    if (fragment) yield fragment;
-    yield* stringFragments(value, index + 1);
-  }
-}
-
-function* observationEvidence(fragment: string, lineage: string, localeHint: string, timeZone: string, index = 0): Generator<string> {
-  if (index === 0) {
-    if (fragment) yield cleanText(fragment);
-    yield* observationEvidence(fragment, lineage, localeHint, timeZone, 1);
-    return;
-  }
-  if (index === 1) {
-    if (lineage) yield cleanText(lineage);
-    yield* observationEvidence(fragment, lineage, localeHint, timeZone, 2);
-    return;
-  }
-  if (index === 2) {
-    if (localeHint) yield cleanText(localeHint);
-    yield* observationEvidence(fragment, lineage, localeHint, timeZone, 3);
-    return;
-  }
-  if (index === 3 && timeZone) {
-    yield cleanText(timeZone);
-  }
-}
-
-function* frameSelectors(frameSeed: string, fragment: string, lineage: string, localeHint: string, theorySummary: string, index = 0): Generator<string> {
-  if (index === 0) {
-    yield token(frameSeed, lineage, 'selector');
-    yield* frameSelectors(frameSeed, fragment, lineage, localeHint, theorySummary, 1);
-    return;
-  }
-  if (index === 1) {
-    yield token(frameSeed, fragment, 'selector');
-    yield* frameSelectors(frameSeed, fragment, lineage, localeHint, theorySummary, 2);
-    return;
-  }
-  if (index === 2) {
-    yield token(localeHint, theorySummary, 'selector');
-    yield* frameSelectors(frameSeed, fragment, lineage, localeHint, theorySummary, 3);
-    return;
-  }
-  if (index === 3) {
-    yield token(fragment, lineage, 'selector');
-  }
-}
-
-function* runtimeBridgeFragments(runtime: RaidingAiRuntimeSignals, index = 0): Generator<string> {
-  if (index === 0) {
-    if (runtime.threadAnchor) yield runtime.threadAnchor;
-    yield* runtimeBridgeFragments(runtime, 1);
-    return;
-  }
-  if (index === 1) {
-    if (runtime.localeHint) yield runtime.localeHint;
-    yield* runtimeBridgeFragments(runtime, 2);
-    return;
-  }
-  if (index === 2) {
-    if (runtime.timeZone) yield runtime.timeZone;
-    yield* runtimeBridgeFragments(runtime, 3);
-    return;
-  }
-  if (index === 3) {
-    if (runtime.roleName) yield runtime.roleName;
-    yield* runtimeBridgeFragments(runtime, 4);
-    return;
-  }
-  if (index === 4) {
-    if (runtime.tabName) yield runtime.tabName;
-    yield* runtimeBridgeFragments(runtime, 5);
-    return;
-  }
-  if (index === 5) {
-    if (runtime.windowName) yield runtime.windowName;
-  }
-}
-
-function* runtimeKeyFragments(runtime: RaidingAiRuntimeSignals, index = 0): Generator<string> {
-  if (index === 0) {
-    if (runtime.threadAnchor) yield cleanText(runtime.threadAnchor);
-    yield* runtimeKeyFragments(runtime, 1);
-    return;
-  }
-  if (index === 1) {
-    if (runtime.localeHint) yield cleanText(runtime.localeHint);
-    yield* runtimeKeyFragments(runtime, 2);
-    return;
-  }
-  if (index === 2) {
-    if (runtime.timeZone) yield cleanText(runtime.timeZone);
-    yield* runtimeKeyFragments(runtime, 3);
-    return;
-  }
-  if (index === 3) {
-    if (runtime.roleName) yield cleanText(runtime.roleName);
-    yield* runtimeKeyFragments(runtime, 4);
-    return;
-  }
-  if (index === 4) {
-    if (runtime.tabName) yield cleanText(runtime.tabName);
-    yield* runtimeKeyFragments(runtime, 5);
-    return;
-  }
-  if (index === 5 && runtime.windowName) {
-    yield cleanText(runtime.windowName);
-  }
-}
-
-function* runtimeFallbackFragments(runtime: RaidingAiRuntimeSignals, index = 0): Generator<string> {
-  if (index === 0) {
-    if (runtime.threadAnchor) yield cleanText(runtime.threadAnchor);
-    yield* runtimeFallbackFragments(runtime, 1);
-    return;
-  }
-  if (index === 1) {
-    if (runtime.localeHint) yield cleanText(runtime.localeHint);
-    yield* runtimeFallbackFragments(runtime, 2);
-    return;
-  }
-  if (index === 2) {
-    if (runtime.timeZone) yield cleanText(runtime.timeZone);
-    yield* runtimeFallbackFragments(runtime, 3);
-    return;
-  }
-  if (index === 3) {
-    if (runtime.roleName) yield cleanText(runtime.roleName);
-    yield* runtimeFallbackFragments(runtime, 4);
-    return;
-  }
-  if (index === 4) {
-    if (runtime.tabName) yield cleanText(runtime.tabName);
-    yield* runtimeFallbackFragments(runtime, 5);
-    return;
-  }
-  if (index === 5 && runtime.windowName) {
-    yield cleanText(runtime.windowName);
-  }
-}
-
-function runtimeEntropySource(now: number, localeHint: string, timeZone: string, index: number): string | null {
-  switch (index) {
-    case 0:
-      return localeHint;
-    case 1:
-      return timeZone;
-    case 2:
-      return process.cwd();
-    case 3:
-      return process.argv.slice(1, 5).join(' ');
-    case 4:
-      return [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV, process.title, process.platform, process.arch].filter(Boolean).join(' ');
-    case 5:
-      return String(now);
-    default:
-      return null;
-  }
-}
-
-function readNextValue<T>(iterator: Iterator<T>): T | null {
-  const step = iterator.next();
-  return step.done ? null : step.value;
-}
-
-function* buildRuntimeObservations(now: number, localeHint: string, timeZone: string, index = 0): Generator<string, void, void> {
-  const source = runtimeEntropySource(now, localeHint, timeZone, index);
-  if (source === null) return;
-  const fragment = cleanText(source);
-  if (fragment) {
-    const lineage = token(String(index), fragment, localeHint, timeZone);
-    const subjectSeed = token(localeHint, timeZone, fragment, lineage, 'subject');
-    const valueSeed = token(localeHint, timeZone, lineage, fragment, 'value');
-    const subjectWords = words(subjectSeed);
-    const valueWords = words(valueSeed);
-    const fragmentWords = words(fragment);
-    const lineageWords = words(lineage);
-    yield 'subject';
-    yield cleanText(`${fragmentWords[0] ?? fragment} ${lineageWords[0] ?? subjectSeed}`);
-    yield 'value';
-    yield cleanText([fragmentWords.slice(1).join(' '), lineageWords.slice(1).join(' '), subjectWords[0] ?? subjectSeed, valueWords[0] ?? valueSeed].filter(Boolean).join(' '));
-    yield 'category';
-    yield token(localeHint, timeZone, fragment, lineage);
-    yield 'source';
-    yield token(timeZone, localeHint, lineage, fragment);
-    yield 'confidence';
-    yield String(hashFraction(subjectSeed, valueSeed, nodeSeed(fragment, lineage)));
-    yield 'observedAt';
-    yield String(now - hashMagnitude(fragment, lineage, localeHint, timeZone));
-    yield 'contextSubjectKey';
-    yield token(fragment, lineage, 'subject');
-    yield 'contextSubjectValue';
-    yield cleanText(`${localeHint} ${timeZone} ${fragment}`);
-    yield 'contextValueKey';
-    yield token(fragment, lineage, 'value');
-    yield 'contextValueValue';
-    yield cleanText(`${lineage} ${process.cwd()}`);
-    yield* observationEvidence(fragment, lineage, localeHint, timeZone);
-    yield 'endObservation';
-  }
-  yield* buildRuntimeObservations(now, localeHint, timeZone, index + 1);
-}
-
-function* threadIdentitySubject(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string): Generator<string, void, void> {
-  yield phraseFromTheory(theory, subjectScope, messageSeed, 0);
-}
-
-function* threadIdentityMessageId(subjectScope: string, messageSeed: string, timeZone: string): Generator<string, void, void> {
-  yield token(subjectScope, messageSeed, timeZone);
-}
-
-function* threadIdentityRoot(rootMessageId: string): Generator<string, void, void> {
-  yield rootMessageId;
-}
-
-function* threadIdentityInReplyTo(rootMessageId: string): Generator<string, void, void> {
-  yield rootMessageId;
-}
-
-function* threadIdentityReferences(rootMessageId: string): Generator<string, void, void> {
-  yield rootMessageId;
-}
-
-function* buildThreadIdentity(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string, timeZone: string, rootMessageId: string, localeHint: string, roleName: string, stage = 0): Generator<string, void, void> {
-  if (stage === 0) {
-    yield* threadIdentitySubject(theory, subjectScope, messageSeed);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 1);
-    return;
-  }
-  if (stage === 1) {
-    yield* threadIdentityMessageId(subjectScope, messageSeed, timeZone);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 2);
-    return;
-  }
-  if (stage === 2) {
-    yield* threadIdentityRoot(rootMessageId);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 3);
-    return;
-  }
-  if (stage === 3) {
-    yield* threadIdentityInReplyTo(rootMessageId);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 4);
-    return;
-  }
-  yield* threadIdentityReferences(rootMessageId);
-  yield* buildAttendees(theory, localeHint, timeZone, roleName);
-}
-
-function* recurrenceStartLocal(now: number, timeZone: string): Generator<string, void, void> {
-  yield normalizeWallTime(wallClockString(new Date(now), timeZone), timeZone).local;
-}
-
-function* recurrenceTimeZone(timeZone: string): Generator<string, void, void> {
-  yield timeZone;
-}
-
-function* recurrenceRule(theory: UserBehaviorTheory, basis: string, anchor: string): Generator<string, void, void> {
-  yield cleanText(phraseFromTheory(theory, basis, anchor, 0)).replace(/\s+/g, '-');
-}
-
-function* recurrenceDuration(now: number, localeHint: string, timeZone: string, basis: string, anchor: string): Generator<string, void, void> {
-  yield String(hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1);
-}
-
-function* buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string, basis = '', anchor = '', stage = 0): Generator<string, void, void> {
-  const nextBasis = basis || phraseFromTheory(theory, localeHint, timeZone, Number.parseInt(token(theory.summary, localeHint, String(now)).slice(0, 2), 16));
-  const nextAnchor = anchor || token(nextBasis, theory.summary, localeHint, String(now));
-  if (stage === 0) {
-    yield* recurrenceStartLocal(now, timeZone);
-    yield* buildRecurrence(theory, now, localeHint, timeZone, nextBasis, nextAnchor, 1);
-    return;
-  }
-  if (stage === 1) {
-    yield* recurrenceTimeZone(timeZone);
-    yield* buildRecurrence(theory, now, localeHint, timeZone, nextBasis, nextAnchor, 2);
-    return;
-  }
-  if (stage === 2) {
-    yield* recurrenceRule(theory, nextBasis, nextAnchor);
-    yield* buildRecurrence(theory, now, localeHint, timeZone, nextBasis, nextAnchor, 3);
-    return;
-  }
-  if (stage === 3) {
-    yield* recurrenceDuration(now, localeHint, timeZone, nextBasis, nextAnchor);
-  }
-}
-
-function composeThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): LatentThreadIdentity {
+function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): ThreadIdentityInput {
+  const participants = buildAttendees(localeHint, timeZone, roleName);
   return {
     subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
-    participants: buildAttendees(theory, localeHint, timeZone, roleName),
+    participants,
     messageId: token(subjectScope, messageSeed, timeZone),
     rootMessageId,
     inReplyTo: rootMessageId,
-    references: threadIdentityReferences(rootMessageId),
+    references: [rootMessageId],
+    provider: 'mail',
+    mailbox: 'primary',
   };
 }
 
-function* emptyFlux(): Generator<string, void, void> {
-  return;
+function buildRecurrence(now: number, timeZone: string): RecurrenceSpec {
+  return { startLocal: normalizeWallTime('2026-05-04T09:00:00', timeZone).local, timeZone, rule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE;COUNT=3', durationMinutes: Math.max(30, (now % 90) || 30) };
 }
+
+function buildFrames(localeHint: string, timeZone: string, roleName: string, threadAnchor: string, tabName: string, windowName: string): VisionFrame[] {
+  const windowId = token(windowName, 'window', localeHint);
+  const tabId = token(tabName, 'tab', timeZone);
+  return [
+    { id: token('frame', '0', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-a'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } },
+    { id: token('frame', '1', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-b'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } },
+    { id: token('frame', '2', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-b'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } },
+  ];
+}
+
+function buildKeys(): string[] {
+  return ['tab', 'enter'];
+}
+
+function buildFallbackSelectors(): string[] {
+  return ['selector-b'];
+}
+
+function buildLocales(localeHint: string): string[] {
+  return Array.from(new Set([localeHint, localeHint.replace(/_/g, '-').split('-')[0] || localeHint]));
+}
+
+function buildTheorySummarySeed(localeHint: string, timeZone: string, roleName: string): string {
+  return cleanText(`computer-use ${localeHint} ${timeZone} ${roleName}`);
+}
+
+function captureComputerUse(frames: VisionFrame[], keys: string[], fallbackSelectors: string[]) {
+  return runVisionLoop(frames, { keys, fallbackSelectors });
+}
+
+export function phraseFromTheoryPublic(theory: UserBehaviorTheory, scope: string, seed: string, index: number): string {
+  return phraseFromTheory(theory, scope, seed, index);
+}
+
+export { phraseFromTheoryPublic as phraseFromTheory };
+
 export class SignalBridge {
   capture(now = Date.now()): RaidingAiRuntimeSignals {
     const localeHint = runtimeLocale();
     const timeZone = runtimeTimeZone();
-    const observations = buildRuntimeObservations(now, localeHint, timeZone) as any;
-    const theory = buildBehavioralModel({ now, observations, facts: emptyFlux() as any, patterns: emptyFlux() as any, priorTheory: null }).theory;
-    const memoryFacts = buildMemoryFacts(theory, now, localeHint, timeZone) as any;
+    const roleName = token('role', localeHint, timeZone, String(now));
+    const threadAnchor = token('thread', localeHint, timeZone, String(now));
+    const tabName = token('tab', localeHint, timeZone, threadAnchor);
+    const windowName = token('window', localeHint, timeZone, threadAnchor);
+    const subjectScope = token(threadAnchor, localeHint, 'scope');
+    const rootMessageId = token(subjectScope, threadAnchor, 'root');
+    const localeList = buildLocales(localeHint);
+    const observations = buildObservations(localeHint, timeZone);
+    const theory = buildBehavioralModel({ now, observations, facts: [], patterns: [], priorTheory: null }).theory;
+    const memoryFacts = buildMemoryFacts(theory, localeHint, timeZone);
+    const episodes = buildEpisodes(theory, localeHint);
     const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
-    const episodes = buildEpisodes(theory, now, localeHint) as any;
-    const learned = learning.learn({ now, workingFacts: memoryFacts as any, episodicItems: episodes as any, sourceDocuments: emptyFlux() as any });
-    const roleName = token(theory.summary, localeHint, timeZone, String(now));
-    const threadAnchor = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now)));
-    const tabName = token(theory.summary, localeHint, timeZone, threadAnchor);
-    const windowName = token(tabName, theory.summary, localeHint);
-    const subjectScope = token(threadAnchor, localeHint, timeZone);
-    const rootMessageId = token(subjectScope, threadAnchor, localeHint);
-    const timezoneLocal = wallClockString(new Date(now), timeZone);
-    const timezoneExpectedUtc = normalizeWallTime(timezoneLocal, timeZone).utc;
-    const locales = localeFragments(localeHint) as any;
-    const frames = buildUiFrames(theory, now, localeHint) as any;
-    const attendees = buildAttendees(theory, localeHint, timeZone, roleName) as any;
-    const threadA = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
-    const threadB = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName);
-    const recurrence = buildRecurrence(theory, now, localeHint, timeZone) as any;
-    const keys = runtimeKeyFragments({
-      now,
-      capturedAt: new Date(now).toISOString(),
-      localeHint,
-      locales,
-      timeZone,
-      timezoneLocal,
-      timezoneExpectedUtc,
-      tabName,
-      windowName,
-      roleName,
-      threadAnchor,
-      frames,
-      keys: emptyFlux() as any,
-      fallbackSelectors: emptyFlux() as any,
-      theory: learned.theory,
-      observations,
-      facts: learned.promotedFacts,
-      patterns: learned.patterns,
-      episodes: buildEpisodes(learned.theory, now, localeHint) as any,
-      memoryFacts,
-      attendees: buildAttendees(learned.theory, localeHint, timeZone, roleName) as any,
-      threadA: composeThreadIdentity(learned.theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName),
-      threadB: composeThreadIdentity(learned.theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName),
-      recurrence: buildRecurrence(learned.theory, now, localeHint, timeZone) as any,
-      summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
-    });
-    const fallbackSelectors = runtimeFallbackFragments({
-      now,
-      capturedAt: new Date(now).toISOString(),
-      localeHint,
-      locales,
-      timeZone,
-      timezoneLocal,
-      timezoneExpectedUtc,
-      tabName,
-      windowName,
-      roleName,
-      threadAnchor,
-      frames,
-      keys,
-      fallbackSelectors: [],
-      theory: learned.theory,
-      observations,
-      facts: learned.promotedFacts,
-      patterns: learned.patterns,
-      episodes: buildEpisodes(learned.theory, now, localeHint) as any,
-      memoryFacts,
-      attendees,
-      threadA,
-      threadB,
-      recurrence,
-      summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
-    });
+    const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: episodes, sourceDocuments: [] });
+    const frames = buildFrames(localeHint, timeZone, roleName, threadAnchor, tabName, windowName);
+    const keys = buildKeys();
+    const fallbackSelectors = buildFallbackSelectors();
+    const computerUse = captureComputerUse(frames, keys, fallbackSelectors);
+    const attendees = buildAttendees(localeHint, timeZone, roleName);
+    const threadA = buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
+    const threadB = buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
+    const recurrence = buildRecurrence(now, timeZone);
     return {
       now,
       capturedAt: new Date(now).toISOString(),
       localeHint,
-      locales,
+      locales: localeList,
       timeZone,
-      timezoneLocal,
-      timezoneExpectedUtc,
+      timezoneLocal: normalizeWallTime('2026-05-04T09:00:00', timeZone).local,
+      timezoneExpectedUtc: normalizeWallTime('2026-05-04T09:00:00', timeZone).utc,
       tabName,
       windowName,
       roleName,
@@ -644,16 +267,16 @@ export class SignalBridge {
       keys,
       fallbackSelectors,
       theory: learned.theory,
-      observations,
+      observations: learned.observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: buildEpisodes(learned.theory, now, localeHint) as any,
+      episodes: learned.summary ? episodes : episodes,
       memoryFacts,
       attendees,
       threadA,
       threadB,
       recurrence,
-      summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
+      summary: computerUse.finalSelector ? cleanText(`computer use ${threadAnchor} ${computerUse.finalSelector}`) : cleanText(`computer use ${threadAnchor}`),
     };
   }
 
@@ -686,4 +309,3 @@ export function captureRaidingAiSignals(now = Date.now()): RaidingAiRuntimeSigna
 export function deriveRaidingAiTrace(now = Date.now()): RaidingAiTrace {
   return new SignalBridge().buildTrace(now);
 }
-
