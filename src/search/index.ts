@@ -3,10 +3,10 @@ import { resolve } from 'node:path';
 import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile, RuntimeComposition } from './types.ts';
 import { buildSourceRanking, scoreEvidenceTrust } from './trust.ts';
 import { buildEvidenceGraph, buildQueries, deriveHopPlan } from './reasoning.ts';
-import { forecastNextSignals } from './forecast.ts';
+import { forecastNextSignals, persistForecastTrajectory } from './forecast.ts';
 import { chooseStrategy, fallbackStrategyChoose, DEFAULT_STATE_PATH, evaluatePolicy, SearchPolicyStore, createDefaultPolicyRewriteProvider, registerRuntimeCompositionMutator } from './policy.ts';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, understandSearchIntent, understandSearchIntentWithNlu, type SemanticNluProvider } from './nlu.ts';
-import { clamp } from './utils.ts';
+import { clamp, stableHash, uniq } from './utils.ts';
 
 export * from './types.ts';
 export * from './nlu.ts';
@@ -96,23 +96,74 @@ export class SearchSession {
 
   private buildPlan(intent: ReturnType<typeof understandSearchIntent>, context: Record<string, unknown>, results: SearchResult[] = [], learn = false): SearchPlan {
     this.state = this.store.load();
-    const initialForecasts = forecastNextSignals(intent, this.state, this.options.behaviorSeed ?? context);
-    const policyDecision = evaluatePolicy(intent, this.state, initialForecasts.map((signal) => signal.latentNeed.label));
-    const effectiveIntent = policyDecision.maxHopBudget ? { ...intent, hopBudget: Math.min(intent.hopBudget, policyDecision.maxHopBudget) } : intent;
-    const strategy = resolveRuntimeStrategy(effectiveIntent, this.state);
-    const queries = buildQueries(effectiveIntent, strategy);
-    const sourceRanking = buildSourceRanking(effectiveIntent, this.state.sourceReliability, this.state.rules, policyDecision);
-    const trustNotes = buildTrustNotes(intent, sourceRanking, this.state);
-    const trustedResults = scoreEvidenceTrust(intent, results, this.state.sourceReliability, policyDecision, this.state);
-    const evidenceGraph = buildEvidenceGraph(effectiveIntent, queries, trustedResults, strategy, this.state.sourceReliability, policyDecision, this.state);
-    const predictedSignals = forecastNextSignals(effectiveIntent, this.state, { ...(this.options.behaviorSeed ?? context), evidenceGraph });
-    const hopPlan = deriveHopPlan(effectiveIntent, strategy, trustedResults);
-    if (learn) {
-      const score = clamp(evidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + strategy.lastScore * 0.2);
-      void this.learn(intent, strategy, trustedResults, score).catch(() => undefined);
+    let workingIntent = intent;
+    let currentState = this.state;
+    let finalPlan: SearchPlan | null = null;
+    let finalEvidenceGraph: SearchPlan['evidenceGraph'] | null = null;
+    let finalTrustedResults: SearchResult[] = results;
+    let finalStrategy = resolveRuntimeStrategy(intent, currentState);
+    let previousSignature = '';
+    let previousConfidence = 0;
+
+    for (let pass = 0; pass < 4; pass += 1) {
+      const forecastSeed = { ...(this.options.behaviorSeed ?? context), pass, previousSignature, objective: workingIntent.semanticQuery };
+      const forecasts = forecastNextSignals(workingIntent, currentState, forecastSeed);
+      const policyDecision = evaluatePolicy(workingIntent, currentState, forecasts.map((signal) => signal.latentNeed.label));
+      const effectiveIntent = policyDecision.maxHopBudget ? { ...workingIntent, hopBudget: Math.min(workingIntent.hopBudget, policyDecision.maxHopBudget) } : workingIntent;
+      const strategy = resolveRuntimeStrategy(effectiveIntent, currentState);
+      const queries = buildQueries(effectiveIntent, strategy);
+      const sourceRanking = buildSourceRanking(effectiveIntent, currentState.sourceReliability, currentState.rules, policyDecision);
+      const trustNotes = buildTrustNotes(effectiveIntent, sourceRanking, currentState);
+      const trustedResults = scoreEvidenceTrust(effectiveIntent, results, currentState.sourceReliability, policyDecision, currentState);
+      const evidenceGraph = buildEvidenceGraph(effectiveIntent, queries, trustedResults, strategy, currentState.sourceReliability, policyDecision, currentState);
+      const hopPlan = deriveHopPlan(effectiveIntent, strategy, trustedResults);
+      const signature = stableHash(JSON.stringify({ objective: effectiveIntent.semanticQuery, queries, hopPlan, claims: evidenceGraph.claims.map((claim) => claim.id), propositions: evidenceGraph.propositions.map((proposition) => proposition.id), confidence: Number(evidenceGraph.confidence.toFixed(3)), forecasts: forecasts.slice(0, 3).map((signal) => signal.latentNeed.label + ':' + signal.topic) }));
+      const stabilized = signature === previousSignature || (previousConfidence > 0 && Math.abs(evidenceGraph.confidence - previousConfidence) < 0.025 && evidenceGraph.claims.length > 0 && evidenceGraph.propositions.length > 0);
+      currentState = persistForecastTrajectory(currentState, { intent: effectiveIntent, forecasts, signature, pass, stabilized });
+      this.state = currentState;
+      this.store.save(this.state);
+      finalTrustedResults = trustedResults;
+      finalStrategy = strategy;
+      finalEvidenceGraph = evidenceGraph;
+      finalPlan = { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, 'policy=' + (policyDecision.matchedRules.join('|') || 'none'), 'trajectory=' + signature, 'pass=' + String(pass)], predictedSignals: forecasts, evidenceGraph };
+      previousSignature = signature;
+      previousConfidence = evidenceGraph.confidence;
+      if (stabilized) break;
+      workingIntent = evidenceGraph.claims.length === 0
+        ? {
+            ...effectiveIntent,
+            focus: 'multi-hop',
+            hopBudget: Math.min(6, effectiveIntent.hopBudget + 1),
+            querySeeds: uniq([...effectiveIntent.querySeeds, ...forecasts.flatMap((signal) => signal.suggestedQueries), ...queries]).slice(0, 8),
+            evidenceTerms: uniq([...effectiveIntent.evidenceTerms, ...evidenceGraph.propositions.slice(0, 4).map((proposition) => proposition.text), ...evidenceGraph.claims.slice(0, 4).map((claim) => claim.text)]).slice(0, 16),
+          }
+        : {
+            ...effectiveIntent,
+            querySeeds: uniq([...effectiveIntent.querySeeds, ...forecasts.flatMap((signal) => signal.suggestedQueries), ...evidenceGraph.exploration.flatMap((step) => step.frontier)]).slice(0, 8),
+            evidenceTerms: uniq([...effectiveIntent.evidenceTerms, ...evidenceGraph.claims.slice(0, 4).map((claim) => claim.text), ...evidenceGraph.propositions.slice(0, 4).map((proposition) => proposition.text)]).slice(0, 16),
+            topics: uniq([...effectiveIntent.topics, ...evidenceGraph.entities.slice(0, 4).map((entity) => entity.label)]).slice(0, 12),
+          };
     }
-    const plan: SearchPlan = { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, `policy=${policyDecision.matchedRules.join('|') || 'none'}`], predictedSignals, evidenceGraph };
-    return applyRuntimePipeline(plan, this.state);
+
+    if (!finalPlan || !finalEvidenceGraph) {
+      const strategy = resolveRuntimeStrategy(workingIntent, currentState);
+      const queries = buildQueries(workingIntent, strategy);
+      const sourceRanking = buildSourceRanking(workingIntent, currentState.sourceReliability, currentState.rules);
+      const trustedResults = scoreEvidenceTrust(workingIntent, results, currentState.sourceReliability, undefined, currentState);
+      const evidenceGraph = buildEvidenceGraph(workingIntent, queries, trustedResults, strategy, currentState.sourceReliability, undefined, currentState);
+      const hopPlan = deriveHopPlan(workingIntent, strategy, trustedResults);
+      finalPlan = { intent: workingIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: buildTrustNotes(workingIntent, sourceRanking, currentState), predictedSignals: forecastNextSignals(workingIntent, currentState, this.options.behaviorSeed ?? context), evidenceGraph };
+      finalTrustedResults = trustedResults;
+      finalStrategy = strategy;
+      finalEvidenceGraph = evidenceGraph;
+    }
+
+    if (learn) {
+      const score = clamp(finalEvidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + finalStrategy.lastScore * 0.2);
+      void this.learn(finalPlan.intent, finalStrategy, finalTrustedResults, score).catch(() => undefined);
+    }
+
+    return applyRuntimePipeline(finalPlan, this.state);
   }
 
   plan(objective: string, context: Record<string, unknown> = {}): SearchPlan {
