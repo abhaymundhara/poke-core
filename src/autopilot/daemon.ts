@@ -112,7 +112,10 @@ function charCodeTotal(text: string, index = 0, total = 0): number {
 
 function ratio(seed: string): number {
   const text = token(seed);
-  return charCodeTotal(text) / Math.max(1, text.length);
+  if (text.length === 0) return 0;
+  const HEX_CHAR_MIN = 48;
+  const HEX_CHAR_MAX = 102;
+  return (charCodeTotal(text) / text.length - HEX_CHAR_MIN) / (HEX_CHAR_MAX - HEX_CHAR_MIN);
 }
 
 function average(values: number[]): number {
@@ -189,9 +192,7 @@ function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, e
   const heapTotal = Number(stats.total_heap_size) || 0;
   const heapSizeLimit = Number(stats.heap_size_limit) || 0;
   const pressure = heapUsed / heapSizeLimit;
-  const durationSeed = Number.parseInt(token(model.theory.id, sourceSeed, String(at)).slice(0, 3), 16);
-  const durationDivisor = Number.isNaN(durationSeed) ? 1 : durationSeed % 896 + 100;
-  const durationMs = typeof entry.duration === 'number' ? entry.duration % durationDivisor : 0;
+  const durationMs = Number(entry.duration) || 0;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
@@ -332,6 +333,7 @@ export class CognitiveInterference {
   }
 
   private handleProcessSignal = (): void => {
+    if (!this.manifestModel) return;
     const model = this.manifestModel as BehaviorModelBundle;
     this.observe(model, manifestAt(model, 11), { duration: 0 });
   };
