@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER } from './search/nlu';
-import { buildPlan, cloneIntentGraph, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState, PlannerRecoverySignal } from './planner';
+import { buildPlan, cloneIntentGraph, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState } from './planner';
 import { buildPokeGraph, type PokeGraphState } from './graph';
 import { RagCorpus } from './rag/retriever';
 import { EpisodicMemory } from './memory/episodic-memory';
