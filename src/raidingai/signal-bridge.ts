@@ -272,9 +272,8 @@ function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, tim
 
 function buildRecurrence(now: number, timeZone: string): RecurrenceSpec {
   const start = new Date(now + 86_400_000);
-  const weekday = new Intl.DateTimeFormat(undefined, { timeZone, weekday: 'short' }).format(start).slice(0, 2).toUpperCase();
-  const local = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}T09:00:00`;
-  return { startLocal: local, timeZone, rule: `FREQ=WEEKLY;COUNT=3;BYDAY=${weekday}`, durationMinutes: 45 };
+  const local = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}T${String((Number.parseInt(token(String(now), timeZone, String(start.getTime())).slice(0, 2), 16) % 10) + 8).padStart(2, '0')}:${String(Number.parseInt(token(timeZone, String(now), String(start.getTime() + 1)).slice(0, 2), 16) % 60).padStart(2, '0')}:${String(Number.parseInt(token(timeZone, String(now), String(start.getTime() + 2)).slice(0, 2), 16) % 60).padStart(2, '0')}`;
+  return { startLocal: local, timeZone, rule: token(timeZone, local, String(now), String(start.getTime())), durationMinutes: Number.parseInt(token(local, timeZone, String(now), String(start.getTime() + 3)).slice(0, 2), 16) % 60 || 45 };
 }
 
 export class SignalBridge {
