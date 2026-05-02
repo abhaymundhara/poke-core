@@ -125,8 +125,7 @@ export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; e
           ...state,
           artifacts: {
             ...(state.artifacts ?? {}),
-            contextPack: snippets.slice(0, 12).join('
-'),
+            contextPack: snippets.slice(0, 12).join(String.fromCharCode(10)),
           },
         };
       },
