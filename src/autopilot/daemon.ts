@@ -93,8 +93,13 @@ function words(value: string): string[] {
 
 function ratio(seed: string): number {
   const text = token(seed);
+  if (text.length === 0) return 0;
+  // Normalize average char code of a SHA-256 hex string to [0,1].
+  // Hex chars are '0'–'9' (code 48) through 'a'–'f' (code 102).
+  const HEX_CHAR_MIN = 48;
+  const HEX_CHAR_MAX = 102;
   const total = Array.from(text).reduce((sum, char) => sum + (char.codePointAt(0) ?? 0), 0);
-  return text.length === 0 ? 0 : total / text.length;
+  return (total / text.length - HEX_CHAR_MIN) / (HEX_CHAR_MAX - HEX_CHAR_MIN);
 }
 
 function average(values: number[]): number {
@@ -278,8 +283,6 @@ export class CognitiveInterference {
       this.observe(model, manifest.entryType, entry);
     });
 
-    Reflect.get(observer as Record<string, unknown>, manifest.observerObserveKey);
-    Reflect.get(observer as Record<string, unknown>, manifest.observerDisconnectKey);
     observerObserve.call(observer, buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
     this.observer = observer;
 
@@ -323,9 +326,9 @@ export class CognitiveInterference {
   }
 
   private handleProcessSignal = (): void => {
+    if (!this.manifest) return;
     const model = resolveBehaviorModel(this.options, this.clock);
-    const manifest = this.manifest ?? synthesizeManifest(model);
-    this.observe(model, manifest.processSignal, undefined);
+    this.observe(model, this.manifest.processSignal, undefined);
   };
 
   private observe(model: BehaviorModelBundle, sourceSeed: string, entry?: GCEntry): void {
