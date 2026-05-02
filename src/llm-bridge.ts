@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 
 export function extractWithDefaultProviderSync<T>(payload: unknown, providerModulePath = './src/search/nlu.ts', exportName = 'DEFAULT_LLM_SEMANTIC_NLU_PROVIDER'): T {
   const script = [
-    'const payload = JSON.parse(process.argv[1]);',
+    'const payload = JSON.parse(process.argv[process.argv.length - 1]);',
     'const mod = await import(' + JSON.stringify(providerModulePath) + ');',
     'const provider = mod[' + JSON.stringify(exportName) + '];',
     "if (!provider || typeof provider.extract !== 'function') throw new Error('missing-llm-provider');",
