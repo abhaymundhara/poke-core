@@ -73,7 +73,7 @@ export type RaidingAiTrace = {
 };
 
 function hashText(...parts: string[]): string {
-  return createHash('sha256').update(parts.reduce((acc, part, index) => acc + (index === 0 ? part : `|${part}`), '')).digest('hex');
+  return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
 function token(...parts: string[]): string {
@@ -88,8 +88,27 @@ function words(value: string): string[] {
   return value.toLowerCase().split(/[^a-z0-9]+/).filter((entry) => entry.length > 0);
 }
 
+function hashFraction(...parts: string[]): number {
+  const value = Number.parseInt(token(...parts).slice(0, 8), 16);
+  return value / 0xffffffff;
+}
+
+function hashMagnitude(...parts: string[]): number {
+  return Number.parseInt(token(...parts).slice(0, 8), 16) % 1000;
+}
+
 function theoryWords(theory: UserBehaviorTheory): string[] {
-  return [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].flatMap(words);
+  const result: string[] = [];
+  for (const word of words(theory.summary)) result.push(word);
+  for (let index = 0; index < theory.persistentGoals.length; index += 1) {
+    const goal = theory.persistentGoals[index]?.goal ?? '';
+    for (const word of words(goal)) result.push(word);
+  }
+  for (let index = 0; index < theory.crossContextGeneralizations.length; index += 1) {
+    const generalization = theory.crossContextGeneralizations[index]?.generalization ?? '';
+    for (const word of words(generalization)) result.push(word);
+  }
+  return result;
 }
 
 export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
@@ -103,8 +122,10 @@ export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope
     if (next && !parts.includes(next)) parts.push(next);
   }
   const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
-  return cleanText([...parts, ...hashed].join(' '));
+  const combined = parts.join(' ');
+  return cleanText(hashed.length > 0 ? `${combined}${combined ? ' ' : ''}${hashed.join(' ')}` : combined);
 }
+
 function runtimeLocale(): string {
   const resolved = Intl.DateTimeFormat().resolvedOptions().locale || '';
   const envLocale = process.env.LANG?.split('.')[0] ?? '';
@@ -119,6 +140,24 @@ function splitLocale(value: string): string[] {
   const normalized = value.trim().replace(/_/g, '-');
   const [language, region] = normalized.split('-');
   return region ? [language, `${language}-${region}`] : [language].filter(Boolean);
+}
+
+function* localeFragments(localeHint: string, index = 0): Generator<string> {
+  const normalized = localeHint.trim().replace(/_/g, '-');
+  const [language, region] = normalized.split('-');
+  if (index === 0) {
+    if (normalized) yield normalized;
+    yield* localeFragments(localeHint, 1);
+    return;
+  }
+  if (index === 1) {
+    if (language) yield language;
+    yield* localeFragments(localeHint, 2);
+    return;
+  }
+  if (index === 2) {
+    if (region) yield `${language}-${region}`;
+  }
 }
 
 function wallParts(date: Date, timeZone: string) {
@@ -145,7 +184,10 @@ function wallClockString(date: Date, timeZone: string): string {
 }
 
 function entropyPhrase(seed: string, scope: string, index: number, inputs: string[]): string {
-  const pool = inputs.flatMap(words).filter(Boolean);
+  const pool: string[] = [];
+  for (let outer = 0; outer < inputs.length; outer += 1) {
+    for (const word of words(inputs[outer] ?? '')) pool.push(word);
+  }
   if (pool.length === 0) return token(seed, scope, String(index));
   const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
   const count = countSeed % pool.length || pool.length;
@@ -155,205 +197,339 @@ function entropyPhrase(seed: string, scope: string, index: number, inputs: strin
     if (next && !parts.includes(next)) parts.push(next);
   }
   const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
-  return cleanText([...parts, ...hashed].join(' '));
+  const combined = parts.join(' ');
+  return cleanText(hashed.length > 0 ? `${combined}${combined ? ' ' : ''}${hashed.join(' ')}` : combined);
 }
 
-type FluxNode = {
-  fragment: string;
-  lineage: string;
-  depth: number;
-};
-
-function* fluxNodes(materials: Iterable<string>, seed: string, depth = 0): Generator<FluxNode> {
-  const iterator = materials[Symbol.iterator]();
-  yield* fluxNodesFromIterator(iterator, seed, depth);
-}
-
-function* fluxNodesFromIterator(iterator: Iterator<string>, seed: string, depth: number): Generator<FluxNode> {
-  const next = iterator.next();
-  if (next.done) return;
-  const fragment = cleanText(next.value);
-  if (fragment) {
-    const lineage = token(seed, String(depth), fragment);
-    yield { fragment, lineage, depth };
-    const branchWords = words(fragment);
-    if (branchWords.length > 1) {
-      yield* fluxNodes(branchWords, token(lineage, fragment, String(depth + 1)), depth + 1);
-    }
+function* theoryTextFragments(theory: UserBehaviorTheory, index = 0): Generator<string> {
+  if (index === 0) {
+    if (theory.summary) yield cleanText(theory.summary);
+    yield* theoryTextFragments(theory, 1);
+    return;
   }
-  yield* fluxNodesFromIterator(iterator, seed, depth + 1);
+  const goalIndex = index - 1;
+  if (goalIndex < theory.persistentGoals.length) {
+    const goal = theory.persistentGoals[goalIndex]?.goal ?? '';
+    if (goal) yield cleanText(goal);
+    yield* theoryTextFragments(theory, index + 1);
+    return;
+  }
+  const generalizationIndex = goalIndex - theory.persistentGoals.length;
+  if (generalizationIndex < theory.crossContextGeneralizations.length) {
+    const generalization = theory.crossContextGeneralizations[generalizationIndex]?.generalization ?? '';
+    if (generalization) yield cleanText(generalization);
+    yield* theoryTextFragments(theory, index + 1);
+  }
 }
 
-function* fluxFragments(materials: Iterable<string>, seed: string, depth = 0): Generator<string> {
-  const iterator = fluxNodes(materials, seed, depth)[Symbol.iterator]();
-  yield* fluxFragmentsFromIterator(iterator);
+function theoryTextAt(theory: UserBehaviorTheory, index: number): string | null {
+  if (index === 0) return theory.summary;
+  const goalIndex = index - 1;
+  if (goalIndex < theory.persistentGoals.length) return theory.persistentGoals[goalIndex]?.goal ?? null;
+  const generalizationIndex = goalIndex - theory.persistentGoals.length;
+  return theory.crossContextGeneralizations[generalizationIndex]?.generalization ?? null;
 }
 
-function* fluxFragmentsFromIterator(iterator: Iterator<FluxNode>): Generator<string> {
-  const next = iterator.next();
-  if (next.done) return;
-  yield next.value.fragment;
-  yield* fluxFragmentsFromIterator(iterator);
+function* stringFragments(value: string, index = 0): Generator<string> {
+  const fragments = words(value);
+  if (index < fragments.length) {
+    const fragment = fragments[index];
+    if (fragment) yield fragment;
+    yield* stringFragments(value, index + 1);
+  }
 }
 
-function* observationStream(now: number, localeHint: string, timeZone: string): Generator<BehavioralObservation> {
-  const entropy = [
-    localeHint,
-    timeZone,
-    process.cwd(),
-    process.argv.slice(1, 5).join(' '),
-    [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV, process.title, process.platform, process.arch].filter(Boolean).join(' '),
-    String(now),
-  ];
-  const iterator = fluxNodes(entropy, token(localeHint, timeZone, String(now), 'observations'))[Symbol.iterator]();
-  yield* observationStreamFromIterator(iterator, now, localeHint, timeZone);
+function* observationEvidence(fragment: string, lineage: string, localeHint: string, timeZone: string, index = 0): Generator<string> {
+  if (index === 0) {
+    if (fragment) yield cleanText(fragment);
+    yield* observationEvidence(fragment, lineage, localeHint, timeZone, 1);
+    return;
+  }
+  if (index === 1) {
+    if (lineage) yield cleanText(lineage);
+    yield* observationEvidence(fragment, lineage, localeHint, timeZone, 2);
+    return;
+  }
+  if (index === 2) {
+    if (localeHint) yield cleanText(localeHint);
+    yield* observationEvidence(fragment, lineage, localeHint, timeZone, 3);
+    return;
+  }
+  if (index === 3 && timeZone) {
+    yield cleanText(timeZone);
+  }
 }
 
-function* observationStreamFromIterator(iterator: Iterator<FluxNode>, now: number, localeHint: string, timeZone: string): Generator<BehavioralObservation> {
-  const next = iterator.next();
-  if (next.done) return;
-  const node = next.value;
-  const subjectSeed = token(localeHint, timeZone, node.fragment, node.lineage, 'subject');
-  const valueSeed = token(localeHint, timeZone, node.lineage, node.fragment, 'value');
-  yield {
-    subject: cleanText(`${words(node.fragment)[0] ?? node.fragment} ${words(node.lineage)[0] ?? subjectSeed}`),
-    value: cleanText([
-      ...words(node.fragment).slice(1),
-      ...words(node.lineage).slice(1),
-      words(subjectSeed)[0] ?? subjectSeed,
-      words(valueSeed)[0] ?? valueSeed,
-    ].join(' ')),
-    category: token(localeHint, timeZone, node.fragment, node.lineage) as BehavioralObservation['category'],
-    source: token(timeZone, localeHint, node.lineage, node.fragment),
-    confidence: hashFraction(subjectSeed, valueSeed, node.lineage),
-    observedAt: now - hashMagnitude(node.fragment, node.lineage, localeHint, timeZone),
-    evidence: [...fluxFragments([node.fragment, node.lineage, localeHint, timeZone], token(subjectSeed, valueSeed, node.lineage))],
-    context: {
-      [token(node.fragment, node.lineage, 'subject')]: cleanText(`${localeHint} ${timeZone} ${node.fragment}`),
-      [token(node.fragment, node.lineage, 'value')]: cleanText(`${node.lineage} ${process.cwd()}`),
-    },
-  };
-  yield* observationStreamFromIterator(iterator, now, localeHint, timeZone);
+function* frameSelectors(frameSeed: string, fragment: string, lineage: string, localeHint: string, theorySummary: string, index = 0): Generator<string> {
+  if (index === 0) {
+    yield token(frameSeed, lineage, 'selector');
+    yield* frameSelectors(frameSeed, fragment, lineage, localeHint, theorySummary, 1);
+    return;
+  }
+  if (index === 1) {
+    yield token(frameSeed, fragment, 'selector');
+    yield* frameSelectors(frameSeed, fragment, lineage, localeHint, theorySummary, 2);
+    return;
+  }
+  if (index === 2) {
+    yield token(localeHint, theorySummary, 'selector');
+    yield* frameSelectors(frameSeed, fragment, lineage, localeHint, theorySummary, 3);
+    return;
+  }
+  if (index === 3) {
+    yield token(fragment, lineage, 'selector');
+  }
 }
 
-function* buildRuntimeObservations(now: number, localeHint: string, timeZone: string): Generator<BehavioralObservation> {
-  yield* observationStream(now, localeHint, timeZone);
+function* runtimeBridgeFragments(runtime: RaidingAiRuntimeSignals, index = 0): Generator<string> {
+  if (index === 0) {
+    if (runtime.threadAnchor) yield runtime.threadAnchor;
+    yield* runtimeBridgeFragments(runtime, 1);
+    return;
+  }
+  if (index === 1) {
+    if (runtime.localeHint) yield runtime.localeHint;
+    yield* runtimeBridgeFragments(runtime, 2);
+    return;
+  }
+  if (index === 2) {
+    if (runtime.timeZone) yield runtime.timeZone;
+    yield* runtimeBridgeFragments(runtime, 3);
+    return;
+  }
+  if (index === 3) {
+    if (runtime.roleName) yield runtime.roleName;
+    yield* runtimeBridgeFragments(runtime, 4);
+    return;
+  }
+  if (index === 4) {
+    if (runtime.tabName) yield runtime.tabName;
+    yield* runtimeBridgeFragments(runtime, 5);
+    return;
+  }
+  if (index === 5) {
+    if (runtime.windowName) yield runtime.windowName;
+  }
 }
 
-function* memoryFactStream(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): Generator<MemoryFact> {
-  const seed = token(theory.summary, localeHint, timeZone, String(now), 'facts');
-  const iterator = fluxNodes(theoryFluxStrings(theory), seed)[Symbol.iterator]();
-  yield* memoryFactStreamFromIterator(iterator, theory, now, localeHint, timeZone);
+function* runtimeKeyFragments(runtime: RaidingAiRuntimeSignals, index = 0): Generator<string> {
+  if (index === 0) {
+    if (runtime.threadAnchor) yield cleanText(runtime.threadAnchor);
+    yield* runtimeKeyFragments(runtime, 1);
+    return;
+  }
+  if (index === 1) {
+    if (runtime.localeHint) yield cleanText(runtime.localeHint);
+    yield* runtimeKeyFragments(runtime, 2);
+    return;
+  }
+  if (index === 2) {
+    if (runtime.timeZone) yield cleanText(runtime.timeZone);
+    yield* runtimeKeyFragments(runtime, 3);
+    return;
+  }
+  if (index === 3) {
+    if (runtime.roleName) yield cleanText(runtime.roleName);
+    yield* runtimeKeyFragments(runtime, 4);
+    return;
+  }
+  if (index === 4) {
+    if (runtime.tabName) yield cleanText(runtime.tabName);
+    yield* runtimeKeyFragments(runtime, 5);
+    return;
+  }
+  if (index === 5 && runtime.windowName) {
+    yield cleanText(runtime.windowName);
+  }
 }
 
-function* memoryFactStreamFromIterator(iterator: Iterator<FluxNode>, theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): Generator<MemoryFact> {
-  const next = iterator.next();
-  if (next.done) return;
-  const node = next.value;
-  yield {
-    key: token(node.fragment, node.lineage, theory.summary),
-    value: phraseFromTheory(theory, localeHint, node.fragment, node.depth),
-    confidence: hashFraction(node.fragment, node.lineage, theory.summary, localeHint, timeZone),
-    source: token(localeHint, timeZone, node.lineage, node.fragment),
-    updatedAt: now - hashMagnitude(node.fragment, node.lineage, theory.summary),
-  };
-  yield* memoryFactStreamFromIterator(iterator, theory, now, localeHint, timeZone);
+function* runtimeFallbackFragments(runtime: RaidingAiRuntimeSignals, index = 0): Generator<string> {
+  if (index === 0) {
+    if (runtime.threadAnchor) yield cleanText(runtime.threadAnchor);
+    yield* runtimeFallbackFragments(runtime, 1);
+    return;
+  }
+  if (index === 1) {
+    if (runtime.localeHint) yield cleanText(runtime.localeHint);
+    yield* runtimeFallbackFragments(runtime, 2);
+    return;
+  }
+  if (index === 2) {
+    if (runtime.timeZone) yield cleanText(runtime.timeZone);
+    yield* runtimeFallbackFragments(runtime, 3);
+    return;
+  }
+  if (index === 3) {
+    if (runtime.roleName) yield cleanText(runtime.roleName);
+    yield* runtimeFallbackFragments(runtime, 4);
+    return;
+  }
+  if (index === 4) {
+    if (runtime.tabName) yield cleanText(runtime.tabName);
+    yield* runtimeFallbackFragments(runtime, 5);
+    return;
+  }
+  if (index === 5 && runtime.windowName) {
+    yield cleanText(runtime.windowName);
+  }
 }
 
-function* buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): Generator<MemoryFact> {
-  yield* memoryFactStream(theory, now, localeHint, timeZone);
+function runtimeEntropySource(now: number, localeHint: string, timeZone: string, index: number): string | null {
+  switch (index) {
+    case 0:
+      return localeHint;
+    case 1:
+      return timeZone;
+    case 2:
+      return process.cwd();
+    case 3:
+      return process.argv.slice(1, 5).join(' ');
+    case 4:
+      return [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV, process.title, process.platform, process.arch].filter(Boolean).join(' ');
+    case 5:
+      return String(now);
+    default:
+      return null;
+  }
 }
 
-function* episodeStream(theory: UserBehaviorTheory, now: number, localeHint: string): Generator<EpisodicMemoryItem> {
-  const iterator = fluxNodes(theoryFluxStrings(theory), token(theory.summary, localeHint, String(now), 'episodes'))[Symbol.iterator]();
-  yield* episodeStreamFromIterator(iterator, theory, now, localeHint);
+function* buildRuntimeObservations(now: number, localeHint: string, timeZone: string, index = 0): Generator<BehavioralObservation> {
+  const source = runtimeEntropySource(now, localeHint, timeZone, index);
+  if (source === null) return;
+  const fragment = cleanText(source);
+  if (fragment) {
+    const lineage = token(String(index), fragment, localeHint, timeZone);
+    const subjectSeed = token(localeHint, timeZone, fragment, lineage, 'subject');
+    const valueSeed = token(localeHint, timeZone, lineage, fragment, 'value');
+    const subjectWords = words(subjectSeed);
+    const valueWords = words(valueSeed);
+    const fragmentWords = words(fragment);
+    const lineageWords = words(lineage);
+    yield {
+      subject: cleanText(`${fragmentWords[0] ?? fragment} ${lineageWords[0] ?? subjectSeed}`),
+      value: cleanText([fragmentWords.slice(1).join(' '), lineageWords.slice(1).join(' '), subjectWords[0] ?? subjectSeed, valueWords[0] ?? valueSeed].filter(Boolean).join(' ')),
+      category: token(localeHint, timeZone, fragment, lineage) as BehavioralObservation['category'],
+      source: token(timeZone, localeHint, lineage, fragment),
+      confidence: hashFraction(subjectSeed, valueSeed, nodeSeed(fragment, lineage)),
+      observedAt: now - hashMagnitude(fragment, lineage, localeHint, timeZone),
+      evidence: Array.from(observationEvidence(fragment, lineage, localeHint, timeZone)),
+      context: {
+        [token(fragment, lineage, 'subject')]: cleanText(`${localeHint} ${timeZone} ${fragment}`),
+        [token(fragment, lineage, 'value')]: cleanText(`${lineage} ${process.cwd()}`),
+      },
+    };
+  }
+  yield* buildRuntimeObservations(now, localeHint, timeZone, index + 1);
 }
 
-function* episodeStreamFromIterator(iterator: Iterator<FluxNode>, theory: UserBehaviorTheory, now: number, localeHint: string): Generator<EpisodicMemoryItem> {
-  const next = iterator.next();
-  if (next.done) return;
-  const node = next.value;
-  yield {
-    id: token(node.fragment, node.lineage, theory.summary),
-    taskId: token(localeHint, node.fragment, node.lineage, String(node.depth)),
-    category: token(node.fragment, localeHint, node.lineage),
-    summary: phraseFromTheory(theory, localeHint, node.fragment, node.depth),
-    signals: [...fluxFragments([node.fragment, node.lineage, theory.summary, localeHint], token(node.fragment, node.lineage, 'signals'))],
-    score: hashFraction(node.fragment, node.lineage, theory.summary, localeHint),
-    createdAt: now - hashMagnitude(node.fragment, node.lineage, localeHint),
-  };
-  yield* episodeStreamFromIterator(iterator, theory, now, localeHint);
+function nodeSeed(fragment: string, lineage: string): string {
+  return token(fragment, lineage, 'seed');
 }
 
-function* buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string): Generator<EpisodicMemoryItem> {
-  yield* episodeStream(theory, now, localeHint);
+function* buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string, index = 0): Generator<MemoryFact> {
+  const source = theoryTextAt(theory, index);
+  if (source === null) return;
+  const fragment = cleanText(source);
+  if (fragment) {
+    const lineage = token(theory.summary, localeHint, timeZone, fragment, String(index));
+    yield {
+      key: token(fragment, lineage, theory.summary),
+      value: phraseFromTheory(theory, localeHint, fragment, index),
+      confidence: hashFraction(fragment, lineage, theory.summary, localeHint, timeZone),
+      source: token(localeHint, timeZone, lineage, fragment),
+      updatedAt: now - hashMagnitude(fragment, lineage, theory.summary),
+    };
+  }
+  yield* buildMemoryFacts(theory, now, localeHint, timeZone, index + 1);
 }
 
-function* uiFrameStream(theory: UserBehaviorTheory, now: number, localeHint: string): Generator<VisionFrame> {
-  const iterator = fluxNodes([theory.summary, localeHint, ...theoryFluxStrings(theory)], token(theory.summary, localeHint, String(now), 'frames'))[Symbol.iterator]();
-  yield* uiFrameStreamFromIterator(iterator, theory, localeHint);
+function* buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string, index = 0): Generator<EpisodicMemoryItem> {
+  const source = theoryTextAt(theory, index);
+  if (source === null) return;
+  const fragment = cleanText(source);
+  if (fragment) {
+    const lineage = token(theory.summary, localeHint, String(now), fragment, String(index));
+    yield {
+      id: token(fragment, lineage, theory.summary),
+      taskId: token(localeHint, fragment, lineage, String(index)),
+      category: token(fragment, localeHint, lineage),
+      summary: phraseFromTheory(theory, localeHint, fragment, index),
+      signals: Array.from(episodeSignals(fragment, lineage, theory.summary, localeHint)),
+      score: hashFraction(fragment, lineage, theory.summary, localeHint),
+      createdAt: now - hashMagnitude(fragment, lineage, localeHint),
+    };
+  }
+  yield* buildEpisodes(theory, now, localeHint, index + 1);
 }
 
-function* uiFrameStreamFromIterator(iterator: Iterator<FluxNode>, theory: UserBehaviorTheory, localeHint: string): Generator<VisionFrame> {
-  const next = iterator.next();
-  if (next.done) return;
-  const node = next.value;
-  const frameSeed = token(theory.summary, localeHint, node.fragment, node.lineage);
-  yield {
-    id: token(frameSeed, node.lineage, node.fragment),
-    ocr: phraseFromTheory(theory, frameSeed, localeHint, node.depth),
-    dom: JSON.stringify({
-      [token(frameSeed, node.lineage, 'dom')]: token(frameSeed, node.fragment, node.lineage),
-      [token(frameSeed, node.lineage, 'theory')]: String(theory.id),
-      [token(frameSeed, node.lineage, 'locale')]: localeHint,
-    }),
-    selectors: [...fluxFragments([node.fragment, node.lineage, localeHint, theory.summary], token(frameSeed, 'selectors'))],
-    activeTabId: token(frameSeed, node.fragment, localeHint),
-    activeWindowId: token(node.lineage, frameSeed, node.fragment),
-    viewport: {
-      width: hashMagnitude(frameSeed, node.fragment, node.lineage),
-      height: hashMagnitude(node.lineage, frameSeed, node.fragment),
-    },
-  };
-  yield* uiFrameStreamFromIterator(iterator, theory, localeHint);
+function* episodeSignals(fragment: string, lineage: string, theorySummary: string, localeHint: string, index = 0): Generator<string> {
+  if (index === 0) {
+    if (fragment) yield cleanText(fragment);
+    yield* episodeSignals(fragment, lineage, theorySummary, localeHint, 1);
+    return;
+  }
+  if (index === 1) {
+    if (lineage) yield cleanText(lineage);
+    yield* episodeSignals(fragment, lineage, theorySummary, localeHint, 2);
+    return;
+  }
+  if (index === 2) {
+    if (theorySummary) yield cleanText(theorySummary);
+    yield* episodeSignals(fragment, lineage, theorySummary, localeHint, 3);
+    return;
+  }
+  if (index === 3 && localeHint) {
+    yield cleanText(localeHint);
+  }
 }
 
-function* buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string): Generator<VisionFrame> {
-  yield* uiFrameStream(theory, now, localeHint);
+function* buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string, index = 0): Generator<VisionFrame> {
+  const source = theoryTextAt(theory, index);
+  if (source === null) return;
+  const fragment = cleanText(source);
+  if (fragment) {
+    const lineage = token(theory.summary, localeHint, String(now), fragment, String(index));
+    const frameSeed = token(theory.summary, localeHint, fragment, lineage);
+    yield {
+      id: token(frameSeed, lineage, fragment),
+      ocr: phraseFromTheory(theory, frameSeed, localeHint, index),
+      dom: JSON.stringify({
+        [token(frameSeed, lineage, 'dom')]: token(frameSeed, fragment, lineage),
+        [token(frameSeed, lineage, 'theory')]: String(theory.id),
+        [token(frameSeed, lineage, 'locale')]: localeHint,
+      }),
+      selectors: Array.from(frameSelectors(frameSeed, fragment, lineage, localeHint, theory.summary)),
+      activeTabId: token(frameSeed, fragment, localeHint),
+      activeWindowId: token(lineage, frameSeed, fragment),
+      viewport: {
+        width: hashMagnitude(frameSeed, fragment, lineage),
+        height: hashMagnitude(lineage, frameSeed, fragment),
+      },
+    };
+  }
+  yield* buildUiFrames(theory, now, localeHint, index + 1);
 }
 
-function* attendeeStream(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Generator<Attendee> {
-  const seed = `${localeHint}|${timeZone}|${roleName}`;
-  const iterator = fluxNodes([seed, theory.summary, localeHint, timeZone, roleName, ...theoryFluxStrings(theory)], token(seed, theory.summary, localeHint, timeZone, roleName, 'attendees'))[Symbol.iterator]();
-  yield* attendeeStreamFromIterator(iterator, theory, localeHint, timeZone, roleName, seed);
-}
-
-function* attendeeStreamFromIterator(iterator: Iterator<FluxNode>, theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string, seed: string): Generator<Attendee> {
-  const next = iterator.next();
-  if (next.done) return;
-  const node = next.value;
-  yield {
-    email: `${token(seed, node.fragment, node.lineage)}@${token(localeHint, node.lineage, node.fragment)}.local`,
-    name: phraseFromTheory(theory, seed, node.fragment, node.depth),
-    locale: splitLocale(localeHint)[0] ?? localeHint,
-    timezone: timeZone,
-    role: cleanText(`${words(node.fragment)[0] ?? roleName} ${words(node.lineage)[0] ?? ''}`) || roleName,
-  };
-  yield* attendeeStreamFromIterator(iterator, theory, localeHint, timeZone, roleName, seed);
-}
-
-function* buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Generator<Attendee> {
-  yield* attendeeStream(theory, localeHint, timeZone, roleName);
+function* buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string, index = 0): Generator<Attendee> {
+  const source = theoryTextAt(theory, index);
+  if (source === null) return;
+  const fragment = cleanText(source);
+  if (fragment) {
+    const seed = `${localeHint}|${timeZone}|${roleName}`;
+    const lineage = token(seed, theory.summary, fragment, String(index));
+    yield {
+      email: `${token(seed, fragment, lineage)}@${token(localeHint, lineage, fragment)}.local`,
+      name: phraseFromTheory(theory, seed, fragment, index),
+      locale: splitLocale(localeHint)[0] ?? localeHint,
+      timezone: timeZone,
+      role: cleanText(`${words(fragment)[0] ?? roleName} ${words(lineage)[0] ?? ''}`) || roleName,
+    };
+  }
+  yield* buildAttendees(theory, localeHint, timeZone, roleName, index + 1);
 }
 
 function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): ThreadIdentityInput {
-  const participants = [...buildAttendees(theory, localeHint, timeZone, roleName)].map((attendee) => ({
-    email: attendee.email,
-    name: attendee.name,
-    locale: attendee.locale,
-    timezone: attendee.timezone,
-    role: attendee.role,
-  }));
+  const participants = Array.from(buildAttendees(theory, localeHint, timeZone, roleName));
   return {
     subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
     participants,
@@ -364,7 +540,8 @@ function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, tim
   };
 }
 
-function* recurrenceStream(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): Generator<RecurrenceSpec> {
+function* buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string, index = 0): Generator<RecurrenceSpec> {
+  if (index > 0) return;
   const basis = phraseFromTheory(theory, localeHint, timeZone, Number.parseInt(token(theory.summary, localeHint, String(now)).slice(0, 2), 16));
   const anchor = token(basis, theory.summary, localeHint, String(now));
   const start = wallClockString(new Date(now), timeZone);
@@ -372,23 +549,21 @@ function* recurrenceStream(theory: UserBehaviorTheory, now: number, localeHint: 
   yield {
     startLocal: local,
     timeZone,
-    rule: cleanText([...fluxFragments([basis, localeHint, timeZone, String(now)], token(anchor, 'recurrence'))].map((fragment) => phraseFromTheory(theory, fragment, anchor, 0)).join(' ')).replace(/\s+/g, '-'),
+    rule: cleanText(Array.from(stringFragments(basis)).map((fragment) => phraseFromTheory(theory, fragment, anchor, 0)).join(' ')).replace(/\s+/g, '-'),
     durationMinutes: hashMagnitude(anchor, basis, timeZone, localeHint, String(now)) || 1,
   };
 }
 
-function* buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): Generator<RecurrenceSpec> {
-  yield* recurrenceStream(theory, now, localeHint, timeZone);
-}
 export class SignalBridge {
   capture(now = Date.now()): RaidingAiRuntimeSignals {
     const localeHint = runtimeLocale();
     const timeZone = runtimeTimeZone();
-    const observations = [...buildRuntimeObservations(now, localeHint, timeZone)];
+    const observations = Array.from(buildRuntimeObservations(now, localeHint, timeZone));
     const theory = buildBehavioralModel({ now, observations, facts: [], patterns: [], priorTheory: null }).theory;
-    const memoryFacts = [...buildMemoryFacts(theory, now, localeHint, timeZone)];
+    const memoryFacts = Array.from(buildMemoryFacts(theory, now, localeHint, timeZone));
     const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
-    const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: [...buildEpisodes(theory, now, localeHint)], sourceDocuments: [] });
+    const episodes = Array.from(buildEpisodes(theory, now, localeHint));
+    const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: episodes, sourceDocuments: [] });
     const roleName = token(theory.summary, localeHint, timeZone, String(now));
     const threadAnchor = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now)));
     const tabName = token(theory.summary, localeHint, timeZone, threadAnchor);
@@ -397,10 +572,101 @@ export class SignalBridge {
     const rootMessageId = token(subjectScope, threadAnchor, localeHint);
     const timezoneLocal = wallClockString(new Date(now), timeZone);
     const timezoneExpectedUtc = normalizeWallTime(timezoneLocal, timeZone).utc;
-    const locales = [...fluxFragments([localeHint, ...splitLocale(localeHint)], token(localeHint, 'locales'))];
-    const bridgeStream = [...fluxFragments([threadAnchor, localeHint, timeZone, roleName, tabName, windowName], token(threadAnchor, localeHint, timeZone, roleName, 'bridge'))];
-    const keys = [...fluxFragments(bridgeStream, token(threadAnchor, localeHint, timeZone, roleName, 'keys'))];
-    const fallbackSelectors = [...fluxFragments([threadAnchor, ...bridgeStream], token(threadAnchor, localeHint, timeZone, roleName, 'fallback'))];
+    const locales = Array.from(localeFragments(localeHint));
+    const bridgeSeed = Array.from(runtimeBridgeFragments({
+      now,
+      capturedAt: new Date(now).toISOString(),
+      localeHint,
+      locales,
+      timeZone,
+      timezoneLocal,
+      timezoneExpectedUtc,
+      tabName,
+      windowName,
+      roleName,
+      threadAnchor,
+      frames: [],
+      keys: [],
+      fallbackSelectors: [],
+      theory: learned.theory,
+      observations,
+      facts: learned.promotedFacts,
+      patterns: learned.patterns,
+      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
+      memoryFacts,
+      attendees: [],
+      threadA: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName),
+      threadB: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName),
+      recurrence: Array.from(buildRecurrence(theory, now, localeHint, timeZone))[0] ?? {
+        startLocal: timezoneLocal,
+        timeZone,
+        rule: 'daily',
+        durationMinutes: 1,
+      },
+      summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
+    }));
+    const frames = Array.from(buildUiFrames(theory, now, localeHint));
+    const attendees = Array.from(buildAttendees(theory, localeHint, timeZone, roleName));
+    const recurrence = Array.from(buildRecurrence(theory, now, localeHint, timeZone))[0] ?? {
+      startLocal: timezoneLocal,
+      timeZone,
+      rule: 'daily',
+      durationMinutes: 1,
+    };
+    const keys = Array.from(runtimeKeyFragments({
+      now,
+      capturedAt: new Date(now).toISOString(),
+      localeHint,
+      locales,
+      timeZone,
+      timezoneLocal,
+      timezoneExpectedUtc,
+      tabName,
+      windowName,
+      roleName,
+      threadAnchor,
+      frames,
+      keys: [],
+      fallbackSelectors: [],
+      theory: learned.theory,
+      observations,
+      facts: learned.promotedFacts,
+      patterns: learned.patterns,
+      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
+      memoryFacts,
+      attendees,
+      threadA: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName),
+      threadB: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName),
+      recurrence,
+      summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
+    }));
+    const fallbackSelectors = Array.from(runtimeFallbackFragments({
+      now,
+      capturedAt: new Date(now).toISOString(),
+      localeHint,
+      locales,
+      timeZone,
+      timezoneLocal,
+      timezoneExpectedUtc,
+      tabName,
+      windowName,
+      roleName,
+      threadAnchor,
+      frames,
+      keys,
+      fallbackSelectors: [],
+      theory: learned.theory,
+      observations,
+      facts: learned.promotedFacts,
+      patterns: learned.patterns,
+      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
+      memoryFacts,
+      attendees,
+      threadA: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName),
+      threadB: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName),
+      recurrence,
+      summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
+    }));
     return {
       now,
       capturedAt: new Date(now).toISOString(),
@@ -413,19 +679,19 @@ export class SignalBridge {
       windowName,
       roleName,
       threadAnchor,
-      frames: [...buildUiFrames(theory, now, localeHint)],
+      frames,
       keys,
       fallbackSelectors,
       theory: learned.theory,
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: [...buildEpisodes(learned.theory, now, localeHint)],
+      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
-      attendees: [...buildAttendees(theory, localeHint, timeZone, roleName)],
+      attendees,
       threadA: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName),
       threadB: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName),
-      recurrence: [...buildRecurrence(theory, now, localeHint, timeZone)][0],
+      recurrence,
       summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
     };
   }
