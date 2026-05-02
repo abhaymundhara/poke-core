@@ -19,6 +19,6 @@ function requireArray<T>(value: unknown, label: string): T[] {
 }
 
 export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicyState, behaviorSeed?: Record<string, unknown>): SearchSignalForecast[] {
-  const draft = runForecastModel<{ predictions: SearchSignalForecast[] }>('forecast next signals from the model only', { intent, policy, behaviorSeed: behaviorSeed ?? null }, FORECAST_SCHEMA);
+  const draft = runForecastModel<{ predictions: SearchSignalForecast[] }>('forecast next signals from the model only', { intent, policy, behaviorSeed }, FORECAST_SCHEMA);
   return requireArray<SearchSignalForecast>(draft.predictions, 'predictions');
 }

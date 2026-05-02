@@ -41,15 +41,15 @@ function requireArray<T>(value: unknown, label: string): T[] {
 }
 
 export function updateEpistemicTrustModel(model: NonNullable<SearchPolicyState['epistemicModel']> | undefined, outcome: { source: SearchSource | string; resultDomains?: string[]; useful?: boolean; score: number; notes?: string[] }): NonNullable<SearchPolicyState['epistemicModel']> {
-  return runTrustModel<NonNullable<SearchPolicyState['epistemicModel']>>('update the epistemic trust model from a search outcome', { model: model ?? null, outcome }, TRUST_MODEL_SCHEMA);
+  return runTrustModel<NonNullable<SearchPolicyState['epistemicModel']>>('update the epistemic trust model from a search outcome', { model, outcome }, TRUST_MODEL_SCHEMA);
 }
 
-export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[], reliability: Record<string, SearchSourceReliability> = {}, decision?: PolicyDecision, policy?: SearchPolicyState): TrustedEvidence[] {
-  const draft = runTrustModel<{ trustedEvidence: TrustedEvidence[] }>('score evidence trust with model reasoning only', { intent, results, reliability, decision: decision ?? { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] }, policy: policy ?? null }, TRUST_SCORING_SCHEMA);
+export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[], reliability?: Record<string, SearchSourceReliability>, decision?: PolicyDecision, policy?: SearchPolicyState): TrustedEvidence[] {
+  const draft = runTrustModel<{ trustedEvidence: TrustedEvidence[] }>('score evidence trust with model reasoning only', { intent, results, reliability, decision, policy }, TRUST_SCORING_SCHEMA);
   return requireArray<TrustedEvidence>(draft.trustedEvidence, 'trustedEvidence');
 }
 
-export function buildSourceRanking(intent: SearchIntent, reliability: Record<string, SearchSourceReliability>, rules: SearchPolicyRule[] = [], decision?: PolicyDecision): Array<{ source: SearchSource | string; score: number; reason: string }> {
-  const draft = runTrustModel<{ rankedSources: Array<{ source: SearchSource | string; score: number; reason: string }> }>('rank candidate sources using model reasoning only', { intent, reliability, rules, decision: decision ?? { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] } }, SOURCE_RANKING_SCHEMA);
+export function buildSourceRanking(intent: SearchIntent, reliability?: Record<string, SearchSourceReliability>, rules?: SearchPolicyRule[], decision?: PolicyDecision): Array<{ source: SearchSource | string; score: number; reason: string }> {
+  const draft = runTrustModel<{ rankedSources: Array<{ source: SearchSource | string; score: number; reason: string }> }>('rank candidate sources using model reasoning only', { intent, reliability, rules, decision }, SOURCE_RANKING_SCHEMA);
   return requireArray<{ source: SearchSource | string; score: number; reason: string }>(draft.rankedSources, 'rankedSources');
 }

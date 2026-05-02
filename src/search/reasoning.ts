@@ -61,7 +61,7 @@ export function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProf
   return requireArray<string>(draft.hopPlan, 'hopPlan').map((step) => String(step));
 }
 
-export function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], strategy: SearchStrategyProfile, reliability: Record<string, any> = {}, policy: PolicyDecision = { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] }, policyState?: SearchPolicyState): SearchEvidenceGraph {
+export function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], strategy: SearchStrategyProfile, reliability?: Record<string, any>, policy?: PolicyDecision, policyState?: SearchPolicyState): SearchEvidenceGraph {
   const draft = runReasoningModel<SearchEvidenceGraph>('synthesize the evidence graph from the model only', { intent, queries, results, strategy, reliability, policy, policyState }, GRAPH_SCHEMA);
   return {
     nodes: requireArray<SearchEvidenceNode>(draft.nodes, 'nodes'),
