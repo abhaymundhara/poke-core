@@ -1,4 +1,4 @@
-import type { ClaimAssessment, EvidenceConflict, PolicyDecision, Proposition, PropositionGraph, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchPolicyState, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
+import type { ClaimAssessment, EvidenceConflict, PolicyDecision, Proposition, PropositionGraph, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchPolicyState, SearchResult, SearchStrategyProfile } from './types.ts';
 import { extractWithDefaultProviderSync } from '../llm-bridge.ts';
 
 function runReasoningModel<T>(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): T {
