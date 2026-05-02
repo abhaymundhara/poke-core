@@ -6,14 +6,13 @@ function normalizeText(text: string): string {
   return text
     .toLowerCase()
     .replace(/[^a-z0-9@._:-]+/g, ' ')
-    .replace(/s+/g, ' ')
+    .replace(/\s+/g, ' ')
     .trim();
 }
 
 function splitSentences(text: string): string[] {
   return text
-    .split(/(?<=[.!?])s+|
-+/)
+    .split(/(?<=[.!?])\s+|\n+/)
     .map((part) => part.trim())
     .filter((part) => part.length > 8)
     .slice(0, 6);
