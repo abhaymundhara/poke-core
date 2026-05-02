@@ -425,7 +425,7 @@ function* buildRuntimeObservations(now: number, localeHint: string, timeZone: st
       source: token(timeZone, localeHint, lineage, fragment),
       confidence: hashFraction(subjectSeed, valueSeed, nodeSeed(fragment, lineage)),
       observedAt: now - hashMagnitude(fragment, lineage, localeHint, timeZone),
-      evidence: Array.from(observationEvidence(fragment, lineage, localeHint, timeZone)),
+      evidence: collect(observationEvidence(fragment, lineage, localeHint, timeZone)),
       context: {
         [token(fragment, lineage, 'subject')]: cleanText(`${localeHint} ${timeZone} ${fragment}`),
         [token(fragment, lineage, 'value')]: cleanText(`${lineage} ${process.cwd()}`),
@@ -433,6 +433,12 @@ function* buildRuntimeObservations(now: number, localeHint: string, timeZone: st
     };
   }
   yield* buildRuntimeObservations(now, localeHint, timeZone, index + 1);
+}
+
+function collect<T>(iterable: Iterable<T>): T[] {
+  const values: T[] = [];
+  for (const value of iterable) values.push(value);
+  return values;
 }
 
 function nodeSeed(fragment: string, lineage: string): string {
@@ -467,7 +473,7 @@ function* buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: str
       taskId: token(localeHint, fragment, lineage, String(index)),
       category: token(fragment, localeHint, lineage),
       summary: phraseFromTheory(theory, localeHint, fragment, index),
-      signals: Array.from(episodeSignals(fragment, lineage, theory.summary, localeHint)),
+      signals: collect(episodeSignals(fragment, lineage, theory.summary, localeHint)),
       score: hashFraction(fragment, lineage, theory.summary, localeHint),
       createdAt: now - hashMagnitude(fragment, lineage, localeHint),
     };
@@ -511,7 +517,7 @@ function* buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: str
         [token(frameSeed, lineage, 'theory')]: String(theory.id),
         [token(frameSeed, lineage, 'locale')]: localeHint,
       }),
-      selectors: Array.from(frameSelectors(frameSeed, fragment, lineage, localeHint, theory.summary)),
+      selectors: collect(frameSelectors(frameSeed, fragment, lineage, localeHint, theory.summary)),
       activeTabId: token(frameSeed, fragment, localeHint),
       activeWindowId: token(lineage, frameSeed, fragment),
       viewport: {
@@ -595,7 +601,7 @@ function composeThreadIdentity(theory: UserBehaviorTheory, localeHint: string, t
   const referencesRoot = String(fields.next().value ?? rootMessageId);
   return {
     subject,
-    participants: Array.from(buildAttendees(theory, localeHint, timeZone, roleName)),
+    participants: buildAttendees(theory, localeHint, timeZone, roleName),
     messageId,
     rootMessageId: root,
     inReplyTo,
@@ -613,7 +619,7 @@ function* recurrenceTimeZone(timeZone: string): Generator<string, void, void> {
 }
 
 function* recurrenceRule(theory: UserBehaviorTheory, basis: string, anchor: string): Generator<string, void, void> {
-  yield cleanText(Array.from(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-');
+  yield cleanText(collect(recurrenceRuleFragments(theory, basis, anchor)).join(' ')).replace(/\s+/g, '-');
 }
 
 function* recurrenceDuration(now: number, localeHint: string, timeZone: string, basis: string, anchor: string): Generator<string, void, void> {
@@ -661,11 +667,11 @@ export class SignalBridge {
   capture(now = Date.now()): RaidingAiRuntimeSignals {
     const localeHint = runtimeLocale();
     const timeZone = runtimeTimeZone();
-    const observations = Array.from(buildRuntimeObservations(now, localeHint, timeZone));
+    const observations = collect(buildRuntimeObservations(now, localeHint, timeZone));
     const theory = buildBehavioralModel({ now, observations, facts: [], patterns: [], priorTheory: null }).theory;
-    const memoryFacts = Array.from(buildMemoryFacts(theory, now, localeHint, timeZone));
+    const memoryFacts = collect(buildMemoryFacts(theory, now, localeHint, timeZone));
     const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
-    const episodes = Array.from(buildEpisodes(theory, now, localeHint));
+    const episodes = collect(buildEpisodes(theory, now, localeHint));
     const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: episodes, sourceDocuments: [] });
     const roleName = token(theory.summary, localeHint, timeZone, String(now));
     const threadAnchor = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now)));
@@ -675,8 +681,8 @@ export class SignalBridge {
     const rootMessageId = token(subjectScope, threadAnchor, localeHint);
     const timezoneLocal = wallClockString(new Date(now), timeZone);
     const timezoneExpectedUtc = normalizeWallTime(timezoneLocal, timeZone).utc;
-    const locales = Array.from(localeFragments(localeHint));
-    const bridgeSeed = Array.from(runtimeBridgeFragments({
+    const locales = collect(localeFragments(localeHint));
+    const bridgeSeed = collect(runtimeBridgeFragments({
       now,
       capturedAt: new Date(now).toISOString(),
       localeHint,
@@ -695,7 +701,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees: [],
       threadA: { subject: '', participants: [], messageId: '', rootMessageId: '', inReplyTo: '', references: [] },
@@ -703,12 +709,12 @@ export class SignalBridge {
       recurrence: { startLocal: timezoneLocal, timeZone, rule: 'daily', durationMinutes: 1 },
       summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
     }));
-    const frames = Array.from(buildUiFrames(theory, now, localeHint));
-    const attendees = Array.from(buildAttendees(theory, localeHint, timeZone, roleName));
+    const frames = collect(buildUiFrames(theory, now, localeHint));
+    const attendees = collect(buildAttendees(theory, localeHint, timeZone, roleName));
     const threadA = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
     const threadB = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName);
     const recurrence = composeRecurrence(theory, now, localeHint, timeZone);
-    const keys = Array.from(runtimeKeyFragments({
+    const keys = collect(runtimeKeyFragments({
       now,
       capturedAt: new Date(now).toISOString(),
       localeHint,
@@ -727,7 +733,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees,
       threadA,
@@ -735,7 +741,7 @@ export class SignalBridge {
       recurrence,
       summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
     }));
-    const fallbackSelectors = Array.from(runtimeFallbackFragments({
+    const fallbackSelectors = collect(runtimeFallbackFragments({
       now,
       capturedAt: new Date(now).toISOString(),
       localeHint,
@@ -754,7 +760,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees,
       threadA,
@@ -781,7 +787,7 @@ export class SignalBridge {
       observations,
       facts: learned.promotedFacts,
       patterns: learned.patterns,
-      episodes: Array.from(buildEpisodes(learned.theory, now, localeHint)),
+      episodes: collect(buildEpisodes(learned.theory, now, localeHint)),
       memoryFacts,
       attendees,
       threadA,
