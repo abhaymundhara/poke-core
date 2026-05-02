@@ -536,6 +536,17 @@ function* buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: s
   }
 }
 
+function composeThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): LatentThreadIdentity {
+  return {
+    subject: phraseFromTheory(theory, subjectScope, messageSeed, 0),
+    participants: buildAttendees(theory, localeHint, timeZone, roleName),
+    messageId: token(subjectScope, messageSeed, timeZone),
+    rootMessageId,
+    inReplyTo: rootMessageId,
+    references: threadIdentityReferences(rootMessageId),
+  };
+}
+
 function* emptyFlux(): Generator<string, void, void> {
   return;
 }
@@ -560,8 +571,8 @@ export class SignalBridge {
     const locales = localeFragments(localeHint) as any;
     const frames = buildUiFrames(theory, now, localeHint) as any;
     const attendees = buildAttendees(theory, localeHint, timeZone, roleName) as any;
-    const threadA = { subject: '', participants: buildAttendees(theory, localeHint, timeZone, roleName) as any, messageId: '', rootMessageId: '', inReplyTo: '', references: emptyFlux() as any };
-    const threadB = { subject: '', participants: buildAttendees(theory, localeHint, timeZone, roleName) as any, messageId: '', rootMessageId: '', inReplyTo: '', references: emptyFlux() as any };
+    const threadA = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
+    const threadB = composeThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName);
     const recurrence = buildRecurrence(theory, now, localeHint, timeZone) as any;
     const keys = runtimeKeyFragments({
       now,
@@ -585,8 +596,8 @@ export class SignalBridge {
       episodes: buildEpisodes(learned.theory, now, localeHint) as any,
       memoryFacts,
       attendees: buildAttendees(learned.theory, localeHint, timeZone, roleName) as any,
-      threadA: { subject: '', participants: buildAttendees(learned.theory, localeHint, timeZone, roleName) as any, messageId: '', rootMessageId: '', inReplyTo: '', references: emptyFlux() as any },
-      threadB: { subject: '', participants: buildAttendees(learned.theory, localeHint, timeZone, roleName) as any, messageId: '', rootMessageId: '', inReplyTo: '', references: emptyFlux() as any },
+      threadA: composeThreadIdentity(learned.theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName),
+      threadB: composeThreadIdentity(learned.theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName),
       recurrence: buildRecurrence(learned.theory, now, localeHint, timeZone) as any,
       summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
     });
