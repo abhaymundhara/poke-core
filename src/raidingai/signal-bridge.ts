@@ -103,9 +103,7 @@ function* signalFlux(materials: string[], seed: string): Generator<string> {
 
 export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
   const source = [...theoryFluxStrings(theory), seed, scope, String(index)];
-  const fragments = Array.from(signalFlux(source, token(seed, scope, String(index))), (entry) => words(entry)[0] ?? entry).filter((entry) => Boolean(entry));
-  const phrase = cleanText(Array.from(new Set(fragments)).join(' '));
-  return phrase || token(seed, scope, String(index));
+  return buildPhrase(source, token(seed, scope, String(index)));
 }
 
 function runtimeLocale(): string {
@@ -147,90 +145,126 @@ function wallClockString(date: Date, timeZone: string): string {
   return `${parts.year.toString().padStart(4, '0')}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
+type FluxNode = {
+  fragment: string;
+  lineage: string;
+  depth: number;
+};
+
+function* generativeFlux(materials: Iterable<string>, seed: string): Generator<FluxNode> {
+  const queue: FluxNode[] = Array.from(materials, (material, index) => ({
+    fragment: cleanText(material),
+    lineage: token(seed, String(index), material),
+    depth: 0,
+  })).filter((entry) => Boolean(entry.fragment));
+  const seen = new Set<string>();
+  while (queue.length > 0) {
+    const node = queue.shift();
+    if (!node || !node.fragment || seen.has(node.fragment)) continue;
+    seen.add(node.fragment);
+    yield node;
+    const branchSeed = token(seed, node.fragment, node.lineage, String(seen.size));
+    const branch = Array.from(signalFlux([node.fragment, node.lineage, ...words(node.fragment)], branchSeed));
+    for (const [index, fragment] of branch.entries()) {
+      const next = cleanText(fragment);
+      if (!next || seen.has(next)) continue;
+      queue.push({
+        fragment: next,
+        lineage: token(node.lineage, next, String(index)),
+        depth: node.depth + 1,
+      });
+    }
+  }
+}
+
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
-  const cwd = process.cwd();
-  const argv = process.argv.slice(1).join(' ');
-  const envParts = [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV].filter(Boolean) as string[];
-  const env = envParts.join(' ');
-  const entropy = [localeHint, timeZone, cwd, argv, env, String(process.pid), String(process.ppid)];
-  const observationFlux = Array.from(new Set(signalFlux(entropy, token(localeHint, timeZone, String(now), 'observations'))));
-  return observationFlux.map((entry, index) => {
-    const subject = cleanText(`${words(entry)[0] ?? entry} ${token(localeHint, timeZone, entry, String(index))}`);
-    const value = cleanText(`${words(entry).slice(1).join(' ')} ${token(timeZone, localeHint, entry, String(index))}`);
-    const category = token(localeHint, timeZone, entry, String(index)) as BehavioralObservation['category'];
-    const source = token(timeZone, localeHint, entry, String(index + 1));
-    const evidence = [
-      token(category, subject, String(index)),
-      token(source, value, String(index)),
-      token(localeHint, timeZone, cwd, entry),
-    ];
+  const entropy = [
+    localeHint,
+    timeZone,
+    process.cwd(),
+    process.argv.slice(1).join(' '),
+    [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV, process.title, process.platform, process.arch].filter(Boolean).join(' '),
+    String(now),
+  ];
+  const observationFlux = generativeFlux(entropy, token(localeHint, timeZone, String(now), 'observations'));
+  return Array.from(observationFlux, (node) => {
+    const subjectSeed = token(localeHint, timeZone, node.fragment, node.lineage, 'subject');
+    const valueSeed = token(localeHint, timeZone, node.lineage, node.fragment, 'value');
+    const subject = cleanText(`${words(node.fragment)[0] ?? node.fragment} ${words(node.lineage)[0] ?? subjectSeed}`);
+    const value = cleanText([
+      ...words(node.fragment).slice(1),
+      ...words(node.lineage).slice(1),
+      words(subjectSeed)[0] ?? subjectSeed,
+      words(valueSeed)[0] ?? valueSeed,
+    ].join(' '));
+    const weight = node.fragment.length + node.lineage.length;
     return {
       subject,
       value,
-      category,
-      source,
-      confidence: 0.89 + (Number.parseInt(token(entry, localeHint, String(index)), 16) / Number.MAX_SAFE_INTEGER) * 0.01,
-      observedAt: now - Number.parseInt(token(entry, timeZone, String(index)), 16),
-      evidence,
+      category: token(localeHint, timeZone, node.fragment, node.lineage) as BehavioralObservation['category'],
+      source: token(timeZone, localeHint, node.lineage, node.fragment),
+      confidence: weight / ((weight + localeHint.length + timeZone.length + 1) || 1),
+      observedAt: now - (node.depth + weight),
+      evidence: Array.from(generativeFlux([node.fragment, node.lineage, localeHint, timeZone], token(subjectSeed, valueSeed, node.lineage)), (support) => support.fragment),
       context: {
-        [token(subject, 'a')]: cleanText(`${cwd} ${argv}`),
-        [token(value, 'b')]: token(env || localeHint, timeZone, String(index)),
+        [token(subject, node.lineage)]: cleanText(`${localeHint} ${timeZone} ${node.fragment}`),
+        [token(value, node.fragment)]: cleanText(`${node.lineage} ${process.cwd()}`),
       },
     };
   });
 }
 
 function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): MemoryFact[] {
-  const sources = theoryFluxStrings(theory);
-  const factFlux = Array.from(new Set(signalFlux(sources, token(theory.summary, localeHint, timeZone, String(now), 'facts'))));
-  return factFlux.map((entry, index) => {
-    const base = sources[index % (sources.length || 1)] ?? theory.summary;
+  const factFlux = generativeFlux(theoryFluxStrings(theory), token(theory.summary, localeHint, timeZone, String(now), 'facts'));
+  return Array.from(factFlux, (node) => {
+    const support = phraseFromTheory(theory, localeHint, node.fragment, node.depth);
+    const weight = node.fragment.length + node.lineage.length;
     return {
-      key: token(base, localeHint, timeZone, entry),
-      value: phraseFromTheory(theory, localeHint, entry, index),
-      confidence: 0.84 + (Number.parseInt(token(entry, base, String(index)), 16) / Number.MAX_SAFE_INTEGER) * 0.03,
-      source: token(localeHint, timeZone, String(index), entry),
-      updatedAt: now - Number.parseInt(token(entry, localeHint, timeZone, String(index)), 16),
+      key: token(node.fragment, node.lineage, theory.summary),
+      value: support,
+      confidence: weight / ((weight + theory.summary.length + localeHint.length + timeZone.length + 1) || 1),
+      source: token(localeHint, timeZone, node.lineage, node.fragment),
+      updatedAt: now - (node.depth + weight),
     };
   });
 }
 
 function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string): EpisodicMemoryItem[] {
-  const sources = theoryFluxStrings(theory);
-  const episodeFlux = Array.from(new Set(signalFlux(sources, token(theory.summary, localeHint, String(now), 'episodes'))));
-  return episodeFlux.map((entry, index) => {
-    const base = sources[index % (sources.length || 1)] ?? theory.summary;
+  const episodeFlux = generativeFlux(theoryFluxStrings(theory), token(theory.summary, localeHint, String(now), 'episodes'));
+  return Array.from(episodeFlux, (node) => {
+    const signals = Array.from(generativeFlux([node.fragment, node.lineage, theory.summary, localeHint], token(node.fragment, node.lineage, 'signals')), (support) => support.fragment);
+    const weight = node.fragment.length + node.lineage.length;
     return {
-      id: token(base, localeHint, String(index), entry),
-      taskId: token(localeHint, String(index), base, entry),
-      category: token(base, localeHint, String(index), entry),
-      summary: phraseFromTheory(theory, localeHint, base, index),
-      signals: words(base),
-      score: 0.83 + (Number.parseInt(token(entry, base, String(index)), 16) / Number.MAX_SAFE_INTEGER) * 0.04,
-      createdAt: now - Number.parseInt(token(entry, localeHint, String(index)), 16),
+      id: token(node.fragment, node.lineage, theory.summary),
+      taskId: token(localeHint, node.fragment, node.lineage, String(node.depth)),
+      category: token(node.fragment, localeHint, node.lineage),
+      summary: phraseFromTheory(theory, localeHint, node.fragment, node.depth),
+      signals,
+      score: weight / ((weight + theory.summary.length + localeHint.length + 1) || 1),
+      createdAt: now - (node.depth + weight),
     };
   });
 }
 
 function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string): VisionFrame[] {
-  const scope = token(theory.summary, localeHint, String(now));
-  const frameFlux = Array.from(new Set(signalFlux([scope, theory.summary, localeHint, ...theoryFluxStrings(theory)], token(scope, theory.summary, localeHint, String(now), 'frames'))));
-  return frameFlux.map((fragment, index) => {
-    const frameSeed = token(scope, fragment, String(index));
+  const frameFlux = generativeFlux([theory.summary, localeHint, ...theoryFluxStrings(theory)], token(theory.summary, localeHint, String(now), 'frames'));
+  return Array.from(frameFlux, (node) => {
+    const frameSeed = token(theory.summary, localeHint, node.fragment, node.lineage);
+    const selectorFlux = Array.from(generativeFlux([node.fragment, node.lineage, localeHint, theory.summary], token(frameSeed, 'selectors')), (selectorNode) => selectorNode.fragment);
     return {
-      id: token(scope, frameSeed, fragment),
-      ocr: phraseFromTheory(theory, frameSeed, localeHint, index),
+      id: token(frameSeed, node.lineage, node.fragment),
+      ocr: phraseFromTheory(theory, frameSeed, localeHint, node.depth),
       dom: JSON.stringify({
-        [token(frameSeed, String(index), 'dom')]: token(scope, frameSeed, fragment),
-        [token(frameSeed, String(index), 'theory')]: String(theory.id),
-        [token(frameSeed, String(index), 'locale')]: localeHint,
+        [token(frameSeed, node.lineage, 'dom')]: token(frameSeed, node.fragment, node.lineage),
+        [token(frameSeed, node.lineage, 'theory')]: String(theory.id),
+        [token(frameSeed, node.lineage, 'locale')]: localeHint,
       }),
-      selectors: Array.from(new Set(signalFlux([fragment, scope, localeHint], token(frameSeed, scope, fragment, 'selectors')))),
-      activeTabId: token(scope, frameSeed, fragment),
-      activeWindowId: token(frameSeed, scope, fragment),
+      selectors: selectorFlux,
+      activeTabId: token(frameSeed, node.fragment, localeHint),
+      activeWindowId: token(node.lineage, frameSeed, node.fragment),
       viewport: {
-        width: Number.parseInt(token(frameSeed, String(index), 'width'), 16) + frameSeed.length,
-        height: Number.parseInt(token(frameSeed, String(index), 'height'), 16) + frameSeed.length,
+        width: node.fragment.length + node.lineage.length,
+        height: words(node.fragment).join('').length + words(node.lineage).join('').length + node.depth,
       },
     };
   });
@@ -238,12 +272,13 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
 
 function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Attendee[] {
   const seed = `${localeHint}|${timeZone}|${roleName}`;
-  const attendeeFlux = Array.from(new Set(signalFlux([seed, theory.summary, localeHint, timeZone, roleName, ...theoryFluxStrings(theory)], token(seed, theory.summary, localeHint, timeZone, roleName, 'attendees'))));
-  return attendeeFlux.map((fragment, index) => ({
-    email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
-    name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
-    locale: splitLocale(localeHint)[index] ?? localeHint,
+  const attendeeFlux = generativeFlux([seed, theory.summary, localeHint, timeZone, roleName, ...theoryFluxStrings(theory)], token(seed, theory.summary, localeHint, timeZone, roleName, 'attendees'));
+  return Array.from(attendeeFlux, (node) => ({
+    email: `${token(seed, node.fragment, node.lineage, String(node.depth))}@${token(localeHint, node.lineage, node.fragment)}.local`,
+    name: phraseFromTheory(theory, seed, node.fragment, node.depth),
+    locale: splitLocale(localeHint)[node.depth] ?? localeHint,
     timezone: timeZone,
+    role: cleanText(`${words(node.fragment)[0] ?? roleName} ${words(node.lineage)[0] ?? ''}`) || roleName,
   }));
 }
 
@@ -266,18 +301,16 @@ function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, tim
 }
 
 function buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): RecurrenceSpec {
-  const flux = Array.from(new Set(signalFlux([theory.summary, localeHint, timeZone, String(now)], token(theory.summary, localeHint, timeZone, 'recurrence'))));
-  const lead = flux[0] ?? token(theory.summary, localeHint, timeZone, 'lead');
-  const shift = Number.parseInt(token(lead, timeZone, String(now)), 16);
-  const local = wallClockString(new Date(now + shift), timeZone);
-  const ruleSource = flux[1] ?? lead;
-  const rule = cleanText(buildPhrase([ruleSource, flux[2] ?? timeZone, theory.summary, localeHint], token(lead, timeZone, ruleSource))).replace(/\s+/g, '-');
-  const durationMinutes = Number.parseInt(token(rule, lead, String(now)), 16) || rule.length;
+  const recurrenceFlux = Array.from(generativeFlux([theory.summary, localeHint, timeZone, String(now)], token(theory.summary, localeHint, timeZone, 'recurrence')));
+  const anchor = recurrenceFlux[0]?.fragment ?? token(theory.summary, localeHint, timeZone, 'anchor');
+  const local = wallClockString(new Date(now + anchor.length + (recurrenceFlux[0]?.lineage.length ?? 0)), timeZone);
+  const rule = cleanText(Array.from(recurrenceFlux, (node) => phraseFromTheory(theory, node.lineage, node.fragment, node.depth)).join(' ')).replace(/\s+/g, '-');
+  const durationMinutes = recurrenceFlux.reduce((total, node) => total + node.fragment.length + node.lineage.length + node.depth, 0) || rule.length || anchor.length;
   return { startLocal: local, timeZone, rule, durationMinutes };
 }
 
 function buildPhrase(materials: string[], seed: string): string {
-  const fragments = Array.from(signalFlux(materials, seed), (entry) => words(entry)[0] ?? entry).filter((entry) => Boolean(entry));
+  const fragments = Array.from(generativeFlux(materials, seed), (node) => words(node.fragment)[0] ?? node.fragment).filter((entry) => Boolean(entry));
   const phrase = cleanText(Array.from(new Set(fragments)).join(' '));
   return phrase || seed;
 }
@@ -360,3 +393,4 @@ export function captureRaidingAiSignals(now = Date.now()): RaidingAiRuntimeSigna
 export function deriveRaidingAiTrace(now = Date.now()): RaidingAiTrace {
   return new SignalBridge().buildTrace(now);
 }
+
