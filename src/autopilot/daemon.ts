@@ -285,7 +285,7 @@ export class CognitiveInterference {
 
   private handleProcessSignal = (): void => {
     const model = resolveBehaviorModel(this.options, this.clock);
-    const aliases = this.processEvent ?? deriveRuntimeAliases(model);
+    const aliases = this.processEvent ?? deriveRuntimeAliases(model).processEvent;
     this.observe(model, aliases, undefined);
   };
 
