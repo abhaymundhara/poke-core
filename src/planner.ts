@@ -1,5 +1,5 @@
 export * from './planner-intelligence';
-import { buildPlan as buildPlannerPlan, observePlannerTrajectory } from './planner-intelligence';
+import { buildPlan as buildPlannerPlan } from './planner-intelligence';
 import type { PlannerIntentGraph, SearchIntent, TaskInput, TaskPlan } from './types';
 import { stableHash, uniq } from './search/utils';
 
@@ -117,8 +117,7 @@ export function inferLatentGoalsFromTrajectory(input: PlannerTrajectoryProbe): s
     ...(input.eventJournal ?? []).map((entry) => [entry.kind, entry.status, entry.reason, JSON.stringify(entry.detail ?? {})].filter(Boolean).join(' | ')),
     ...(input.breadcrumbs ?? []).map((crumb) => [crumb.kind, crumb.skill, crumb.status].join(' | ')),
     ...(input.intentGraph?.nodes ?? []).map((node) => [node.label, node.summary, node.kind].join(' | ')),
-  ].filter(Boolean).join('
-');
+  ].filter(Boolean).join('\n');
   const probeVector = projectText(probeText);
 
   const candidates = uniq([

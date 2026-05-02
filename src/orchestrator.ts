@@ -173,8 +173,7 @@ export class PokeCoreOrchestrator {
       artifacts: {},
       breadcrumbs: [],
       recovery: [],
-      query: input.objective + '
-' + JSON.stringify(input.context ?? {}),
+      query: input.objective + '\n' + JSON.stringify(input.context ?? {}),
       executionProfile,
       semanticIntent: plan.semanticIntent,
       intentGraph: cloneIntentGraph(plan.intentGraph),
@@ -229,7 +228,7 @@ export class PokeCoreOrchestrator {
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err);
       state.recovery.push({ stepId: step.id, reason, at: Date.now() });
-      this.persistTransition(task.taskId, 'executing', 'recovering', { stepId: step.id, phase: 'affordance-evaluation', error: reason, recoveryEvent: (err as PlannerRecoverySignal | Error | undefined)?.['recoveryEvent'] ?? null });
+      this.persistTransition(task.taskId, 'executing', 'recovering', { stepId: step.id, phase: 'affordance-evaluation', error: reason, recoveryEvent: (err as any)?.recoveryEvent ?? null });
       throw err;
     }
 
@@ -310,7 +309,7 @@ export class PokeCoreOrchestrator {
         contextPack = await graph.run(this.buildContextState(input, plan, executionProfile));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
-        this.persistTransition(task.taskId, 'routing', 'recovering', { phase: 'graph', error: message, recoveryEvent: (err as PlannerRecoverySignal | Error | undefined)?.['recoveryEvent'] ?? null });
+        this.persistTransition(task.taskId, 'routing', 'recovering', { phase: 'graph', error: message, recoveryEvent: (err as any)?.recoveryEvent ?? null });
         this.store.updateTask(task.taskId, { status: 'failed', currentStepIndex: task.currentStepIndex, activeStepId: task.activeStepId, errorJson: JSON.stringify({ message }), revision: task.revision + 1 });
         return { ok: false, taskId: input.id, status: 'failed', plan, state: this.loadOrCreateState(task, plan, executionProfile), error: message };
       }
@@ -363,7 +362,7 @@ export class PokeCoreOrchestrator {
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.persistTransition(task.taskId, 'draft', 'recovering', { phase: 'planning', error: message, recoveryEvent: (err as PlannerRecoverySignal | Error | undefined)?.['recoveryEvent'] ?? null });
+      this.persistTransition(task.taskId, 'draft', 'recovering', { phase: 'planning', error: message, recoveryEvent: (err as any)?.recoveryEvent ?? null });
       this.store.updateTask(task.taskId, { status: 'failed', errorJson: JSON.stringify({ message }), revision: task.revision + 1 });
       throw err;
     }
