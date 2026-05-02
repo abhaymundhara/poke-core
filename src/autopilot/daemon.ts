@@ -189,7 +189,9 @@ function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, e
   const heapTotal = Number(stats.total_heap_size) || 0;
   const heapSizeLimit = Number(stats.heap_size_limit) || 0;
   const pressure = heapUsed / heapSizeLimit;
-  const durationMs = Number(entry.duration) || 0;
+  const durationSeed = Number.parseInt(token(model.theory.id, sourceSeed, String(at)).slice(0, 3), 16);
+  const durationDivisor = Number.isNaN(durationSeed) ? 1 : durationSeed % 896 + 100;
+  const durationMs = typeof entry.duration === 'number' ? entry.duration % durationDivisor : 0;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
@@ -336,7 +338,6 @@ export class CognitiveInterference {
 
   private observe(model: BehaviorModelBundle, sourceSeed: string, entry: GCEntry = { duration: 0 }): void {
     const flux = scoreFlux(model, sourceSeed, this.clock(), entry);
-    if (!flux.interference) return;
     const event = makeEvent(model, flux);
     this.lastFluxAt = flux.at;
     this.lastInterferenceAt = event.emittedAt;
