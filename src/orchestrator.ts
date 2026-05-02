@@ -4,7 +4,7 @@ import { EpisodicMemory } from './memory/episodic-memory';
 import { WorkingMemory } from './memory/working-memory';
 import { RagCorpus } from './rag/retriever';
 import { listSkillPlaybooks } from './skill-playbooks';
-import type { ExecutionProfile, RuntimeState, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
+import type { ExecutionProfile, RuntimeState, TaskInput, TaskPlan, TaskStatus } from './types';
 import type { PokeCoreStore } from './store';
 import type { SkillAdapter } from './skills/types';
 
@@ -43,7 +43,6 @@ const ORCHESTRATION_SCHEMA = {
 } as const;
 
 async function delegateOrchestration(input: {
-  task: TaskRecord;
   taskInput: TaskInput;
   skills: SkillAdapter[];
   skillPlaybooks: ReturnType<typeof listSkillPlaybooks>;
@@ -51,7 +50,6 @@ async function delegateOrchestration(input: {
   const raw = await DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.extract({
     objective: 'decide the full task execution trajectory directly in the model output; produce the plan, state, status, and any execution profile without relying on a hardcoded orchestrator loop',
     context: {
-      task: input.task,
       taskInput: input.taskInput,
       skillCatalog: input.skills.map((skill) => skill.descriptor),
       skillPlaybooks: input.skillPlaybooks,
@@ -97,22 +95,7 @@ export class PokeCoreOrchestrator {
   }
 
   async execute(input: TaskInput): Promise<TaskExecutionResult> {
-    const task = this.store.getTask(input.id) ?? {
-      taskId: input.id,
-      objective: input.objective,
-      status: 'draft' as const,
-      currentStepIndex: 0,
-      activeStepId: null,
-      revision: 0,
-      resultJson: null,
-      errorJson: null,
-      leaseToken: null,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-
     const directive = await delegateOrchestration({
-      task,
       taskInput: input,
       skills: this.skills,
       skillPlaybooks: this.skillPlaybooks,
