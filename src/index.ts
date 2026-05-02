@@ -4,7 +4,6 @@ export * from './state-machine.ts';
 export * from './validator.ts';
 export * from './planner.ts';
 export * from './store.ts';
-export * from './router.ts';
 export * from './skill-playbooks.ts';
 export * from './orchestrator.ts';
 export * from './skills/index.ts';

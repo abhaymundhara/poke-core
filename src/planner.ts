@@ -1,18 +1,11 @@
 export * from './planner-intelligence';
 import { buildPlan as buildPlannerPlan } from './planner-intelligence';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from './search/nlu';
 import type { PlannerIntentGraph, SearchIntent, TaskInput, TaskPlan } from './types';
-
-type TrajectoryEntry = {
-  label: string;
-  history: string[];
-  weight: number;
-  updatedAt: number;
-};
 
 type TrajectorySession = {
   key: string;
   history: string[];
-  entries: Map<string, TrajectoryEntry>;
   lastUpdated: number;
 };
 
@@ -31,85 +24,73 @@ const sessions = new Map<string, TrajectorySession>();
 function ensureSession(key: string): TrajectorySession {
   const existing = sessions.get(key);
   if (existing) return existing;
-  const created: TrajectorySession = { key, history: [], entries: new Map(), lastUpdated: Date.now() };
+  const created: TrajectorySession = { key, history: [], lastUpdated: Date.now() };
   sessions.set(key, created);
   return created;
 }
 
-function tokenize(text: string): string[] {
-  return text.toLowerCase().split(/[^a-z0-9]+/g).filter((token) => token.length > 3);
+function snapshotProbe(input: PlannerTrajectoryProbe): Record<string, unknown> {
+  return {
+    sessionKey: input.sessionKey,
+    objective: input.objective,
+    query: input.query,
+    eventJournal: input.eventJournal ?? [],
+    breadcrumbs: input.breadcrumbs ?? [],
+    intentGraph: input.intentGraph ?? null,
+    semanticIntent: input.semanticIntent ?? null,
+  };
 }
 
-function observeText(session: TrajectorySession, text: string, weight = 1): void {
-  const tokens = tokenize(text);
-  if (tokens.length === 0) return;
-  session.history.push(text);
-  for (const token of tokens) {
-    const current = session.entries.get(token);
-    session.entries.set(token, {
-      label: token,
-      history: [...(current?.history ?? []), text],
-      weight: (current?.weight ?? 0.2) * 0.82 + weight * 0.18,
-      updatedAt: Date.now(),
-    });
-  }
+function appendHistory(session: TrajectorySession, entry: Record<string, unknown>): void {
+  session.history.push(JSON.stringify(entry));
   session.lastUpdated = Date.now();
 }
 
-function relevanceScore(label: string, probe: PlannerTrajectoryProbe, session: TrajectorySession): number {
-  const probeText = [
-    probe.objective,
-    probe.query,
-    probe.semanticIntent?.semanticQuery ?? '',
-    ...(probe.eventJournal ?? []).map((entry) => [entry.kind, entry.status, entry.reason, JSON.stringify(entry.detail ?? {})].filter(Boolean).join(' | ')),
-    ...(probe.breadcrumbs ?? []).map((crumb) => [crumb.kind, crumb.skill, crumb.status].join(' | ')),
-    ...(probe.intentGraph?.nodes ?? []).map((node) => [node.label, node.summary, node.kind].join(' | ')),
-  ].filter(Boolean).join(' ');
-  const labelTokens = tokenize(label);
-  const probeTokens = new Set(tokenize(probeText));
-  const overlap = labelTokens.filter((token) => probeTokens.has(token)).length;
-  const remembered = session.entries.get(label);
-  const recency = remembered ? Math.max(0.1, 1 - Math.min(0.8, (Date.now() - remembered.updatedAt) / 12_000_000)) : 0.15;
-  const historyHits = session.history.slice(-24).filter((entry) => tokenize(entry).some((token) => labelTokens.includes(token))).length;
-  return (remembered?.weight ?? 0.25) * 0.4 + overlap * 0.2 + historyHits * 0.08 + recency;
+function parseLatentGoals(value: unknown): string[] {
+  if (!value || typeof value !== 'object') return [];
+  const record = value as Record<string, unknown>;
+  const raw = Array.isArray(record.latentGoals) ? record.latentGoals : Array.isArray(record.goals) ? record.goals : [];
+  return raw.map((entry) => String(entry)).filter((entry) => entry.length > 0);
 }
 
 export class LatentGoalTracker {
+  constructor(private provider: SemanticNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER) {}
+
   observe(input: PlannerTrajectoryProbe): void {
     const session = ensureSession(input.sessionKey);
-    observeText(session, input.objective, 1.4);
-    observeText(session, input.query, 1.2);
-    observeText(session, input.semanticIntent?.semanticQuery ?? '', 1.1);
-    for (const entry of input.eventJournal ?? []) observeText(session, [entry.kind, entry.status, entry.reason, JSON.stringify(entry.detail ?? {})].filter(Boolean).join(' | '), 0.9);
-    for (const crumb of input.breadcrumbs ?? []) observeText(session, [crumb.kind, crumb.skill, crumb.status].join(' | '), 0.8);
-    for (const node of input.intentGraph?.nodes ?? []) observeText(session, [node.label, node.summary, node.kind].join(' | '), 0.75);
+    appendHistory(session, { type: 'observation', observedAt: Date.now(), ...snapshotProbe(input) });
   }
 
-  infer(input: PlannerTrajectoryProbe): string[] {
+  async infer(input: PlannerTrajectoryProbe): Promise<string[]> {
     const session = ensureSession(input.sessionKey);
-    const candidates = new Set<string>();
-    for (const value of [
-      input.objective,
-      input.query,
-      input.semanticIntent?.semanticQuery ?? '',
-      ...(input.intentGraph?.nodes ?? []).slice(0, 6).map((node) => node.summary || node.label),
-      ...(input.eventJournal ?? []).slice(0, 8).map((entry) => entry.reason ?? entry.kind ?? ''),
-      ...(input.breadcrumbs ?? []).slice(0, 8).map((crumb) => crumb.kind),
-      ...session.history.slice(-32),
-    ]) {
-      for (const token of tokenize(String(value))) candidates.add(token);
-    }
-    return [...candidates]
-      .map((label) => ({ label, score: relevanceScore(label, input, session) }))
-      .sort((left, right) => right.score - left.score)
-      .slice(0, 6)
-      .map((entry) => entry.label);
+    const raw = await this.provider.extract({
+      objective: 'infer latent goals from accumulated session history',
+      context: {
+        sessionKey: input.sessionKey,
+        objective: input.objective,
+        query: input.query,
+        history: session.history,
+        latest: snapshotProbe(input),
+      },
+      schema: {
+        type: 'object',
+        required: ['latentGoals'],
+        properties: {
+          latentGoals: { type: 'array', items: { type: 'string' } },
+          goals: { type: 'array', items: { type: 'string' } },
+          trajectorySummary: { type: 'string' },
+          confidence: { type: 'number' },
+          rationale: { type: 'array', items: { type: 'string' } },
+        },
+      },
+    });
+    return parseLatentGoals(raw);
   }
 }
 
 const tracker = new LatentGoalTracker();
 
-export function observePlannerTrajectory(plan: TaskPlan): void {
+export async function observePlannerTrajectory(plan: TaskPlan): Promise<void> {
   tracker.observe({
     sessionKey: plan.semanticIntent?.sessionKey ?? plan.taskId,
     objective: plan.objective,
@@ -120,13 +101,13 @@ export function observePlannerTrajectory(plan: TaskPlan): void {
   });
 }
 
-export function inferLatentGoalsFromTrajectory(input: PlannerTrajectoryProbe): string[] {
+export async function inferLatentGoalsFromTrajectory(input: PlannerTrajectoryProbe): Promise<string[]> {
   tracker.observe(input);
-  return tracker.infer(input);
+  return await tracker.infer(input);
 }
 
 export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
   const plan = await buildPlannerPlan(input);
-  observePlannerTrajectory(plan);
+  await observePlannerTrajectory(plan);
   return plan;
 }

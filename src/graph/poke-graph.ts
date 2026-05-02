@@ -4,7 +4,6 @@ import type { RagCorpus } from '../rag/retriever';
 import type { WorkingMemory } from '../memory/working-memory';
 import type { EpisodicMemory } from '../memory/episodic-memory';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from '../search/nlu';
-import { inferLatentGoalsFromTrajectory } from '../planner';
 
 export type PokeGraphState = RuntimeState & {
   query: string;
@@ -24,19 +23,20 @@ type RecoveryTrajectoryDraft = {
   recoverySignals: string[];
   executionProfile: ExecutionProfile;
   trajectoryNotes: string[];
+  latentGoals: string[];
 };
 
 const RECOVERY_SCHEMA = {
   type: 'object',
-  required: ['recoveryPolicy', 'recoverySignals', 'executionProfile', 'trajectoryNotes'],
+  required: ['recoveryPolicy', 'recoverySignals', 'executionProfile', 'trajectoryNotes', 'latentGoals'],
   properties: {
     recoveryPolicy: {
       type: 'object',
       required: ['mode', 'maxReplans', 'maxAttemptsPerStep', 'blockedKinds', 'fallbackSkills', 'recoveryNotes'],
       properties: {
         mode: { enum: ['retry', 'replan', 'compensate', 'escalate'] },
-        maxReplans: { type: 'integer', minimum: 0, maximum: 10 },
-        maxAttemptsPerStep: { type: 'integer', minimum: 1, maximum: 10 },
+        maxReplans: { type: 'integer' },
+        maxAttemptsPerStep: { type: 'integer' },
         blockedKinds: { type: 'array', items: { type: 'string' } },
         fallbackSkills: { type: 'array', items: { type: 'string' } },
         recoveryNotes: { type: 'array', items: { type: 'string' } },
@@ -56,6 +56,7 @@ const RECOVERY_SCHEMA = {
       },
     },
     trajectoryNotes: { type: 'array', items: { type: 'string' } },
+    latentGoals: { type: 'array', items: { type: 'string' } },
   },
 } as const;
 
@@ -68,75 +69,46 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function toStringArray(value: unknown): string[] {
+function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.map((entry) => String(entry)).filter((entry) => entry.length > 0) : [];
 }
 
-function normalizeRecoveryDraft(value: unknown, provider: string): RecoveryTrajectoryDraft {
+function parseRecoveryDraft(value: unknown, provider: string): RecoveryTrajectoryDraft {
   if (!isRecord(value)) throw new Error('invalid-recovery-draft:' + provider);
-  const policy = value.recoveryPolicy;
-  const executionProfile = value.executionProfile;
-  if (!isRecord(policy) || !isRecord(executionProfile)) throw new Error('invalid-recovery-draft:' + provider);
-  if (!Array.isArray(policy.blockedKinds) || !Array.isArray(policy.fallbackSkills) || !Array.isArray(policy.recoveryNotes) || !Array.isArray(value.recoverySignals) || !Array.isArray(value.trajectoryNotes)) {
-    throw new Error('invalid-recovery-draft:' + provider);
-  }
-  if (typeof executionProfile.primarySource !== 'string' || !Array.isArray(executionProfile.secondarySources) || typeof executionProfile.parallelizable !== 'boolean' || !Array.isArray(executionProfile.rationale)) {
+  if (!isRecord(value.recoveryPolicy) || !isRecord(value.executionProfile) || !Array.isArray(value.recoverySignals) || !Array.isArray(value.trajectoryNotes) || !Array.isArray(value.latentGoals)) {
     throw new Error('invalid-recovery-draft:' + provider);
   }
   return {
-    recoveryPolicy: {
-      mode: policy.mode as PlannerRecoveryPolicy['mode'],
-      maxReplans: Number(policy.maxReplans),
-      maxAttemptsPerStep: Number(policy.maxAttemptsPerStep),
-      blockedKinds: toStringArray(policy.blockedKinds) as PlannerRecoveryPolicy['blockedKinds'],
-      fallbackSkills: toStringArray(policy.fallbackSkills),
-      recoveryNotes: toStringArray(policy.recoveryNotes),
-    },
-    recoverySignals: toStringArray(value.recoverySignals),
-    executionProfile: {
-      primarySource: executionProfile.primarySource,
-      secondarySources: toStringArray(executionProfile.secondarySources),
-      parallelizable: Boolean(executionProfile.parallelizable),
-      rationale: toStringArray(executionProfile.rationale),
-      strategy: typeof executionProfile.strategy === 'string' ? executionProfile.strategy : undefined,
-      affordanceSignals: Array.isArray(executionProfile.affordanceSignals) ? executionProfile.affordanceSignals : undefined,
-    },
-    trajectoryNotes: toStringArray(value.trajectoryNotes),
+    recoveryPolicy: value.recoveryPolicy as PlannerRecoveryPolicy,
+    recoverySignals: stringArray(value.recoverySignals),
+    executionProfile: value.executionProfile as ExecutionProfile,
+    trajectoryNotes: stringArray(value.trajectoryNotes),
+    latentGoals: stringArray(value.latentGoals),
   };
 }
 
 export class RecoveryPlanner {
   constructor(private provider: SemanticNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER) {}
 
-  async synthesize(state: PokeGraphState): Promise<RecoveryTrajectoryDraft & { latentGoals: string[] }> {
+  async synthesize(state: PokeGraphState): Promise<RecoveryTrajectoryDraft> {
     const journal = normalizeJournal(state);
-    const sessionKey = state.sessionKey ?? state.semanticIntent?.sessionKey ?? state.intentGraph?.id ?? state.objective;
-    const latentGoals = inferLatentGoalsFromTrajectory({
-      sessionKey,
-      objective: state.objective,
-      query: state.query,
-      eventJournal: journal,
-      breadcrumbs: state.breadcrumbs,
-      intentGraph: state.intentGraph,
-      semanticIntent: state.semanticIntent,
-    });
     const raw = await this.provider.extract({
-      objective: 'recover trajectory for ' + state.objective,
+      objective: 'synthesize a recovery trajectory from the event journal',
       context: {
         objective: state.objective,
         query: state.query,
-        sessionKey,
+        sessionKey: state.sessionKey ?? state.semanticIntent?.sessionKey ?? state.intentGraph?.id ?? state.objective,
         eventJournal: journal,
         breadcrumbs: state.breadcrumbs ?? [],
         recovery: state.recovery ?? [],
-        latentGoals,
+        latentGoals: state.latentGoals ?? [],
         intentGraph: state.intentGraph ?? null,
         semanticIntent: state.semanticIntent ?? null,
         executionProfile: state.executionProfile ?? null,
       },
       schema: RECOVERY_SCHEMA,
     });
-    return { ...normalizeRecoveryDraft(raw, this.provider.name), latentGoals };
+    return parseRecoveryDraft(raw, this.provider.name);
   }
 }
 
@@ -194,7 +166,8 @@ export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; e
           ...(state.retrieval?.hits ?? []).map((hit) => hit.excerpt),
           ...(state.episodicRecall ?? []).map((item) => item.summary),
         ];
-        const combined = snippets.slice(0, 12).join('\n');
+        const combined = snippets.slice(0, 12).join('
+');
         return {
           ...state,
           artifacts: {
