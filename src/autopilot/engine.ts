@@ -97,15 +97,15 @@ function unique(values: string[]): string[] {
 }
 
 function summarizeHarnessState(harnessState: Record<string, unknown>) {
-  const relationships = asArray(harnessState.relationships);
-  const threads = asArray(harnessState.threads);
-  const calendar = asArray(harnessState.calendar);
-  const signals = asArray(harnessState.signals);
+  const relationships = asArray(harnessState.relationships).length;
+  const threads = asArray(harnessState.threads).length;
+  const calendar = asArray(harnessState.calendar).length;
+  const signals = asArray(harnessState.signals).length;
   const staleTransactional = asNumber(harnessState.staleTransactional, asNumber(harnessState.stale, 0));
-  const relationshipWeight = Math.min(1, asNumber(harnessState.relationshipWeight, 0.35) + relationships.length * 0.08);
-  const openThreads = Math.max(threads.length, asNumber(harnessState.openThreads, 0));
-  const calendarConflicts = Math.max(asNumber(harnessState.calendarConflicts, 0), calendar.filter((entry) => typeof entry === 'object' && entry !== null && 'conflict' in (entry as Record<string, unknown>)).length);
-  const signalIntensity = Math.min(1, signals.length * 0.12 + asNumber(harnessState.signalIntensity, 0.2));
+  const relationshipWeight = Math.min(1, asNumber(harnessState.relationshipWeight, 0.35) + relationships * 0.08);
+  const openThreads = Math.max(threads, asNumber(harnessState.openThreads, 0));
+  const calendarConflicts = Math.max(asNumber(harnessState.calendarConflicts, 0), calendar);
+  const signalIntensity = Math.min(1, signals * 0.12 + asNumber(harnessState.signalIntensity, 0.2));
   return { relationshipWeight, openThreads, calendarConflicts, staleTransactional, signalIntensity };
 }
 
@@ -134,49 +134,19 @@ function buildCheckIn(label: string, minutes: number, channel: AutopilotCheckIn[
   };
 }
 
-function inferSources(_objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSignalSource[] {
-  const sources: AutopilotSignalSource[] = [];
-  if (Array.isArray(context.signals) && context.signals.length > 0) sources.push('system');
-  if (Array.isArray(harnessState.relationships) && harnessState.relationships.length > 0) sources.push('email');
-  if (Array.isArray(harnessState.calendar) && harnessState.calendar.length > 0) sources.push('calendar');
-  if (Array.isArray(harnessState.threads) && harnessState.threads.length > 0) sources.push('email');
-  if (Array.isArray(harnessState.files) && harnessState.files.length > 0) sources.push('filesystem');
-  return unique(sources.length > 0 ? sources : ['system']);
-}
-
-function defaultSubscriptions(_objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSubscription[] {
-  const snapshot = summarizeHarnessState(harnessState);
-  const subs: AutopilotSubscription[] = [];
-  if (snapshot.relationshipWeight >= 0.4 || snapshot.openThreads > 0) {
-    subs.push(createSubscription({ source: 'email', topic: 'relationship-watch', match: ['thread', 'reply', 'follow up', 'contact'], debounceMs: 300, throttleMs: 1_500 }));
-    subs.push(createSubscription({ source: 'email', topic: 'thread-watch', match: ['inbox', 'thread', 'reply'], debounceMs: 250, throttleMs: 1_200 }));
-  }
-  if (snapshot.calendarConflicts > 0) {
-    subs.push(createSubscription({ source: 'calendar', topic: 'schedule-watch', match: ['meeting', 'schedule', 'conflict', 'availability'], debounceMs: 200, throttleMs: 900 }));
-  }
-  if (snapshot.staleTransactional > 0) {
-    subs.push(createSubscription({ source: 'email', topic: 'transactional-watch', match: ['invoice', 'receipt', 'booking', 'payment', 'confirmation'], debounceMs: 500, throttleMs: 2_000 }));
-  }
-  if (snapshot.signalIntensity > 0.25 || (Array.isArray(context.observations) && context.observations.length > 0)) {
-    subs.push(createSubscription({ source: 'system', topic: 'signal-watch', match: ['signal', 'telemetry', 'trend', 'heartbeat'], debounceMs: 150, throttleMs: 600 }));
-  }
-  return subs.length > 0 ? subs : [createSubscription({ source: 'system', topic: 'idle-watch', match: ['idle', 'resume'], debounceMs: 250, throttleMs: 1_000 })];
-}
-
-function signalFromObjective(source: AutopilotSignalSource, objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSignal {
+function semanticBootstrapSignal(objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSignal {
   return createSignal({
-    source,
-    key: source === 'calendar' ? 'schedule' : source === 'email' ? 'thread' : 'system',
+    source: 'system',
+    key: 'semantic-bootstrap',
     reason: normalizeText(context.reason) || objective,
-    payload: { objective, harnessState, context },
-    priority: 0.68,
+    payload: { objective, harnessState, context, semanticBootstrap: true },
+    priority: 0.72,
     debounceMs: 220,
     throttleMs: 1_200,
     wakeMode: 'debounce',
     tags: ['semantic-bootstrap'],
   });
 }
-
 export class AutopilotEngine {
   private readonly scheduler: AutopilotSchedulerWorker;
   private readonly liveDaemon: AutopilotLiveDaemon;
@@ -227,10 +197,9 @@ export class AutopilotEngine {
   }
 
   private seed(): void {
-    for (const subscription of defaultSubscriptions(this.objective, this.harnessState, this.context)) this.subscriptions.push(subscription);
     this.seedContextSubscriptions();
-    this.seedObservations();
-    this.seedSignals();
+    this.seedContextObservations();
+    this.seedContextSignals();
     this.auditTrail.push('seed:subscriptions');
     this.auditTrail.push('seed:observations');
     this.auditTrail.push('seed:signals');
@@ -311,45 +280,33 @@ export class AutopilotEngine {
     }
   }
 
-  private seedObservations(): void {
-    const snapshot = summarizeHarnessState(this.harnessState);
-    this.observe('system', 'relationship-weight', snapshot.relationshipWeight.toFixed(2), snapshot.relationshipWeight, 30_000, ['harness', 'relationship']);
-    this.observe('system', 'open-threads', String(snapshot.openThreads), Math.min(1, snapshot.openThreads / 10), 30_000, ['harness', 'thread']);
-    this.observe('system', 'calendar-conflicts', String(snapshot.calendarConflicts), Math.min(1, snapshot.calendarConflicts / 5), 30_000, ['harness', 'calendar']);
-    this.observe('system', 'stale-transactional', String(snapshot.staleTransactional), Math.min(1, snapshot.staleTransactional / 10), 30_000, ['harness', 'transactional']);
-    this.observe('system', 'signal-intensity', snapshot.signalIntensity.toFixed(2), snapshot.signalIntensity, 30_000, ['harness', 'signal']);
-    if (Array.isArray(this.context.observations)) {
-      for (const item of this.context.observations) {
-        if (typeof item === 'object' && item !== null) {
-          const record = item as Record<string, unknown>;
-          this.observe(
-            (normalizeText(record.source) as AutopilotSignalSource) || 'system',
-            normalizeText(record.focus) || 'context-observation',
-            normalizeText(record.value),
-            asNumber(record.confidence, 0.7),
-            asNumber(record.freshnessMs, 60_000),
-            asArray(record.tags).map(normalizeText).filter(Boolean),
-          );
-        }
+  private seedContextObservations(): void {
+    if (!Array.isArray(this.context.observations)) return;
+    for (const item of this.context.observations) {
+      if (typeof item === 'object' && item !== null) {
+        const record = item as Record<string, unknown>;
+        this.observe(
+          (normalizeText(record.source) as AutopilotSignalSource) || 'system',
+          normalizeText(record.focus) || 'context-observation',
+          normalizeText(record.value),
+          asNumber(record.confidence, 0.7),
+          asNumber(record.freshnessMs, 60_000),
+          asArray(record.tags).map(normalizeText).filter(Boolean),
+        );
       }
     }
   }
 
-  private seedSignals(): void {
-    const recordSeedSignal = (signal: AutopilotSignal): void => {
-      this.signals.push(signal);
-      this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
-    };
-
+  private seedContextSignals(): void {
+    let seeded = false;
     if (Array.isArray(this.context.signals)) {
       for (const item of this.context.signals) {
         if (typeof item === 'object' && item !== null) {
           const record = item as Record<string, unknown>;
-          const source = (normalizeText(record.source) as AutopilotSignalSource) || 'system';
-          recordSeedSignal({
-            ...signalFromObjective(source, this.objective, this.harnessState, this.context),
+          const signal = {
+            ...semanticBootstrapSignal(this.objective, this.harnessState, this.context),
             id: `${normalizeText(record.id) || randomUUID()}-${this.clock()}`,
-            source,
+            source: (normalizeText(record.source) as AutopilotSignalSource) || 'system',
             key: normalizeText(record.key) || 'context-signal',
             reason: normalizeText(record.reason) || this.objective,
             payload: asRecord(record.payload),
@@ -360,26 +317,19 @@ export class AutopilotEngine {
             at: asNumber(record.at, this.clock()),
             tags: asArray(record.tags).map(normalizeText).filter(Boolean),
             kind: 'signal',
-          });
+          };
+          this.signals.push(signal);
+          this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
+          seeded = true;
         }
       }
     }
-  }
-
-  observe(source: AutopilotSignalSource, focus: string, value: string, confidence = 0.7, freshnessMs = 60_000, tags: string[] = []): AutopilotObservation {
-    const observation = createObservation({ source, focus, value, confidence, freshnessMs, tags });
-    this.observations.push(observation);
-    this.auditTrail.push(`observation:${source}:${focus}`);
-    return observation;
-  }
-
-  subscribe(subscription: AutopilotSubscription): AutopilotSubscription {
-    this.subscriptions.push(subscription);
-    this.auditTrail.push(`subscription:${subscription.source}:${subscription.topic}`);
-    return subscription;
-  }
-
-  pause(reason = 'manual pause'): void {
+    if (!seeded) {
+      const signal = semanticBootstrapSignal(this.objective, this.harnessState, this.context);
+      this.signals.push(signal);
+      this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
+    }
+  }  pause(reason = 'manual pause'): void {
     this.status = 'paused';
     this.lastWakeReason = reason;
     this.auditTrail.push(`pause:${reason}`);

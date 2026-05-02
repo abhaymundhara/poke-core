@@ -2,7 +2,6 @@ import { createObservation, createSignal, type AutopilotObservation, type Autopi
 import { createSearchSession, type SearchPlan, type SearchResult, type SearchSignalForecast, type SemanticNluProvider } from '../search/index.ts';
 import { listIssues, listPullRequests } from '../../../../mcp/github-2-5fa2cac3-9210-42b4-8e09-3c789dc5c9e3.ts';
 import { realtimeWebSearch } from '../../../../poke/search/realtime_web_search.ts';
-import { webSearch } from '../../../../poke/search/web_search.ts';
 
 export type LiveWebResult = {
   title: string;
@@ -351,20 +350,17 @@ async function searchLiveWeb(query: string, now: number): Promise<LiveWebResult[
   }
 
   if (results.length === 0) {
-    const [liveRes, fallbackRes] = await Promise.allSettled([
-      withTimeout(realtimeWebSearch({ query }), 8_000, 'realtime-web-search'),
-      withTimeout(webSearch({ objective: query, search_queries: [query], mode: 'basic' }), 8_000, 'web-search'),
-    ]);
-    const payloads = [liveRes, fallbackRes].flatMap((settled, index) => {
-      if (settled.status !== 'fulfilled') return [];
-      const payload = asObject(settled.value);
-      return collectUrls(payload).map((result) => ({
+    try {
+      const payload = asObject(await withTimeout(realtimeWebSearch({ query }), 8_000, 'realtime-web-search'));
+      const payloads = collectUrls(payload).map((result) => ({
         ...result,
-        source: index === 0 ? 'realtime-web' : 'web',
+        source: 'realtime-web',
         freshness: freshnessFromDate(result.publishedAt, now),
       }));
-    });
-    for (const result of payloads) results.push(result);
+      for (const result of payloads) results.push(result);
+    } catch {
+      // strict realtime-only path: no web fallback branch
+    }
   }
 
   const deduped = new Map<string, LiveWebResult>();
