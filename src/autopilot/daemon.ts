@@ -94,11 +94,11 @@ function words(value: string): string[] {
 function ratio(seed: string): number {
   const text = token(seed);
   const total = Array.from(text).reduce((sum, char) => sum + (Number(char.codePointAt(0)) || 0), 0);
-  return text.length === 0 ? 0 : total / text.length;
+  return total / text.length;
 }
 
 function average(values: number[]): number {
-  return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function theoryCorpus(model: BehaviorModelBundle): string[] {
@@ -158,7 +158,7 @@ function synthesizeManifest(model: BehaviorModelBundle): RuntimeManifest {
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
   const corpus = theoryCorpus(model);
   const uniqueTerms = new Set(corpus);
-  const entropy = corpus.length === 0 ? ratio(token(model.theory.id, model.summary, sourceSeed)) : uniqueTerms.size / corpus.length;
+  const entropy = uniqueTerms.size / corpus.length;
   const structuralMass = [
     model.theory.latentAxes.length,
     model.theory.crossContextGeneralizations.length,
@@ -187,7 +187,7 @@ function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, e
   const heapUsed = Number(stats.used_heap_size) || 0;
   const heapTotal = Number(stats.total_heap_size) || 0;
   const heapSizeLimit = Number(stats.heap_size_limit) || 0;
-  const pressure = heapSizeLimit > 0 ? heapUsed / heapSizeLimit : 0;
+  const pressure = heapUsed / heapSizeLimit;
   const durationMs = Number(entry.duration) || 0;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
