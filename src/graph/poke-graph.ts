@@ -3,6 +3,8 @@ import type { ExecutionProfile, PlannerRecoveryPolicy, RuntimeState } from '../t
 import type { RagCorpus } from '../rag/retriever';
 import type { WorkingMemory } from '../memory/working-memory';
 import type { EpisodicMemory } from '../memory/episodic-memory';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from '../search/nlu';
+import { inferLatentGoalsFromTrajectory } from '../planner';
 
 export type PokeGraphState = RuntimeState & {
   query: string;
@@ -14,90 +16,155 @@ export type PokeGraphState = RuntimeState & {
   workingSnapshot?: ReturnType<WorkingMemory['snapshot']>;
   episodicRecall?: ReturnType<EpisodicMemory['recall']>;
   executionProfile?: ExecutionProfile;
+  sessionKey?: string;
 };
+
+type RecoveryTrajectoryDraft = {
+  recoveryPolicy: PlannerRecoveryPolicy;
+  recoverySignals: string[];
+  executionProfile: ExecutionProfile;
+  trajectoryNotes: string[];
+};
+
+const RECOVERY_SCHEMA = {
+  type: 'object',
+  required: ['recoveryPolicy', 'recoverySignals', 'executionProfile', 'trajectoryNotes'],
+  properties: {
+    recoveryPolicy: {
+      type: 'object',
+      required: ['mode', 'maxReplans', 'maxAttemptsPerStep', 'blockedKinds', 'fallbackSkills', 'recoveryNotes'],
+      properties: {
+        mode: { enum: ['retry', 'replan', 'compensate', 'escalate'] },
+        maxReplans: { type: 'integer', minimum: 0, maximum: 10 },
+        maxAttemptsPerStep: { type: 'integer', minimum: 1, maximum: 10 },
+        blockedKinds: { type: 'array', items: { type: 'string' } },
+        fallbackSkills: { type: 'array', items: { type: 'string' } },
+        recoveryNotes: { type: 'array', items: { type: 'string' } },
+      },
+    },
+    recoverySignals: { type: 'array', items: { type: 'string' } },
+    executionProfile: {
+      type: 'object',
+      required: ['primarySource', 'secondarySources', 'parallelizable', 'rationale'],
+      properties: {
+        primarySource: { type: 'string' },
+        secondarySources: { type: 'array', items: { type: 'string' } },
+        parallelizable: { type: 'boolean' },
+        rationale: { type: 'array', items: { type: 'string' } },
+        strategy: { type: 'string' },
+        affordanceSignals: { type: 'array' },
+      },
+    },
+    trajectoryNotes: { type: 'array', items: { type: 'string' } },
+  },
+} as const;
 
 function normalizeJournal(state: PokeGraphState): NonNullable<PokeGraphState['eventJournal']> {
   if (Array.isArray(state.eventJournal) && state.eventJournal.length > 0) return state.eventJournal;
   return (state.recovery ?? []).map((entry) => ({ stepId: entry.stepId, kind: 'recovery', status: 'failed', reason: entry.reason, at: entry.at, detail: entry }));
 }
 
-function deriveRecoveryPolicy(state: PokeGraphState): PlannerRecoveryPolicy {
-  const journal = normalizeJournal(state);
-  const failures = journal.filter((entry) => /fail|error|timeout|recover|rollback/i.test(String(entry.kind ?? '') + ' ' + String(entry.status ?? '') + ' ' + String(entry.reason ?? '') + ' ' + JSON.stringify(entry.detail ?? {})));
-  const blockedKinds = Array.from(new Set(failures.map((entry) => entry.kind).filter((kind): kind is string => Boolean(kind) && kind !== 'recovery'))).filter(Boolean) as PlannerRecoveryPolicy['blockedKinds'];
-  const fallbackSkills = Array.from(new Set([
-    ...(state.intentGraph?.toolAffordances ?? []).filter((affordance) => affordance.score >= 0.55).map((affordance) => affordance.skill),
-    ...(state.breadcrumbs ?? []).slice(-3).map((crumb) => crumb.skill),
-  ])).slice(0, 4);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => String(entry)).filter((entry) => entry.length > 0) : [];
+}
+
+function normalizeRecoveryDraft(value: unknown, provider: string): RecoveryTrajectoryDraft {
+  if (!isRecord(value)) throw new Error('invalid-recovery-draft:' + provider);
+  const policy = value.recoveryPolicy;
+  const executionProfile = value.executionProfile;
+  if (!isRecord(policy) || !isRecord(executionProfile)) throw new Error('invalid-recovery-draft:' + provider);
+  if (!Array.isArray(policy.blockedKinds) || !Array.isArray(policy.fallbackSkills) || !Array.isArray(policy.recoveryNotes) || !Array.isArray(value.recoverySignals) || !Array.isArray(value.trajectoryNotes)) {
+    throw new Error('invalid-recovery-draft:' + provider);
+  }
+  if (typeof executionProfile.primarySource !== 'string' || !Array.isArray(executionProfile.secondarySources) || typeof executionProfile.parallelizable !== 'boolean' || !Array.isArray(executionProfile.rationale)) {
+    throw new Error('invalid-recovery-draft:' + provider);
+  }
   return {
-    mode: failures.length >= 3 ? 'replan' : failures.length > 0 ? 'retry' : 'compensate',
-    maxReplans: failures.length >= 4 ? 3 : failures.length > 0 ? 2 : 1,
-    maxAttemptsPerStep: failures.length >= 2 ? 3 : 2,
-    blockedKinds,
-    fallbackSkills: fallbackSkills.length > 0 ? fallbackSkills : ['verify'],
-    recoveryNotes: [
-      'journalEntries=' + journal.length,
-      'failures=' + failures.length,
-      ...(failures.slice(0, 4).map((entry) => [entry.stepId, entry.reason].filter(Boolean).join(':')).filter(Boolean)),
-    ],
+    recoveryPolicy: {
+      mode: policy.mode as PlannerRecoveryPolicy['mode'],
+      maxReplans: Number(policy.maxReplans),
+      maxAttemptsPerStep: Number(policy.maxAttemptsPerStep),
+      blockedKinds: toStringArray(policy.blockedKinds) as PlannerRecoveryPolicy['blockedKinds'],
+      fallbackSkills: toStringArray(policy.fallbackSkills),
+      recoveryNotes: toStringArray(policy.recoveryNotes),
+    },
+    recoverySignals: toStringArray(value.recoverySignals),
+    executionProfile: {
+      primarySource: executionProfile.primarySource,
+      secondarySources: toStringArray(executionProfile.secondarySources),
+      parallelizable: Boolean(executionProfile.parallelizable),
+      rationale: toStringArray(executionProfile.rationale),
+      strategy: typeof executionProfile.strategy === 'string' ? executionProfile.strategy : undefined,
+      affordanceSignals: Array.isArray(executionProfile.affordanceSignals) ? executionProfile.affordanceSignals : undefined,
+    },
+    trajectoryNotes: toStringArray(value.trajectoryNotes),
   };
 }
 
-function derivePrimarySource(state: PokeGraphState): ExecutionProfile {
-  const policy = state.recoveryPolicy ?? deriveRecoveryPolicy(state);
-  const recoveryPressure = policy.mode === 'replan' ? 2 : policy.mode === 'retry' ? 1 : 0;
-  const latentGoalHints = Array.from(new Set([
-    ...(state.intentGraph?.nodes ?? []).filter((node) => node.kind === 'goal' || node.kind === 'subgoal').map((node) => node.label),
-    ...(state.intentGraph?.frontier ?? []).slice(0, 3),
-  ])).slice(0, 6);
-  const executionProfile: ExecutionProfile = state.executionProfile ?? {
-    primarySource: recoveryPressure > 0 ? 'memory' : 'integration',
-    secondarySources: recoveryPressure > 1 ? ['integration', 'browser'] : ['integration'],
-    parallelizable: (state.executionProfile?.parallelizable ?? true) && policy.mode !== 'replan',
-    rationale: [
-      'recovery-mode=' + policy.mode,
-      'fallback-skills=' + policy.fallbackSkills.join(','),
-      ...policy.recoveryNotes.slice(0, 4),
-      ...latentGoalHints.map((hint) => 'latent=' + hint),
-    ],
-    strategy: state.executionProfile?.strategy ?? state.planner?.strategy,
-    affordanceSignals: (state.intentGraph?.toolAffordances ?? []).slice(0, 5).map((affordance) => ({
-      skill: affordance.skill,
-      score: affordance.score,
-      bucket: affordance.skill === 'browser' || affordance.skill === 'computer-use' ? 'browser' : affordance.skill === 'harness' ? 'memory' : affordance.skill === 'integration' ? 'integration' : 'memory',
-      kind: affordance.selectedKind,
-    })),
-  };
-  return executionProfile;
+async function synthesizeRecoveryTrajectory(state: PokeGraphState): Promise<RecoveryTrajectoryDraft & { latentGoals: string[] }> {
+  const journal = normalizeJournal(state);
+  const sessionKey = state.sessionKey ?? state.semanticIntent?.sessionKey ?? state.intentGraph?.id ?? state.objective;
+  const latentGoals = inferLatentGoalsFromTrajectory({
+    sessionKey,
+    objective: state.objective,
+    query: state.query,
+    eventJournal: journal,
+    breadcrumbs: state.breadcrumbs,
+    intentGraph: state.intentGraph,
+    semanticIntent: state.semanticIntent,
+  });
+  const provider: SemanticNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
+  const raw = await provider.extract({
+    objective: 'recover trajectory for ' + state.objective,
+    context: {
+      objective: state.objective,
+      query: state.query,
+      sessionKey,
+      eventJournal: journal,
+      breadcrumbs: state.breadcrumbs ?? [],
+      recovery: state.recovery ?? [],
+      latentGoals,
+      intentGraph: state.intentGraph ?? null,
+      semanticIntent: state.semanticIntent ?? null,
+      executionProfile: state.executionProfile ?? null,
+    },
+    schema: RECOVERY_SCHEMA,
+  });
+  return { ...normalizeRecoveryDraft(raw, provider.name), latentGoals };
 }
 
-export function buildPokeGraph(deps: {
-  rag: RagCorpus;
-  working: WorkingMemory;
-  episodic: EpisodicMemory;
-}) {
+export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; episodic: EpisodicMemory; }) {
   const nodes: GraphNode<PokeGraphState>[] = [
     {
       id: 'recovery-policy',
       name: 'plan recovery policy from event journal',
-      run: (state) => {
-        const recoveryPolicy = deriveRecoveryPolicy(state);
+      run: async (state) => {
+        const synthesis = await synthesizeRecoveryTrajectory(state);
         return {
           ...state,
           eventJournal: normalizeJournal(state),
-          recoveryPolicy,
-          recoverySignals: recoveryPolicy.recoveryNotes,
-          latentGoals: Array.from(new Set([
-            ...(state.intentGraph?.nodes ?? []).filter((node) => node.kind === 'goal' || node.kind === 'subgoal').map((node) => node.label),
-            ...(state.intentGraph?.frontier ?? []),
-          ])).slice(0, 8),
+          recoveryPolicy: synthesis.recoveryPolicy,
+          recoverySignals: synthesis.recoverySignals.length > 0 ? synthesis.recoverySignals : synthesis.recoveryPolicy.recoveryNotes,
+          latentGoals: synthesis.latentGoals,
+          executionProfile: synthesis.executionProfile,
+          artifacts: {
+            ...(state.artifacts ?? {}),
+            recoveryTrajectory: synthesis.trajectoryNotes,
+          },
         };
       },
     },
     {
       id: 'profile',
-      name: 'profile request',
-      run: (state) => ({ ...state, executionProfile: derivePrimarySource(state) }),
+      name: 'validate recovery profile',
+      run: (state) => {
+        if (!state.executionProfile) throw new Error('recovery execution profile missing');
+        return state;
+      },
     },
     {
       id: 'recall-working',
@@ -123,7 +190,8 @@ export function buildPokeGraph(deps: {
           ...(state.retrieval?.hits ?? []).map((hit) => hit.excerpt),
           ...(state.episodicRecall ?? []).map((item) => item.summary),
         ];
-        const combined = snippets.slice(0, 12).join('\n');
+        const combined = snippets.slice(0, 12).join('
+');
         return {
           ...state,
           artifacts: {

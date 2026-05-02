@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { buildPlan, cloneIntentGraph, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState } from './planner';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER } from './search/nlu';
+import { buildPlan, cloneIntentGraph, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState, PlannerRecoverySignal } from './planner';
 import { buildPokeGraph, type PokeGraphState } from './graph';
 import { RagCorpus } from './rag/retriever';
 import { EpisodicMemory } from './memory/episodic-memory';
@@ -19,6 +20,44 @@ export type TaskExecutionResult = {
   state: RuntimeState;
   error?: string;
 };
+
+const AFFORDANCE_EVALUATION_SCHEMA = {
+  type: 'object',
+  required: ['selectedAdapterName', 'confidence', 'rationale', 'rankedAdapters'],
+  properties: {
+    selectedAdapterName: { type: 'string' },
+    confidence: { type: 'number' },
+    rationale: { type: 'array', items: { type: 'string' } },
+    rankedAdapters: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['name', 'score', 'reason', 'invoke'],
+        properties: {
+          name: { type: 'string' },
+          score: { type: 'number' },
+          reason: { type: 'array', items: { type: 'string' } },
+          invoke: { type: 'boolean' },
+        },
+      },
+    },
+  },
+} as const;
+
+type AffordanceEvaluation = {
+  selectedAdapterName: string;
+  confidence: number;
+  rationale: string[];
+  rankedAdapters: Array<{ name: string; score: number; reason: string[]; invoke: boolean }>;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => String(entry)).filter((entry) => entry.length > 0) : [];
+}
 
 export class PokeCoreOrchestrator {
   private readonly skills: SkillAdapter[];
@@ -50,34 +89,75 @@ export class PokeCoreOrchestrator {
     return this.episodic;
   }
 
-  private scoreSkillAdapter(adapter: SkillAdapter, step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): number {
-    const descriptor = adapter.descriptor;
-    if (!adapter.canHandle(step)) return -1;
-    const affordance = plan.intentGraph?.toolAffordances.find((entry) => entry.skill === descriptor.name);
-    const executionSignal = state.executionProfile?.affordanceSignals?.find((entry) => entry.skill === descriptor.name);
-    const exactStepMatch = descriptor.name === step.skill ? 0.55 : 0;
-    const intentMatch = affordance?.score ?? 0;
-    const runtimeMatch = executionSignal?.score ?? 0;
-    const stepKindMatch = step.kind.startsWith('browser') && (descriptor.name === 'browser' || descriptor.name === 'computer-use')
-      ? 0.12
-      : step.kind.startsWith('harness') && descriptor.name === 'harness'
-        ? 0.12
-        : step.kind === 'integration.call' && descriptor.name === 'integration'
-          ? 0.12
-          : step.kind === 'autopilot.loop' && descriptor.name === 'autopilot'
-            ? 0.12
-            : 0;
-    const plannerBias = state.planner?.currentNodeId === step.id ? 0.05 : 0;
-    return exactStepMatch + intentMatch * 0.4 + runtimeMatch * 0.2 + stepKindMatch + plannerBias;
+  private async evaluateSkillAdapterAffordance(adapterCandidates: SkillAdapter[], step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): Promise<AffordanceEvaluation> {
+    const provider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
+    const raw = await provider.extract({
+      objective: 'select the best skill adapter for the current step',
+      context: {
+        objective: plan.objective,
+        step,
+        plan: {
+          taskId: plan.taskId,
+          objective: plan.objective,
+          semanticIntent: plan.semanticIntent,
+          planner: plan.planner,
+          executionProfile: state.executionProfile,
+          graph: state.intentGraph,
+        },
+        graphState: {
+          executionProfile: state.executionProfile,
+          planner: state.planner,
+          breadcrumbs: state.breadcrumbs,
+          recovery: state.recovery,
+          outputs: state.outputs,
+          artifacts: state.artifacts,
+          intentGraph: state.intentGraph,
+        },
+        candidates: adapterCandidates.map((adapter) => ({
+          name: adapter.descriptor.name,
+          domain: adapter.descriptor.domain,
+          capabilities: adapter.descriptor.capabilities,
+          version: adapter.descriptor.version,
+          playbook: getSkillPlaybook(adapter.descriptor.name as any),
+        })),
+      },
+      schema: AFFORDANCE_EVALUATION_SCHEMA,
+    });
+    if (!isRecord(raw)) throw new Error('invalid-affordance-evaluation:' + provider.name);
+    const ranked = toStringArray(raw.rationale); // touch early for validation below
+    void ranked;
+    const entries = Array.isArray(raw.rankedAdapters) ? raw.rankedAdapters : null;
+    if (!entries || entries.length === 0) throw new Error('invalid-affordance-evaluation:' + provider.name);
+    const normalized = entries.map((entry) => {
+      if (!isRecord(entry) || typeof entry.name !== 'string' || typeof entry.score !== 'number' || !Array.isArray(entry.reason) || typeof entry.invoke !== 'boolean') {
+        throw new Error('invalid-affordance-evaluation:' + provider.name);
+      }
+      return { name: entry.name, score: entry.score, reason: toStringArray(entry.reason), invoke: entry.invoke };
+    }).sort((left, right) => right.score - left.score);
+    const selectedName = typeof raw.selectedAdapterName === 'string' ? raw.selectedAdapterName : normalized[0]!.name;
+    const selected = normalized.find((entry) => entry.name === selectedName && entry.invoke) ?? normalized.find((entry) => entry.invoke) ?? normalized[0];
+    if (!selected) throw new Error('no-adapter-selected:' + provider.name);
+    return {
+      selectedAdapterName: selected.name,
+      confidence: typeof raw.confidence === 'number' ? raw.confidence : selected.score,
+      rationale: toStringArray(raw.rationale),
+      rankedAdapters: normalized,
+    };
   }
 
-  private resolveSkill(step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): SkillAdapter {
+  private async resolveSkill(step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): Promise<SkillAdapter> {
     const candidates = this.skills.filter((candidate) => candidate.canHandle(step));
     if (candidates.length === 0) throw new Error('no skill adapter can handle step ' + step.id + ' (' + step.kind + ')');
-    return candidates.slice().sort((left, right) => this.scoreSkillAdapter(right, step, plan, state) - this.scoreSkillAdapter(left, step, plan, state))[0]!;
+    const evaluation = await this.evaluateSkillAdapterAffordance(candidates, step, plan, state);
+    const selected = candidates.find((candidate) => candidate.descriptor.name === evaluation.selectedAdapterName)
+      ?? candidates.find((candidate) => evaluation.rankedAdapters[0] && candidate.descriptor.name === evaluation.rankedAdapters[0].name)
+      ?? candidates[0];
+    if (!selected) throw new Error('no skill adapter selected for step ' + step.id);
+    return selected;
   }
-  private ensurePlan(input: TaskInput): TaskPlan {
-    const plan = buildPlan(input);
+
+  private async ensurePlan(input: TaskInput): Promise<TaskPlan> {
+    const plan = await buildPlan(input);
     const validation = validatePlan(plan.steps);
     if (!validation.ok) throw new Error(validation.reasons.join('; '));
     this.store.savePlan(plan);
@@ -93,11 +173,13 @@ export class PokeCoreOrchestrator {
       artifacts: {},
       breadcrumbs: [],
       recovery: [],
-      query: `${input.objective}\n${JSON.stringify(input.context ?? {})}`,
+      query: input.objective + '
+' + JSON.stringify(input.context ?? {}),
       executionProfile,
       semanticIntent: plan.semanticIntent,
       intentGraph: cloneIntentGraph(plan.intentGraph),
       planner: createPlannerRuntimeState(plan),
+      sessionKey: plan.semanticIntent?.sessionKey,
     };
   }
 
@@ -141,9 +223,18 @@ export class PokeCoreOrchestrator {
     const beforeSnapshot = this.store.recordSnapshot(task.taskId, 'executing', state);
     this.persistTransition(task.taskId, task.status, 'executing', { stepId: step.id, snapshotId: beforeSnapshot.snapshotId, stepIndex });
 
-    const skill = this.resolveSkill(step, plan, state);
+    let skill: SkillAdapter;
+    try {
+      skill = await this.resolveSkill(step, plan, state);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      state.recovery.push({ stepId: step.id, reason, at: Date.now() });
+      this.persistTransition(task.taskId, 'executing', 'recovering', { stepId: step.id, phase: 'affordance-evaluation', error: reason, recoveryEvent: (err as PlannerRecoverySignal | Error | undefined)?.['recoveryEvent'] ?? null });
+      throw err;
+    }
+
     const ctx: ExecutionContext = { taskId: task.taskId, task, plan, step, state };
-    state.planner = state.planner ? { ...state.planner, currentNodeId: step.id, notes: [...state.planner.notes, `active:${step.id}`] } : createPlannerRuntimeState(plan);
+    state.planner = state.planner ? { ...state.planner, currentNodeId: step.id, notes: [...state.planner.notes, 'active:' + step.id] } : createPlannerRuntimeState(plan);
     let attemptIndex = state.attempts[step.id] ?? 0;
     let lastError: string | null = null;
 
@@ -160,8 +251,8 @@ export class PokeCoreOrchestrator {
         state.outputs[step.id] = result.output;
         state.breadcrumbs.push({ stepId: step.id, kind: step.kind, skill: skill.descriptor.name, status: 'done' });
         state.artifacts[step.id] = { note: result.note ?? null, trace: result.trace ?? null };
-        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, step.id, 'done', result.note ?? `completed ${step.kind}`);
-        state.planner = updatePlannerRuntimeState(state.planner, plan, step.id, 'done', result.note ?? `completed ${step.kind}`);
+        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, step.id, 'done', result.note ?? ('completed ' + step.kind));
+        state.planner = updatePlannerRuntimeState(state.planner, plan, step.id, 'done', result.note ?? ('completed ' + step.kind));
         this.store.recordSnapshot(task.taskId, 'routing', state);
         this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, stepIndex, validation, planner: state.planner?.strategy });
         return { ok: true, state };
@@ -182,7 +273,7 @@ export class PokeCoreOrchestrator {
     const compensation = skill.compensate ? await skill.compensate(ctx) : null;
     if (compensation) {
       state.breadcrumbs.push({ stepId: step.id, kind: step.kind, skill: skill.descriptor.name, status: 'compensated' });
-      state.artifacts[`${step.id}:compensation`] = compensation.output;
+      state.artifacts[step.id + ':compensation'] = compensation.output;
     }
 
     const rollbackState = { restoredFrom: beforeSnapshot.snapshotId, state, error: lastError, compensation: compensation?.output ?? null };
@@ -194,70 +285,87 @@ export class PokeCoreOrchestrator {
 
   async execute(input: TaskInput): Promise<TaskExecutionResult> {
     this.store.upsertTask(input.id, input.objective, 'planning');
-    const plannerContext = { ...(input.context ?? {}), skillCatalog: this.skillCatalog };
-    const semanticIntent = await resolvePlannerIntent(input.objective, plannerContext);
-    const planInput: TaskInput = { ...input, context: { ...plannerContext, semanticIntent } };
-    let plan = this.store.getPlan(input.id) ?? this.ensurePlan(planInput);
-    if (!plan.semanticIntent || !plan.intentGraph || !plan.planner) {
-      const hydrated = buildPlan(planInput);
-      plan = { ...plan, semanticIntent: plan.semanticIntent ?? hydrated.semanticIntent, intentGraph: plan.intentGraph ?? hydrated.intentGraph, planner: plan.planner ?? hydrated.planner };
-      this.store.savePlan(plan);
-    }
-
     let task = this.store.getTask(input.id)!;
-    if (isTerminal(task.status)) throw new Error(`task ${input.id} is already terminal: ${task.status}`);
-
-    const planValidation = validatePlan(plan.steps);
-    if (!planValidation.ok) throw new Error(planValidation.reasons.join('; '));
-
-    const executionProfile = deriveExecutionProfile(plan);
-    const graph = buildPokeGraph({ rag: this.rag, working: this.working, episodic: this.episodic });
-    const contextPack = await graph.run(this.buildContextState(input, plan, executionProfile));
-    if (contextPack.state.retrieval) this.store.recordRetrieval(input.objective, contextPack.state.retrieval);
-    this.working.appendTrail('graph_context_pack_built', { taskId: input.id, primarySource: contextPack.state.executionProfile?.primarySource, retrievalHits: contextPack.state.retrieval?.hits.length ?? 0 });
-    const primarySourceFact = this.working.upsertFact(`task:${input.id}:primary_source`, contextPack.state.executionProfile?.primarySource ?? 'integration', 0.95, 'graph');
-    this.store.replaceWorkingFact(primarySourceFact);
-    const episode = this.episodic.add({ id: randomUUID(), taskId: input.id, category: 'decision', summary: 'built context pack for ' + input.id + ' using ' + (contextPack.state.executionProfile?.primarySource ?? 'integration'), signals: ['graph', 'retrieval', contextPack.state.executionProfile?.primarySource ?? 'integration'], score: 0.9 });
-    this.store.upsertEpisodicItem(episode);
-
-    this.persistTransition(task.taskId, 'draft', 'planning', { steps: plan.steps.length, score: planValidation.score, executionProfile, semanticProvider: semanticIntent.nlu.provider });
-    this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify({ ...contextPack.state, objective: plan.objective }), errorJson: null, revision: task.revision + 1 });
-    this.persistTransition(task.taskId, 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id), executionProfile, playbookPaths: this.skillPlaybooks.map((playbook) => playbook.instructionPath), planner: plan.planner });
-
-    let state = this.loadOrCreateState(this.store.getTask(input.id)!, plan, executionProfile);
-
-    while (true) {
-      task = this.store.getTask(input.id)!;
-      if (task.currentStepIndex >= plan.steps.length) {
-        this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: plan.steps.at(-1)?.id ?? null, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
-        this.store.recordSnapshot(task.taskId, 'completed', state);
-        this.persistTransition(task.taskId, 'routing', 'completed', { totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
-        return { ok: true, taskId: input.id, status: 'completed', plan, state };
+    try {
+      const plannerContext = { ...(input.context ?? {}), skillCatalog: this.skillCatalog };
+      const semanticIntent = await resolvePlannerIntent(input.objective, plannerContext);
+      const planInput: TaskInput = { ...input, context: { ...plannerContext, semanticIntent } };
+      let plan = this.store.getPlan(input.id) ?? await this.ensurePlan(planInput);
+      if (!plan.semanticIntent || !plan.intentGraph || !plan.planner) {
+        const hydrated = await buildPlan(planInput);
+        plan = { ...plan, semanticIntent: plan.semanticIntent ?? hydrated.semanticIntent, intentGraph: plan.intentGraph ?? hydrated.intentGraph, planner: plan.planner ?? hydrated.planner };
+        this.store.savePlan(plan);
       }
 
-      const stepIndex = task.currentStepIndex;
-      const step = plan.steps[stepIndex];
-      const routeTransition = transition(task.status, 'executing');
-      if (!routeTransition.ok) throw new Error(routeTransition.reason ?? 'unable to advance to executing');
-      this.store.updateTask(task.taskId, { status: 'executing', activeStepId: step.id, resultJson: JSON.stringify(state), revision: task.revision + 1 });
-      this.persistTransition(task.taskId, 'routing', 'executing', { stepId: step.id, stepIndex, playbook: getSkillPlaybook(step.skill as any), planner: state.planner?.strategy });
-
-      const outcome = await this.runStep(this.store.getTask(input.id)!, plan, state, stepIndex);
-      state = outcome.state;
       task = this.store.getTask(input.id)!;
-      if (!outcome.ok) return { ok: false, taskId: input.id, status: 'rolled_back', plan, state, error: outcome.error };
+      if (isTerminal(task.status)) throw new Error('task ' + input.id + ' is already terminal: ' + task.status);
 
-      if (stepIndex === plan.steps.length - 1) {
-        this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: step.id, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
-        this.store.recordSnapshot(task.taskId, 'completed', state);
-        this.persistTransition(task.taskId, 'routing', 'completed', { stepId: step.id, totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
-        return { ok: true, taskId: input.id, status: 'completed', plan, state };
+      const planValidation = validatePlan(plan.steps);
+      if (!planValidation.ok) throw new Error(planValidation.reasons.join('; '));
+
+      const executionProfile = deriveExecutionProfile(plan);
+      const graph = buildPokeGraph({ rag: this.rag, working: this.working, episodic: this.episodic });
+      let contextPack;
+      try {
+        contextPack = await graph.run(this.buildContextState(input, plan, executionProfile));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.persistTransition(task.taskId, 'routing', 'recovering', { phase: 'graph', error: message, recoveryEvent: (err as PlannerRecoverySignal | Error | undefined)?.['recoveryEvent'] ?? null });
+        this.store.updateTask(task.taskId, { status: 'failed', currentStepIndex: task.currentStepIndex, activeStepId: task.activeStepId, errorJson: JSON.stringify({ message }), revision: task.revision + 1 });
+        return { ok: false, taskId: input.id, status: 'failed', plan, state: this.loadOrCreateState(task, plan, executionProfile), error: message };
       }
 
-      const backToRouting = transition(task.status, 'routing');
-      if (!backToRouting.ok) throw new Error(backToRouting.reason ?? 'unable to return to routing');
-      this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: stepIndex + 1, activeStepId: plan.steps[stepIndex + 1]?.id ?? null, resultJson: JSON.stringify(state), revision: task.revision + 1 });
-      this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, nextStepId: plan.steps[stepIndex + 1]?.id ?? null, executionProfile: state.executionProfile, planner: state.planner?.strategy });
+      if (contextPack.state.retrieval) this.store.recordRetrieval(input.objective, contextPack.state.retrieval);
+      this.working.appendTrail('graph_context_pack_built', { taskId: input.id, primarySource: contextPack.state.executionProfile?.primarySource, retrievalHits: contextPack.state.retrieval?.hits.length ?? 0 });
+      const primarySourceFact = this.working.upsertFact('task:' + input.id + ':primary_source', contextPack.state.executionProfile?.primarySource ?? 'integration', 0.95, 'graph');
+      this.store.replaceWorkingFact(primarySourceFact);
+      const episode = this.episodic.add({ id: randomUUID(), taskId: input.id, category: 'decision', summary: 'built context pack for ' + input.id + ' using ' + (contextPack.state.executionProfile?.primarySource ?? 'integration'), signals: ['graph', 'retrieval', contextPack.state.executionProfile?.primarySource ?? 'integration'], metadata: { planId: plan.taskId, strategy: plan.planner?.strategy } });
+      this.store.upsertEpisodicItem(episode);
+
+      this.persistTransition(task.taskId, 'draft', 'planning', { steps: plan.steps.length, score: planValidation.score, executionProfile, semanticProvider: semanticIntent.nlu.provider });
+      this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: task.currentStepIndex, activeStepId: plan.steps[task.currentStepIndex]?.id ?? null, resultJson: task.resultJson ?? JSON.stringify({ ...contextPack.state, objective: plan.objective }), errorJson: null, revision: task.revision + 1 });
+      this.persistTransition(task.taskId, 'planning', 'routing', { stepIds: plan.steps.map((step) => step.id), executionProfile, playbookPaths: this.skillPlaybooks.map((playbook) => playbook.instructionPath), planner: plan.planner });
+
+      let state = this.loadOrCreateState(this.store.getTask(input.id)!, plan, executionProfile);
+
+      while (true) {
+        task = this.store.getTask(input.id)!;
+        if (task.currentStepIndex >= plan.steps.length) {
+          this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: plan.steps.at(-1)?.id ?? null, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
+          this.store.recordSnapshot(task.taskId, 'completed', state);
+          this.persistTransition(task.taskId, 'routing', 'completed', { totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
+          return { ok: true, taskId: input.id, status: 'completed', plan, state };
+        }
+
+        const stepIndex = task.currentStepIndex;
+        const step = plan.steps[stepIndex];
+        const routeTransition = transition(task.status, 'executing');
+        if (!routeTransition.ok) throw new Error(routeTransition.reason ?? 'unable to advance to executing');
+        this.store.updateTask(task.taskId, { status: 'executing', activeStepId: step.id, resultJson: JSON.stringify(state), revision: task.revision + 1 });
+        this.persistTransition(task.taskId, 'routing', 'executing', { stepId: step.id, stepIndex, playbook: getSkillPlaybook(step.skill as any), planner: state.planner?.strategy });
+
+        const outcome = await this.runStep(this.store.getTask(input.id)!, plan, state, stepIndex);
+        state = outcome.state;
+        task = this.store.getTask(input.id)!;
+        if (!outcome.ok) return { ok: false, taskId: input.id, status: 'rolled_back', plan, state, error: outcome.error };
+
+        if (stepIndex === plan.steps.length - 1) {
+          this.store.updateTask(task.taskId, { status: 'completed', currentStepIndex: plan.steps.length, activeStepId: step.id, resultJson: JSON.stringify(state), errorJson: null, revision: task.revision + 1 });
+          this.store.recordSnapshot(task.taskId, 'completed', state);
+          this.persistTransition(task.taskId, 'routing', 'completed', { stepId: step.id, totalSteps: plan.steps.length, executionProfile: state.executionProfile, planner: state.planner?.strategy });
+          return { ok: true, taskId: input.id, status: 'completed', plan, state };
+        }
+
+        const backToRouting = transition(task.status, 'routing');
+        if (!backToRouting.ok) throw new Error(backToRouting.reason ?? 'unable to return to routing');
+        this.store.updateTask(task.taskId, { status: 'routing', currentStepIndex: stepIndex + 1, activeStepId: plan.steps[stepIndex + 1]?.id ?? null, resultJson: JSON.stringify(state), revision: task.revision + 1 });
+        this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, nextStepId: plan.steps[stepIndex + 1]?.id ?? null, executionProfile: state.executionProfile, planner: state.planner?.strategy });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.persistTransition(task.taskId, 'draft', 'recovering', { phase: 'planning', error: message, recoveryEvent: (err as PlannerRecoverySignal | Error | undefined)?.['recoveryEvent'] ?? null });
+      this.store.updateTask(task.taskId, { status: 'failed', errorJson: JSON.stringify({ message }), revision: task.revision + 1 });
+      throw err;
     }
   }
 }

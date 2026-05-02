@@ -1,36 +1,85 @@
 import { randomUUID } from 'node:crypto';
-import type { PlanStep, PlannerIntentEdge, PlannerIntentGraph, PlannerIntentNode, PlannerRecoveryPolicy, PlannerRuntimeState, PlannerStrategy, PlannerToolAffordance, SkillDescriptor, TaskInput, TaskPlan, ExecutionProfile } from './types';
-import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, understandSearchIntent, understandSearchIntentWithNlu, type SemanticNluProvider } from './search/nlu';
+import type { ExecutionProfile, PlanStep, PlannerIntentEdge, PlannerIntentGraph, PlannerIntentNode, PlannerPlanMetadata, PlannerRecoveryPolicy, PlannerRuntimeState, PlannerStrategy, PlannerToolAffordance, SkillDescriptor, StepKind, TaskInput, TaskPlan } from './types';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, understandSearchIntentWithNlu, type SemanticNluProvider } from './search/nlu';
 import type { SearchIntent, SearchSource } from './search/types';
-import { clamp, normalize, stableHash, uniq, words } from './search/utils';
+import { clamp, normalize, stableHash, uniq } from './search/utils';
 
 export type PlannerResolveContext = Record<string, unknown> & {
   semanticIntent?: SearchIntent;
   skillCatalog?: SkillDescriptor[];
   semanticProvider?: SemanticNluProvider;
   plannerProvider?: SemanticNluProvider;
+  currentGraph?: Record<string, unknown> | null;
+  currentState?: Record<string, unknown> | null;
 };
 
-type PlannerActionPlan = {
-  stepKind: PlanStep['kind'];
-  title: string;
-  skill: string;
-  args: Record<string, unknown>;
-  dependsOn?: string[];
-  stateLabel: string;
-  support?: boolean;
+type PlannerSynthesisDraft = {
+  strategy: PlannerStrategy;
+  toolAffordances: PlannerToolAffordance[];
+  steps: Array<{
+    id?: string;
+    position?: number;
+    kind: StepKind;
+    title: string;
+    skill: string;
+    args: Record<string, unknown>;
+    dependsOn?: string[];
+    retryPolicy: { maxAttempts: number; retryableKinds: string[] };
+    compensation?: { skill: string; args: Record<string, unknown> };
+  }>;
+  recoveryPolicy: PlannerRecoveryPolicy;
+  planner: PlannerPlanMetadata;
+  warnings?: string[];
 };
 
-const DEFAULT_SKILL_CATALOG: SkillDescriptor[] = [
-  { name: 'browser', domain: 'web-navigation', capabilities: ['navigate', 'extract', 'verify'], version: '1.0.0' },
-  { name: 'integration', domain: 'external-integrations', capabilities: ['inspect', 'comment', 'update', 'append', 'post_message', 'deploy'], version: '1.0.0' },
-  { name: 'harness', domain: 'domain-primitives', capabilities: ['readthread', 'draftreply', 'conflict_detection', 'relationship_recall', 'filesystem_scan'], version: '1.0.0' },
-  { name: 'autopilot', domain: 'cognitive-orchestration', capabilities: ['planning', 'delegation', 'checkpointing', 'proactivity'], version: '1.0.0' },
-  { name: 'user-modeling', domain: 'user-context', capabilities: ['preference extraction', 'tone detection', 'profile shaping'], version: '1.0.0' },
-  { name: 'grounding', domain: 'evidence-management', capabilities: ['claim tracing', 'evidence pairing', 'assumption tagging'], version: '1.0.0' },
-  { name: 'signal-observation', domain: 'telemetry-analysis', capabilities: ['trend detection', 'anomaly detection', 'signal summarization'], version: '1.0.0' },
-  { name: 'computer-use', domain: 'desktop-interaction', capabilities: ['ui action planning', 'surface selection', 'vision snapshots', 'coordinate clicks'], version: '1.0.0' },
+export type PlannerRecoveryEvent = {
+  phase: 'intent' | 'plan';
+  provider: string;
+  objective: string;
+  reason: string;
+  at: number;
+};
+
+export class PlannerRecoverySignal extends Error {
+  readonly recoveryEvent: PlannerRecoveryEvent;
+
+  constructor(event: PlannerRecoveryEvent) {
+    super('planner-recovery:' + event.phase + ':' + event.provider + ':' + event.reason);
+    this.name = 'PlannerRecoverySignal';
+    this.recoveryEvent = event;
+  }
+}
+
+const STEP_KIND_VALUES: StepKind[] = [
+  'browser.navigate',
+  'browser.extract',
+  'integration.call',
+  'verify',
+  'autopilot.loop',
+  'user-modeling',
+  'grounding',
+  'signal-observation',
+  'computer-use.vision',
+  'harness.readthread',
+  'harness.draftreply',
+  'harness.conflict_detection',
+  'harness.relationship_recall',
+  'harness.filesystem_scan',
 ];
+const STEP_KIND_SET = new Set<StepKind>(STEP_KIND_VALUES);
+
+const PLANNER_SYNTHESIS_SCHEMA = {
+  type: 'object',
+  required: ['strategy', 'toolAffordances', 'steps', 'recoveryPolicy', 'planner'],
+  properties: {
+    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
+    toolAffordances: { type: 'array' },
+    steps: { type: 'array' },
+    recoveryPolicy: { type: 'object' },
+    planner: { type: 'object' },
+    warnings: { type: 'array' },
+  },
+} as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -45,371 +94,146 @@ function asSearchIntent(value: unknown): SearchIntent | null {
   return record as SearchIntent;
 }
 
-function plannerTokens(objective: string, context: PlannerResolveContext, intent: SearchIntent): string[] {
-  const contextText = Object.entries(context)
-    .filter(([key, value]) => key !== 'semanticIntent' && key !== 'skillCatalog' && key !== 'semanticProvider' && value !== undefined && value !== null)
-    .map(([key, value]) => `${key} ${typeof value === 'string' ? value : JSON.stringify(value)}`)
-    .join(' ');
-  return uniq([
-    ...words(objective),
-    ...words(intent.semanticQuery),
-    ...intent.entities.flatMap((entity) => words(entity)),
-    ...intent.topics.flatMap((topic) => words(topic)),
-    ...intent.decomposedQuestions.flatMap((question) => words(question)),
-    ...words(contextText),
-  ]);
-}
-
-function sourcePriorForSkill(intent: SearchIntent, skill: SkillDescriptor): number {
-  const bucket = sourceBucketForSkill(skill.name, intent);
-  const prior = intent.sourcePriors.find((entry) => entry.source === bucket || entry.source === skill.name) ?? null;
-  return prior ? clamp(prior.weight, 0, 1) : 0;
-}
-
-function frameAffinityForSkill(intent: SearchIntent, skill: SkillDescriptor): number {
-  const score = intent.semanticFrames.reduce((total, frame) => {
-    const frameText = `${frame.name} ${frame.description}`.toLowerCase();
-    const skillSignals = [skill.name, skill.domain, ...skill.capabilities].map((value) => value.toLowerCase());
-    const matchesSkill = skillSignals.some((signal) => frameText.includes(signal));
-    return total + (matchesSkill ? Math.max(0.05, frame.confidence * 0.12) : 0);
-  }, 0);
-  return clamp(score, 0, 0.25);
-}
-
 function normalizeSkills(skillCatalog?: SkillDescriptor[] | null): SkillDescriptor[] {
   const list = Array.isArray(skillCatalog) && skillCatalog.length > 0 ? skillCatalog : DEFAULT_SKILL_CATALOG;
   return uniq(list.map((skill) => skill.name)).map((name) => list.find((skill) => skill.name === name)!).filter(Boolean);
 }
 
-function sourceBucketForSkill(skill: string, intent?: SearchIntent, context: PlannerResolveContext = {}): string {
-  const lowerSkill = skill.toLowerCase();
-  if (lowerSkill === 'browser' || lowerSkill === 'computer-use') return 'browser';
-  if (lowerSkill === 'integration') return 'integration';
-  if (lowerSkill === 'autopilot') return 'integration';
-  if (lowerSkill === 'user-modeling' || lowerSkill === 'grounding' || lowerSkill === 'signal-observation') return 'memory';
-  if (lowerSkill === 'harness') {
-    if (typeof context.provider === 'string') return String(context.provider);
-    if (intent?.sourceHints.includes('email')) return 'email';
-    if (intent?.sourceHints.includes('calendar')) return 'calendar';
-    if (intent?.sourceHints.includes('filesystem')) return 'filesystem';
-    if (intent?.sourceHints.includes('memory')) return 'memory';
-    return 'integration';
+function normalizeStepKind(kind: unknown): StepKind {
+  if (typeof kind !== 'string' || !STEP_KIND_SET.has(kind as StepKind)) throw new Error('invalid-step-kind:' + String(kind));
+  return kind as StepKind;
+}
+
+function normalizeAffordance(value: unknown, provider: string): PlannerToolAffordance {
+  if (!isRecord(value) || typeof value.skill !== 'string' || typeof value.domain !== 'string' || !Array.isArray(value.capabilities) || typeof value.score !== 'number' || !Array.isArray(value.reasons) || typeof value.selectedKind !== 'string' || !Array.isArray(value.availableKinds)) {
+    throw new Error('invalid-planner-affordance:' + provider);
   }
+  const selectedKind = normalizeStepKind(value.selectedKind);
+  const availableKinds = value.availableKinds.map(normalizeStepKind);
+  return {
+    skill: value.skill,
+    domain: value.domain,
+    capabilities: value.capabilities.map((entry) => String(entry)),
+    score: clamp(value.score, 0, 1),
+    reasons: value.reasons.map((entry) => String(entry)).filter((entry) => entry.length > 0),
+    selectedKind,
+    availableKinds,
+  };
+}
+
+function normalizeRecoveryPolicy(value: unknown, provider: string): PlannerRecoveryPolicy {
+  if (!isRecord(value) || typeof value.mode !== 'string' || typeof value.maxReplans !== 'number' || typeof value.maxAttemptsPerStep !== 'number' || !Array.isArray(value.blockedKinds) || !Array.isArray(value.fallbackSkills) || !Array.isArray(value.recoveryNotes)) {
+    throw new Error('invalid-planner-recovery-policy:' + provider);
+  }
+  return {
+    mode: value.mode as PlannerRecoveryPolicy['mode'],
+    maxReplans: value.maxReplans,
+    maxAttemptsPerStep: value.maxAttemptsPerStep,
+    blockedKinds: value.blockedKinds.map(normalizeStepKind),
+    fallbackSkills: value.fallbackSkills.map((entry) => String(entry)).filter((entry) => entry.length > 0),
+    recoveryNotes: value.recoveryNotes.map((entry) => String(entry)).filter((entry) => entry.length > 0),
+  };
+}
+
+function normalizePlannerMetadata(value: unknown, provider: string, intent: SearchIntent): PlannerPlanMetadata {
+  if (!isRecord(value)) throw new Error('invalid-planner-metadata:' + provider);
+  if (typeof value.provider !== 'string' || typeof value.strategy !== 'string' || typeof value.confidence !== 'number' || typeof value.fallbackUsed !== 'boolean' || !Array.isArray(value.warnings) || typeof value.semanticQuery !== 'string' || typeof value.decompositionCount !== 'number') {
+    throw new Error('invalid-planner-metadata:' + provider);
+  }
+  return {
+    provider: value.provider,
+    fallbackUsed: value.fallbackUsed,
+    strategy: value.strategy as PlannerStrategy,
+    confidence: clamp(value.confidence, 0, 1),
+    warnings: value.warnings.map((entry) => String(entry)).filter((entry) => entry.length > 0),
+    semanticQuery: value.semanticQuery,
+    decompositionCount: value.decompositionCount,
+  };
+}
+
+function normalizeStep(value: unknown, index: number, provider: string, maxAttempts: number): PlanStep {
+  if (!isRecord(value) || typeof value.kind !== 'string' || typeof value.title !== 'string' || typeof value.skill !== 'string' || !isRecord(value.args)) {
+    throw new Error('invalid-planner-step:' + provider);
+  }
+  const retryPolicy = isRecord(value.retryPolicy) && typeof value.retryPolicy.maxAttempts === 'number' && Array.isArray(value.retryPolicy.retryableKinds)
+    ? { maxAttempts: value.retryPolicy.maxAttempts, retryableKinds: value.retryPolicy.retryableKinds.map((entry) => String(entry)).filter((entry) => entry.length > 0) }
+    : null;
+  if (!retryPolicy) throw new Error('invalid-planner-step:' + provider);
+  return {
+    id: typeof value.id === 'string' && value.id.length > 0 ? value.id : randomUUID(),
+    position: typeof value.position === 'number' ? value.position : index,
+    kind: normalizeStepKind(value.kind),
+    title: value.title,
+    skill: value.skill,
+    args: value.args,
+    dependsOn: Array.isArray(value.dependsOn) ? value.dependsOn.map((entry) => String(entry)).filter((entry) => entry.length > 0) : undefined,
+    retryPolicy: {
+      maxAttempts: Math.max(1, Math.min(maxAttempts, retryPolicy.maxAttempts)),
+      retryableKinds: retryPolicy.retryableKinds,
+    },
+    compensation: isRecord(value.compensation) && typeof value.compensation.skill === 'string' && isRecord(value.compensation.args)
+      ? { skill: value.compensation.skill, args: value.compensation.args }
+      : undefined,
+  };
+}
+
+function sourceBucketForSkill(skill: string, intent?: SearchIntent, context: PlannerResolveContext = {}): string {
+  const lower = skill.toLowerCase();
+  if (lower === 'browser' || lower === 'computer-use') return 'browser';
+  if (lower === 'integration' || lower === 'autopilot') return 'integration';
+  if (lower === 'user-modeling' || lower === 'grounding' || lower === 'signal-observation' || lower === 'harness') return 'memory';
+  if (typeof context.provider === 'string') return String(context.provider);
+  if (intent?.sourceHints.includes('email')) return 'email';
+  if (intent?.sourceHints.includes('calendar')) return 'calendar';
+  if (intent?.sourceHints.includes('filesystem')) return 'filesystem';
   return 'integration';
 }
 
-function scoreSkill(skill: SkillDescriptor, intent: SearchIntent, context: PlannerResolveContext, tokens: string[]): PlannerToolAffordance {
-  const skillTokens = words([skill.name, skill.domain, ...skill.capabilities].join(' '));
-  const base = 0.15 + overlap(tokens, skillTokens) * 0.5;
-  const sourceHint = intent.sourceHints.some((source) => sourceBucketForSkill(skill.name, intent, context) === source || (source === 'realtime-web' && sourceBucketForSkill(skill.name, intent, context) === 'browser') || (source === 'web' && sourceBucketForSkill(skill.name, intent, context) === 'browser')) ? 0.18 : 0;
-  const focusBoost = intent.focus === 'trust' && (skill.name === 'grounding' || skill.name === 'harness') ? 0.16
-    : intent.focus === 'multi-hop' && (skill.name === 'browser' || skill.name === 'integration') ? 0.16
-    : intent.focus === 'diagnostic' && skill.name === 'signal-observation' ? 0.18
-    : intent.focus === 'semantic' && skill.name === 'user-modeling' ? 0.1
-    : intent.focus === 'exploratory' && skill.name === 'browser' ? 0.12
-    : 0;
-  const freshnessBoost = intent.freshness === 'live' && skill.name === 'browser' ? 0.15 : intent.freshness === 'recent' && skill.name === 'signal-observation' ? 0.08 : 0;
-  const contextBoost = typeof context.url === 'string' && skill.name === 'browser' ? 0.2
-    : Array.isArray(context.messages) && skill.name === 'harness' ? 0.18
-    : Array.isArray(context.events) && skill.name === 'harness' ? 0.18
-    : Array.isArray(context.relationships) && skill.name === 'harness' ? 0.14
-    : Array.isArray(context.files) && skill.name === 'harness' ? 0.14
-    : typeof context.provider === 'string' && skill.name === 'integration' ? 0.22
-    : typeof context.screenshot === 'string' && skill.name === 'computer-use' ? 0.16
-    : typeof context.domSnapshot !== 'undefined' && skill.name === 'computer-use' ? 0.16
-    : 0;
-  const confidenceBoost = intent.confidence < 0.7 ? 0.08 : 0;
-  const score = clamp(base + sourceHint + focusBoost + freshnessBoost + contextBoost + confidenceBoost, 0, 1);
-  const selectedKind = selectedKindForSkill(skill.name, intent, context);
-  return {
-    skill: skill.name,
-    domain: skill.domain,
-    capabilities: [...skill.capabilities],
-    score,
-    reasons: [
-      `overlap=${overlap(tokens, skillTokens).toFixed(2)}`,
-      `source=${sourceBucketForSkill(skill.name, intent, context)}`,
-      `focus=${intent.focus}`,
-      `freshness=${intent.freshness}`,
-    ],
-    selectedKind,
-    availableKinds: availableKindsForSkill(skill.name, intent, context),
-  };
-}
-
-function availableKindsForSkill(skill: string, intent: SearchIntent, context: PlannerResolveContext): PlanStep['kind'][] {
-  switch (skill) {
-    case 'browser':
-      return typeof context.url === 'string' || intent.sourceHints.includes('web') || intent.sourceHints.includes('realtime-web')
-        ? ['browser.navigate', 'browser.extract']
-        : ['verify'];
-    case 'integration':
-      return ['integration.call'];
-    case 'harness':
-      if (Array.isArray(context.messages) || typeof context.threadId === 'string' || typeof context.threadSubject === 'string') return ['harness.readthread', 'harness.draftreply'];
-      if (Array.isArray(context.events) || typeof context.timezone === 'string' || typeof context.availability === 'object') return ['harness.conflict_detection'];
-      if (Array.isArray(context.relationships)) return ['harness.relationship_recall'];
-      if (Array.isArray(context.files) || typeof context.basePath === 'string') return ['harness.filesystem_scan'];
-      return ['harness.readthread'];
-    case 'autopilot':
-      return ['autopilot.loop'];
-    case 'user-modeling':
-      return ['user-modeling'];
-    case 'grounding':
-      return ['grounding'];
-    case 'signal-observation':
-      return ['signal-observation'];
-    case 'computer-use':
-      return ['computer-use.vision'];
-    default:
-      return ['verify'];
-  }
-}
-
-function selectedKindForSkill(skill: string, intent: SearchIntent, context: PlannerResolveContext): PlanStep['kind'] {
-  return availableKindsForSkill(skill, intent, context)[0] ?? 'verify';
-}
-
-function chooseStrategy(intent: SearchIntent, affordances: PlannerToolAffordance[]): PlannerStrategy {
-  if (intent.focus === 'trust' || intent.trustMode === 'official-first' || affordances.some((affordance) => affordance.skill === 'grounding' && affordance.score > 0.6)) return 'trust-first';
-  if (intent.focus === 'multi-hop' || intent.hopBudget > 2) return 'multi-hop';
-  if (intent.freshness === 'live' || affordances.some((affordance) => affordance.skill === 'browser' && affordance.score > 0.5)) return 'freshness-first';
-  if (intent.focus === 'exploratory' || intent.focus === 'semantic') return 'semantic-first';
-  return 'blend';
-}
-
-function deriveQuestions(intent: SearchIntent, context: PlannerResolveContext): string[] {
-  const seedQuestions = [...intent.decomposedQuestions];
-  if (seedQuestions.length === 0) {
-    seedQuestions.push(intent.semanticQuery || intent.objective);
-  }
-  if (Array.isArray(context.questions)) {
-    seedQuestions.push(...context.questions.map(String).filter(Boolean));
-  }
-  if (intent.semanticFrames.length > 0) {
-    for (const frame of intent.semanticFrames.slice(0, 3)) {
-      const entity = frame.slots.entities?.[0] ?? intent.entities[0] ?? intent.semanticQuery;
-      seedQuestions.push(`${frame.name}: resolve ${entity}`);
-    }
-  }
-  return uniq(seedQuestions).slice(0, Math.max(2, Math.min(6, intent.hopBudget + 1)));
-}
-
-function buildRecoveryPolicy(intent: SearchIntent, affordances: PlannerToolAffordance[], strategy: PlannerStrategy): PlannerRecoveryPolicy {
-  const fallbackSkills = affordances
-    .slice()
-    .sort((left, right) => right.score - left.score)
-    .slice(0, 4)
-    .map((affordance) => affordance.skill);
-  const mode: PlannerRecoveryPolicy['mode'] = intent.confidence < 0.58 ? 'replan' : intent.ambiguities.length > 0 ? 'retry' : strategy === 'multi-hop' ? 'compensate' : 'retry';
-  const maxAttemptsPerStep = strategy === 'multi-hop' ? 3 : strategy === 'trust-first' ? 2 : 2;
-  const maxReplans = intent.confidence < 0.7 ? 2 : 1;
-  return {
-    mode,
-    maxReplans,
-    maxAttemptsPerStep,
-    blockedKinds: affordances.filter((affordance) => affordance.score < 0.2).map((affordance) => affordance.selectedKind),
-    fallbackSkills: fallbackSkills.length > 0 ? fallbackSkills : ['verify'],
-    recoveryNotes: uniq([
-      ...intent.ambiguities.map((ambiguity) => ambiguity.resolutionHint),
-      ...(intent.nlu.warnings ?? []),
-      `strategy=${strategy}`,
-      `hopBudget=${intent.hopBudget}`,
-    ]),
-  };
-}
-
-function hostnameOrFallback(url: string): string {
-  try { return new URL(url).hostname || 'target page'; } catch { return 'target page'; }
-}
-
-function buildBrowserSequence(input: TaskInput, intent: SearchIntent, affordance: PlannerToolAffordance, context: PlannerResolveContext, index: number): PlannerActionPlan[] {
-  const url = typeof context.url === 'string' ? context.url : typeof context.targetUrl === 'string' ? String(context.targetUrl) : null;
-  if (!url) return [{ stepKind: 'verify', title: intent.semanticQuery || input.objective, skill: affordance.skill, args: { objective: input.objective, context, semanticIntent: intent, affordance }, stateLabel: 'browser-checkpoint' }];
-  return [
-    {
-      stepKind: 'browser.navigate',
-      title: `open ${hostnameOrFallback(url)}`,
-      skill: affordance.skill,
-      args: { objective: input.objective, context, url, semanticIntent: intent, affordance, mode: 'navigate' },
-      stateLabel: `browser-navigate-${index}`,
-    },
-    {
-      stepKind: 'browser.extract',
-      title: `extract evidence from ${hostnameOrFallback(url)}`,
-      skill: affordance.skill,
-      args: { objective: input.objective, context, url, selector: 'body', semanticIntent: intent, affordance, mode: 'extract' },
-      stateLabel: `browser-extract-${index}`,
-    },
-  ];
-}
-
-function buildHarnessSequence(input: TaskInput, intent: SearchIntent, affordance: PlannerToolAffordance, context: PlannerResolveContext): PlannerActionPlan[] {
-  if (Array.isArray(context.messages) || typeof context.threadId === 'string' || typeof context.threadSubject === 'string') {
-    const readArgs = { objective: input.objective, context, threadId: context.threadId ?? null, messages: context.messages ?? [], relationshipTerms: context.relationshipTerms ?? [], semanticIntent: intent, affordance, role: 'read-thread' };
-    const draftArgs = { objective: input.objective, context, threadSubject: context.threadSubject ?? null, threadSummary: context.threadSummary ?? null, tone: context.tone ?? 'concise professional', intent: context.intent ?? intent.semanticQuery, semanticIntent: intent, affordance, role: 'draft-reply' };
-    return [
-      { stepKind: 'harness.readthread', title: 'read the thread through the harness', skill: affordance.skill, args: readArgs, stateLabel: 'thread-read' },
-      { stepKind: 'harness.draftreply', title: 'draft the reply through the harness', skill: affordance.skill, args: draftArgs, dependsOn: ['read-thread'], stateLabel: 'thread-draft' },
-    ];
-  }
-  if (Array.isArray(context.events) || typeof context.timezone === 'string' || typeof context.availability === 'object') {
-    return [{ stepKind: 'harness.conflict_detection', title: 'detect calendar conflicts', skill: affordance.skill, args: { objective: input.objective, context, events: context.events ?? [], timezone: context.timezone ?? 'UTC', semanticIntent: intent, affordance }, stateLabel: 'calendar-conflicts' }];
-  }
-  if (Array.isArray(context.relationships)) {
-    return [{ stepKind: 'harness.relationship_recall', title: 'recall the relationship context', skill: affordance.skill, args: { objective: input.objective, context, query: input.objective, relationships: context.relationships ?? [], semanticIntent: intent, affordance }, stateLabel: 'relationship-recall' }];
-  }
-  if (Array.isArray(context.files) || typeof context.basePath === 'string') {
-    return [{ stepKind: 'harness.filesystem_scan', title: 'scan the workspace with the harness', skill: affordance.skill, args: { objective: input.objective, context, basePath: context.basePath ?? '.', files: context.files ?? [], semanticIntent: intent, affordance }, stateLabel: 'filesystem-scan' }];
-  }
-  return [{ stepKind: 'harness.readthread', title: intent.semanticQuery || input.objective, skill: affordance.skill, args: { objective: input.objective, context, semanticIntent: intent, affordance }, stateLabel: 'harness-fallback' }];
-}
-
-function buildIntegrationSequence(input: TaskInput, intent: SearchIntent, affordance: PlannerToolAffordance, context: PlannerResolveContext): PlannerActionPlan[] {
-  const provider = typeof context.provider === 'string' ? context.provider : intent.sourceHints.find((source) => source !== 'web' && source !== 'realtime-web') ?? 'integration';
-  const action = typeof context.action === 'string' ? context.action : typeof context.intentAction === 'string' ? String(context.intentAction) : 'inspect';
-  return [{ stepKind: 'integration.call', title: `${provider} ${action}`, skill: affordance.skill, args: { objective: input.objective, context, provider, action, payload: { ...context, objective: input.objective, semanticQuery: intent.semanticQuery }, semanticIntent: intent, affordance }, stateLabel: 'integration-call' }];
-}
-
-function buildSkillSequence(input: TaskInput, intent: SearchIntent, affordance: PlannerToolAffordance, context: PlannerResolveContext, index: number): PlannerActionPlan[] {
-  switch (affordance.skill) {
-    case 'browser':
-      return buildBrowserSequence(input, intent, affordance, context, index);
-    case 'harness':
-      return buildHarnessSequence(input, intent, affordance, context);
-    case 'integration':
-      return buildIntegrationSequence(input, intent, affordance, context);
-    case 'autopilot':
-      return [{ stepKind: 'autopilot.loop', title: 'run the autopilot loop', skill: affordance.skill, args: { objective: input.objective, context, mode: 'proactivity', desiredCadence: context.desiredCadence ?? 'daily', harnessState: context.harnessState ?? {}, semanticIntent: intent, affordance }, stateLabel: 'autopilot-loop' }];
-    case 'user-modeling':
-      return [{ stepKind: 'user-modeling', title: 'build a compact user model', skill: affordance.skill, args: { objective: input.objective, context, signals: ['preference', 'tone', 'profile', 'style'], semanticIntent: intent, affordance }, stateLabel: 'user-model' }];
-    case 'grounding':
-      return [{ stepKind: 'grounding', title: 'ground the claims in evidence', skill: affordance.skill, args: { objective: input.objective, context, claims: context.claims ?? [], evidence: context.evidence ?? [], semanticIntent: intent, affordance }, stateLabel: 'grounding' }];
-    case 'signal-observation':
-      return [{ stepKind: 'signal-observation', title: 'observe the relevant signals', skill: affordance.skill, args: { objective: input.objective, context, signals: context.signals ?? ['trend', 'signal', 'telemetry'], window: context.window ?? 'latest', semanticIntent: intent, affordance }, stateLabel: 'signal-observation' }];
-    case 'computer-use':
-      return [{ stepKind: 'computer-use.vision', title: 'prepare a vision-backed computer-use flow', skill: affordance.skill, args: { objective: input.objective, context, screenshot: context.screenshot ?? null, domSnapshot: context.domSnapshot ?? null, actions: context.actions ?? [], surface: context.surface ?? 'desktop', semanticIntent: intent, affordance }, stateLabel: 'computer-use' }];
-    default:
-      return [{ stepKind: affordance.selectedKind, title: intent.semanticQuery || input.objective, skill: affordance.skill, args: { objective: input.objective, context, semanticIntent: intent, affordance }, stateLabel: `skill-${affordance.skill}` }];
-  }
-}
-
-function buildIntentGraph(input: TaskInput, intent: SearchIntent, affordances: PlannerToolAffordance[], strategy: PlannerStrategy, context: PlannerResolveContext, steps: PlanStep[], actionPlans: PlannerActionPlan[], recoveryPolicy: PlannerRecoveryPolicy): PlannerIntentGraph {
-  const goalId = stableHash(`goal:${input.id}:${intent.semanticQuery}`);
+function buildIntentGraph(input: TaskInput, intent: SearchIntent, affordances: PlannerToolAffordance[], strategy: PlannerStrategy, context: PlannerResolveContext, steps: PlanStep[], recoveryPolicy: PlannerRecoveryPolicy): PlannerIntentGraph {
+  const goalId = stableHash('goal:' + input.id + ':' + intent.semanticQuery);
+  const stepOrder = steps.map((step) => step.id);
   const nodes: PlannerIntentNode[] = [
-    {
-      id: goalId,
-      kind: 'goal',
-      label: 'goal',
-      summary: input.objective,
-      status: 'active',
-      confidence: intent.confidence,
-      metadata: { semanticQuery: intent.semanticQuery, strategy },
-    },
+    { id: goalId, kind: 'goal', label: 'goal', summary: input.objective, status: 'active', confidence: intent.confidence, metadata: { semanticQuery: intent.semanticQuery, strategy } },
   ];
   const edges: PlannerIntentEdge[] = [];
   const stateAnchorByStepId: Record<string, string> = {};
-  const stepOrder = steps.map((step) => step.id);
   const frontier: string[] = [];
+  const questionSeeds = uniq([...(intent.decomposedQuestions ?? []), intent.semanticQuery || input.objective]).slice(0, Math.max(2, Math.min(6, intent.hopBudget + 1)));
 
-  const questionSeeds = deriveQuestions(intent, context);
   for (const [index, question] of questionSeeds.entries()) {
-    const questionId = stableHash(`question:${input.id}:${index}:${question}`);
-    nodes.push({
-      id: questionId,
-      kind: 'subgoal',
-      label: `subgoal-${index + 1}`,
-      summary: question,
-      status: index === 0 ? 'active' : 'pending',
-      confidence: clamp(intent.confidence + 0.05 - index * 0.02),
-      dependsOn: [goalId],
-      metadata: { question, index, semanticQuery: intent.semanticQuery },
-    });
+    const questionId = stableHash('question:' + input.id + ':' + index + ':' + question);
+    nodes.push({ id: questionId, kind: 'subgoal', label: 'subgoal-' + (index + 1), summary: question, status: index === 0 ? 'active' : 'pending', confidence: clamp(intent.confidence + 0.05 - index * 0.02), dependsOn: [goalId], metadata: { question, index, semanticQuery: intent.semanticQuery } });
     edges.push({ from: goalId, to: questionId, relation: 'decomposes-into', weight: clamp(0.72 - index * 0.08) });
   }
 
   for (const [index, affordance] of affordances.slice(0, Math.max(2, steps.length)).entries()) {
-    nodes.push({
-      id: `tool:${affordance.skill}:${index}`,
-      kind: 'tool',
-      label: affordance.skill,
-      summary: affordance.reasons.join('; '),
-      status: 'pending',
-      confidence: affordance.score,
-      metadata: { skill: affordance.skill, selectedKind: affordance.selectedKind, capabilities: affordance.capabilities },
-    });
+    nodes.push({ id: 'tool:' + affordance.skill + ':' + index, kind: 'tool', label: affordance.skill, summary: affordance.reasons.join('; '), status: 'pending', confidence: affordance.score, metadata: { skill: affordance.skill, selectedKind: affordance.selectedKind, capabilities: affordance.capabilities } });
   }
 
-  for (const actionPlan of actionPlans) {
-    const step = steps.find((candidate) => candidate.title === actionPlan.title && candidate.skill === actionPlan.skill && candidate.kind === actionPlan.stepKind) ?? null;
-    if (!step) continue;
-    const stateNodeId = stableHash(`state:${step.id}:${actionPlan.stateLabel}`);
+  for (const step of steps) {
+    const stateNodeId = stableHash('state:' + step.id);
     stateAnchorByStepId[step.id] = stateNodeId;
-    nodes.push({
-      id: step.id,
-      kind: 'tool',
-      label: `${step.skill}:${step.kind}`,
-      summary: step.title,
-      status: 'pending',
-      stepId: step.id,
-      dependsOn: step.dependsOn ?? [],
-      confidence: 0.7,
-      metadata: { args: step.args, actionPlan },
-    });
-    nodes.push({
-      id: stateNodeId,
-      kind: 'state',
-      label: actionPlan.stateLabel,
-      summary: `checkpoint after ${step.title}`,
-      status: 'pending',
-      dependsOn: [step.id],
-      confidence: 0.62,
-      metadata: { afterStepId: step.id, stepTitle: step.title },
-    });
-    edges.push({ from: step.dependsOn?.[0] ?? goalId, to: step.id, relation: step.dependsOn?.length ? 'depends-on' : 'routes-to', weight: 0.82 });
+    nodes.push({ id: step.id, kind: 'tool', label: step.skill + ':' + step.kind, summary: step.title, status: 'pending', stepId: step.id, dependsOn: step.dependsOn ?? [], confidence: 0.7, metadata: { args: step.args } });
+    nodes.push({ id: stateNodeId, kind: 'state', label: 'checkpoint', summary: 'checkpoint after ' + step.title, status: 'pending', dependsOn: [step.id], confidence: 0.62, metadata: { afterStepId: step.id, stepTitle: step.title } });
+    if (step.dependsOn && step.dependsOn.length > 0) {
+      for (const dependency of step.dependsOn) edges.push({ from: dependency, to: step.id, relation: 'depends-on', weight: 0.82 });
+    } else {
+      edges.push({ from: goalId, to: step.id, relation: 'routes-to', weight: 0.82 });
+    }
     edges.push({ from: step.id, to: stateNodeId, relation: 'tracks-state', weight: 0.78 });
     frontier.push(step.id);
   }
 
-  if (intent.ambiguities.length > 0) {
-    for (const [index, ambiguity] of intent.ambiguities.entries()) {
-      const ambiguityId = stableHash(`ambiguity:${input.id}:${index}:${ambiguity.issue}`);
-      nodes.push({
-        id: ambiguityId,
-        kind: 'ambiguity',
-        label: ambiguity.issue,
-        summary: ambiguity.resolutionHint,
-        status: 'pending',
-        confidence: ambiguity.confidence,
-        dependsOn: [goalId],
-        metadata: { candidates: ambiguity.candidates },
-      });
-      edges.push({ from: goalId, to: ambiguityId, relation: 'blocks', weight: clamp(0.4 + ambiguity.confidence * 0.3) });
-    }
-  }
-
-  const recoveryNodeId = stableHash(`recovery:${input.id}:${strategy}`);
-  nodes.push({
-    id: recoveryNodeId,
-    kind: 'recovery',
-    label: 'recovery-policy',
-    summary: recoveryPolicy.recoveryNotes.join(' | '),
-    status: 'pending',
-    confidence: clamp(0.6 + intent.confidence * 0.2),
-    metadata: { policy: recoveryPolicy, strategy },
-  });
-  for (const stepId of stepOrder) {
-    edges.push({ from: stepId, to: recoveryNodeId, relation: 'recovers', weight: 0.3 });
-  }
-
-  const lastStep = stepOrder.at(-1);
-  if (lastStep) {
-    edges.push({ from: lastStep, to: recoveryNodeId, relation: 'confirms', weight: 0.45 });
-    frontier.push(lastStep);
+  const recoveryNodeId = stableHash('recovery:' + input.id + ':' + strategy);
+  nodes.push({ id: recoveryNodeId, kind: 'recovery', label: 'recovery-policy', summary: recoveryPolicy.recoveryNotes.join(' | '), status: 'pending', confidence: clamp(0.6 + intent.confidence * 0.2), metadata: { policy: recoveryPolicy, strategy } });
+  for (const stepId of stepOrder) edges.push({ from: stepId, to: recoveryNodeId, relation: 'recovers', weight: 0.3 });
+  if (stepOrder.length > 0) {
+    edges.push({ from: stepOrder.at(-1)!, to: recoveryNodeId, relation: 'confirms', weight: 0.45 });
+    frontier.push(stepOrder.at(-1)!);
   }
 
   return {
-    id: stableHash(`planner-graph:${input.id}:${intent.semanticQuery}:${strategy}`),
+    id: stableHash('planner-graph:' + input.id + ':' + intent.semanticQuery + ':' + strategy),
     objective: input.objective,
     normalizedObjective: normalize(input.objective),
     semanticQuery: intent.semanticQuery,
@@ -427,155 +251,84 @@ function buildIntentGraph(input: TaskInput, intent: SearchIntent, affordances: P
   };
 }
 
-function buildSupportStep(input: TaskInput, intent: SearchIntent, affordance: PlannerToolAffordance, context: PlannerResolveContext): PlannerActionPlan {
-  return {
-    stepKind: affordance.selectedKind,
-    title: `stabilize plan with ${affordance.skill}`,
-    skill: affordance.skill,
-    args: { objective: input.objective, context, semanticIntent: intent, affordance, mode: 'support' },
-    stateLabel: `support-${affordance.skill}`,
-    support: true,
-  };
-}
-
-function selectSupportAffordance(affordances: PlannerToolAffordance[], intent: SearchIntent, context: PlannerResolveContext): PlannerToolAffordance | null {
-  const candidates = affordances
-    .filter((affordance) => ['grounding', 'user-modeling', 'signal-observation', 'harness'].includes(affordance.skill))
-    .sort((left, right) => right.score - left.score);
-  if (candidates.length > 0 && (intent.confidence < 0.78 || intent.ambiguities.length > 0 || intent.focus === 'trust' || intent.focus === 'diagnostic')) return candidates[0];
-  if (typeof context.provider === 'string' || Array.isArray(context.messages) || Array.isArray(context.events) || Array.isArray(context.files)) {
-    return candidates[0] ?? null;
-  }
-  return null;
-}
-
-function shouldVerify(intent: SearchIntent, strategy: PlannerStrategy, affordances: PlannerToolAffordance[]): boolean {
-  return intent.focus === 'trust' || strategy === 'multi-hop' || strategy === 'freshness-first' || intent.hopBudget > 2 || affordances.some((affordance) => affordance.skill === 'grounding' && affordance.score > 0.45);
-}
-
-function buildVerificationAffordance(affordances: PlannerToolAffordance[], intent: SearchIntent): PlannerToolAffordance {
-  const sorted = affordances.slice().sort((left, right) => right.score - left.score);
-  const grounding = sorted.find((affordance) => affordance.skill === 'grounding') ?? sorted[0] ?? {
-    skill: 'verify',
-    domain: 'plan-validation',
-    capabilities: ['validation'],
-    score: 0.5,
-    reasons: ['verification fallback'],
-    selectedKind: 'verify',
-    availableKinds: ['verify'],
-  };
-  return { ...grounding, selectedKind: 'verify', reasons: [...grounding.reasons, `verify:${intent.focus}`] }; 
-}
-
-function selectedStepsFromPlans(actionPlans: PlannerActionPlan[], input: TaskInput, intent: SearchIntent, context: PlannerResolveContext): PlanStep[] {
-  const steps: PlanStep[] = [];
-  let dependencyChain: string[] | undefined;
-  for (const [index, actionPlan] of actionPlans.entries()) {
-    const stepId = randomUUID();
-    const step: PlanStep = {
-      id: stepId,
-      position: index,
-      kind: actionPlan.stepKind,
-      title: actionPlan.title,
-      skill: actionPlan.skill,
-      args: {
-        ...actionPlan.args,
-        objective: input.objective,
-        semanticIntent: intent,
-        context,
-      },
-      dependsOn: dependencyChain,
-      retryPolicy: { maxAttempts: ((context.recoveryPolicy as PlannerRecoveryPolicy | undefined)?.maxAttemptsPerStep ?? 2), retryableKinds: ['transient', 'temporary_unavailable', 'rate_limit'] },
-    };
-    steps.push(step);
-    dependencyChain = [step.id];
-  }
-  return steps;
-}
-
-function buildPlanFromIntent(input: TaskInput, intent: SearchIntent, context: PlannerResolveContext): TaskPlan {
+function buildPlannerDraft(input: TaskInput, intent: SearchIntent, context: PlannerResolveContext): PlannerSynthesisDraft {
+  const provider = context.plannerProvider ?? context.semanticProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   const skills = normalizeSkills(context.skillCatalog);
-  const affordances = skills.map((skill) => scoreSkill(skill, intent, context)).sort((left, right) => right.score - left.score);
-  const strategy = chooseStrategy(intent, affordances);
-  const recoveryPolicy = buildRecoveryPolicy(intent, affordances, strategy);
-  context.recoveryPolicy = recoveryPolicy;
-
-  const actionPlans: PlannerActionPlan[] = [];
-  const supportAffordance = selectSupportAffordance(affordances, intent, context);
-  if (supportAffordance) actionPlans.push(buildSupportStep(input, intent, supportAffordance, context));
-
-  const questions = deriveQuestions(intent, context);
-  const usedSkills = new Set<string>(actionPlans.map((plan) => plan.skill));
-  for (const [index, question] of questions.entries()) {
-    const preferred = affordances.find((affordance) => !usedSkills.has(affordance.skill) && affordance.availableKinds.length > 0) ?? affordances[0];
-    if (!preferred) continue;
-    const questionPlans = buildSkillSequence(input, intent, preferred, context, index);
-    for (const plan of questionPlans) {
-      if (plan.skill === 'browser' && !questionPlans.some((entry) => entry.stepKind === 'browser.extract')) {
-        plan.title = question;
-      }
-      actionPlans.push({ ...plan, title: plan.title || question });
-      usedSkills.add(plan.skill);
-    }
-  }
-
-  if (shouldVerify(intent, strategy, affordances) && affordances.length > 0) {
-    const verification = buildVerificationAffordance(affordances, intent);
-    actionPlans.push({ stepKind: 'verify', title: 'verify the plan and recovery posture', skill: verification.skill, args: { objective: input.objective, context, semanticIntent: intent, affordance: verification, mode: 'verification' }, stateLabel: 'verification' });
-  }
-
-  const steps = selectedStepsFromPlans(actionPlans, input, intent, context);
-  if (steps.length === 0) throw new Error('planner could not synthesize an LLM-backed plan');
-  for (const [index, step] of steps.entries()) step.position = index;
-  const graph = buildIntentGraph(input, intent, affordances, strategy, context, steps, actionPlans, recoveryPolicy);
-  return {
-    taskId: input.id,
-    objective: input.objective,
-    steps,
+  const promptContext = {
+    ...context,
     semanticIntent: intent,
-    intentGraph: graph,
-    planner: {
-      provider: intent.nlu.provider,
-      fallbackUsed: intent.nlu.fallbackUsed,
-      strategy,
-      confidence: intent.nlu.confidence,
-      warnings: uniq(intent.nlu.warnings ?? []),
-      semanticQuery: intent.semanticQuery,
-      decompositionCount: intent.decomposedQuestions.length,
-    },
+    skillCatalog: skills,
+    availableSkills: skills.map((skill) => ({ name: skill.name, domain: skill.domain, capabilities: skill.capabilities, version: skill.version })),
+    graphState: context.currentGraph ?? null,
+    runtimeState: context.currentState ?? null,
   };
+  const request = { objective: input.objective, context: promptContext, schema: PLANNER_SYNTHESIS_SCHEMA };
+  return provider.extract(request).then((raw) => {
+    if (!isRecord(raw)) throw new Error('invalid-planner-draft:' + provider.name);
+    const strategy = typeof raw.strategy === 'string' ? raw.strategy as PlannerStrategy : intent.focus === 'trust' ? 'trust-first' : 'blend';
+    const toolAffordances = Array.isArray(raw.toolAffordances) ? raw.toolAffordances.map((entry) => normalizeAffordance(entry, provider.name)) : null;
+    const recoveryPolicy = raw.recoveryPolicy ? normalizeRecoveryPolicy(raw.recoveryPolicy, provider.name) : null;
+    const planner = raw.planner ? normalizePlannerMetadata(raw.planner, provider.name, intent) : null;
+    if (!toolAffordances || !recoveryPolicy || !planner || !Array.isArray(raw.steps)) throw new Error('invalid-planner-draft:' + provider.name);
+    const steps = raw.steps.map((step, index) => normalizeStep(step, index, provider.name, recoveryPolicy.maxAttemptsPerStep));
+    return {
+      strategy,
+      toolAffordances,
+      steps,
+      recoveryPolicy,
+      planner,
+      warnings: Array.isArray(raw.warnings) ? raw.warnings.map((entry) => String(entry)).filter((entry) => entry.length > 0) : [],
+    };
+  }).catch((err) => {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new PlannerRecoverySignal({ phase: 'plan', provider: provider.name, objective: input.objective, reason, at: Date.now() });
+  });
 }
 
 export async function resolvePlannerIntent(objective: string, context: PlannerResolveContext = {}): Promise<SearchIntent> {
   const provider = context.plannerProvider ?? context.semanticProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   try {
-    return await understandSearchIntentWithNlu(objective, context, provider, false);
-  } catch {
-    try {
-      return await understandSearchIntentWithNlu(objective, context, DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, false);
-    } catch {
-      return understandSearchIntent(objective, context);
-    }
+    return await understandSearchIntentWithNlu(objective, context, provider, true);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new PlannerRecoverySignal({ phase: 'intent', provider: provider.name, objective, reason, at: Date.now() });
   }
 }
 
-export function buildPlan(input: TaskInput): TaskPlan {
+export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
   const context = (input.context ?? {}) as PlannerResolveContext;
-  const semanticIntent = asSearchIntent(context.semanticIntent) ?? understandSearchIntent(input.objective, context);
-  const enrichedContext: PlannerResolveContext = { ...context, semanticIntent, skillCatalog: normalizeSkills(context.skillCatalog) };
-  return buildPlanFromIntent(input, semanticIntent, enrichedContext);
+  const semanticIntent = asSearchIntent(context.semanticIntent) ?? await resolvePlannerIntent(input.objective, context);
+  const synthesized = await buildPlannerDraft(input, semanticIntent, { ...context, semanticIntent, skillCatalog: normalizeSkills(context.skillCatalog) });
+  const steps = synthesized.steps.map((step, index) => ({ ...step, position: index }));
+  const graph = buildIntentGraph(input, semanticIntent, synthesized.toolAffordances, synthesized.strategy, context, steps, synthesized.recoveryPolicy);
+  return {
+    taskId: input.id,
+    objective: input.objective,
+    steps,
+    semanticIntent,
+    intentGraph: graph,
+    planner: {
+      provider: synthesized.planner.provider,
+      fallbackUsed: false,
+      strategy: synthesized.planner.strategy,
+      confidence: synthesized.planner.confidence,
+      warnings: uniq([...(synthesized.warnings ?? []), ...(semanticIntent.nlu.warnings ?? [])]),
+      semanticQuery: synthesized.planner.semanticQuery,
+      decompositionCount: synthesized.planner.decompositionCount,
+    },
+  };
 }
 
 export function createPlannerRuntimeState(plan: TaskPlan): PlannerRuntimeState {
   return {
     strategy: plan.planner?.strategy ?? 'blend',
-    provider: plan.planner?.provider ?? plan.semanticIntent?.nlu.provider ?? 'semantic-fallback',
+    provider: plan.planner?.provider ?? plan.semanticIntent?.nlu.provider ?? 'llm-semantic-inference',
     fallbackUsed: plan.planner?.fallbackUsed ?? false,
     confidence: plan.planner?.confidence ?? plan.semanticIntent?.nlu.confidence ?? 0.5,
     currentNodeId: plan.steps[0]?.id ?? null,
     completedNodeIds: [],
     blockedNodeIds: [],
-    notes: uniq([...(plan.planner?.warnings ?? []), ...(plan.intentGraph?.warnings ?? []), `objective=${plan.objective}`]),
+    notes: uniq([...(plan.planner?.warnings ?? []), ...(plan.intentGraph?.warnings ?? []), 'objective=' + plan.objective]),
   };
 }
 
@@ -619,7 +372,7 @@ export function updatePlannerRuntimeState(state: PlannerRuntimeState | undefined
 export function notePlannerRecovery(state: PlannerRuntimeState | undefined, stepId: string, reason: string): PlannerRuntimeState {
   const next: PlannerRuntimeState = state ? JSON.parse(JSON.stringify(state)) as PlannerRuntimeState : {
     strategy: 'blend',
-    provider: 'semantic-fallback',
+    provider: 'llm-semantic-inference',
     fallbackUsed: true,
     confidence: 0.5,
     currentNodeId: stepId,
@@ -630,7 +383,7 @@ export function notePlannerRecovery(state: PlannerRuntimeState | undefined, step
   next.currentNodeId = stepId;
   if (!next.blockedNodeIds.includes(stepId)) next.blockedNodeIds.push(stepId);
   next.lastRecovery = { stepId, reason, at: Date.now() };
-  next.notes = uniq([...next.notes, `recovery:${reason}`]);
+  next.notes = uniq([...next.notes, 'recovery:' + reason]);
   return next;
 }
 
@@ -660,21 +413,17 @@ export function deriveExecutionProfile(plan: TaskPlan): ExecutionProfile {
     if (intent.focus === 'trust' || intent.focus === 'diagnostic') bump('memory', 1.5);
     if (intent.hopBudget > 2) bump('integration', 1.5);
   }
-  for (const affordance of plan.intentGraph?.toolAffordances ?? []) {
-    bump(sourceBucketForSkill(affordance.skill, intent), 2 + affordance.score * 2.5);
-  }
-  for (const step of plan.steps) {
-    bump(sourceBucketForSkill(step.skill, intent), 1.2);
-  }
+  for (const affordance of plan.intentGraph?.toolAffordances ?? []) bump(sourceBucketForSkill(affordance.skill, intent), 2 + affordance.score * 2.5);
+  for (const step of plan.steps) bump(sourceBucketForSkill(step.skill, intent), 1.2);
   const ordered = [...scores.entries()].sort((a, b) => b[1] - a[1]);
   const [primarySource = 'integration'] = ordered.map(([name]) => name);
   const secondarySources = ordered.map(([name]) => name).filter((name) => name !== primarySource && (scores.get(name) ?? 0) > 0);
   const parallelizable = plan.steps.length > 1 && primarySource !== 'calendar' && (intent?.hopBudget ?? 1) > 1;
   const rationale = [
-    `strategy=${plan.planner?.strategy ?? 'blend'}`,
-    `semantic=${intent?.semanticQuery ?? plan.objective}`,
-    ...(intent?.decomposedQuestions ?? []).slice(0, 3).map((question) => `question=${question}`),
-    ...ordered.filter(([, score]) => score > 0).slice(0, 4).map(([source, score]) => `${source}:${score.toFixed(2)}`),
+    'strategy=' + (plan.planner?.strategy ?? 'blend'),
+    'semantic=' + (intent?.semanticQuery ?? plan.objective),
+    ...(intent?.decomposedQuestions ?? []).slice(0, 3).map((question) => 'question=' + question),
+    ...ordered.filter(([, score]) => score > 0).slice(0, 4).map(([source, score]) => source + ':' + score.toFixed(2)),
   ];
   return {
     primarySource,
