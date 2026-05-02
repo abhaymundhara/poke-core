@@ -1,7 +1,7 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile, RuntimeComposition } from './types.ts';
-import { buildSourceRanking, scoreEvidenceTrust } from './trust.ts';
+import { buildSourceRanking, evaluateTrustGate, scoreEvidenceTrust } from './trust.ts';
 import { buildEvidenceGraph, buildQueries, deriveHopPlan } from './reasoning.ts';
 import { forecastNextSignals, persistForecastTrajectory } from './forecast.ts';
 import { chooseStrategy, fallbackStrategyChoose, DEFAULT_STATE_PATH, evaluatePolicy, SearchPolicyStore, createDefaultPolicyRewriteProvider, registerRuntimeCompositionMutator } from './policy.ts';
@@ -104,8 +104,10 @@ export class SearchSession {
     let finalStrategy = resolveRuntimeStrategy(intent, currentState);
     let previousSignature = '';
     let previousConfidence = 0;
+    let pass = 0;
+    const maxHops = Math.max(1, Math.min(6, intent.hopBudget));
 
-    for (let pass = 0; pass < 4; pass += 1) {
+    while (pass < maxHops) {
       const forecastSeed = { ...(this.options.behaviorSeed ?? context), pass, previousSignature, objective: workingIntent.semanticQuery };
       const forecasts = forecastNextSignals(workingIntent, currentState, forecastSeed);
       const policyDecision = evaluatePolicy(workingIntent, currentState, forecasts.map((signal) => signal.latentNeed.label));
@@ -115,34 +117,39 @@ export class SearchSession {
       const sourceRanking = buildSourceRanking(effectiveIntent, currentState.sourceReliability, currentState.rules, policyDecision);
       const trustNotes = buildTrustNotes(effectiveIntent, sourceRanking, currentState);
       const trustedResults = scoreEvidenceTrust(effectiveIntent, results, currentState.sourceReliability, policyDecision, currentState);
+      const trustGate = evaluateTrustGate(effectiveIntent, trustedResults, policyDecision, currentState);
       const evidenceGraph = buildEvidenceGraph(effectiveIntent, queries, trustedResults, strategy, currentState.sourceReliability, policyDecision, currentState);
       const hopPlan = deriveHopPlan(effectiveIntent, strategy, trustedResults);
-      const signature = stableHash(JSON.stringify({ objective: effectiveIntent.semanticQuery, queries, hopPlan, claims: evidenceGraph.claims.map((claim) => claim.id), propositions: evidenceGraph.propositions.map((proposition) => proposition.id), confidence: Number(evidenceGraph.confidence.toFixed(3)), forecasts: forecasts.slice(0, 3).map((signal) => signal.latentNeed.label + ':' + signal.topic) }));
+      const signature = stableHash(JSON.stringify({ objective: effectiveIntent.semanticQuery, queries, hopPlan, claims: evidenceGraph.claims.map((claim) => claim.id), propositions: evidenceGraph.propositions.map((proposition) => proposition.id), confidence: Number(evidenceGraph.confidence.toFixed(3)), forecasts: forecasts.slice(0, 3).map((signal) => signal.latentNeed.label + ':' + signal.topic), trustGate: trustGate.mode }));
       const stabilized = signature === previousSignature || (previousConfidence > 0 && Math.abs(evidenceGraph.confidence - previousConfidence) < 0.025 && evidenceGraph.claims.length > 0 && evidenceGraph.propositions.length > 0);
-      currentState = persistForecastTrajectory(currentState, { intent: effectiveIntent, forecasts, signature, pass, stabilized });
+      const gateAccept = trustGate.mode === 'accept';
+      currentState = persistForecastTrajectory(currentState, { intent: effectiveIntent, forecasts, signature, pass, stabilized: stabilized && gateAccept });
       this.state = currentState;
       this.store.save(this.state);
       finalTrustedResults = trustedResults;
       finalStrategy = strategy;
       finalEvidenceGraph = evidenceGraph;
-      finalPlan = { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, 'policy=' + (policyDecision.matchedRules.join('|') || 'none'), 'trajectory=' + signature, 'pass=' + String(pass)], predictedSignals: forecasts, evidenceGraph };
+      finalPlan = { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, 'policy=' + (policyDecision.matchedRules.join('|') || 'none'), 'trajectory=' + signature, 'pass=' + String(pass), 'trust-gate=' + trustGate.mode + ':' + (trustGate.reasons.join('|') || 'none')], predictedSignals: forecasts, evidenceGraph };
       previousSignature = signature;
       previousConfidence = evidenceGraph.confidence;
-      if (stabilized) break;
-      workingIntent = evidenceGraph.claims.length === 0
-        ? {
-            ...effectiveIntent,
-            focus: 'multi-hop',
-            hopBudget: Math.min(6, effectiveIntent.hopBudget + 1),
-            querySeeds: uniq([...effectiveIntent.querySeeds, ...forecasts.flatMap((signal) => signal.suggestedQueries), ...queries]).slice(0, 8),
-            evidenceTerms: uniq([...effectiveIntent.evidenceTerms, ...evidenceGraph.propositions.slice(0, 4).map((proposition) => proposition.text), ...evidenceGraph.claims.slice(0, 4).map((claim) => claim.text)]).slice(0, 16),
-          }
-        : {
-            ...effectiveIntent,
-            querySeeds: uniq([...effectiveIntent.querySeeds, ...forecasts.flatMap((signal) => signal.suggestedQueries), ...evidenceGraph.exploration.flatMap((step) => step.frontier)]).slice(0, 8),
-            evidenceTerms: uniq([...effectiveIntent.evidenceTerms, ...evidenceGraph.claims.slice(0, 4).map((claim) => claim.text), ...evidenceGraph.propositions.slice(0, 4).map((proposition) => proposition.text)]).slice(0, 16),
-            topics: uniq([...effectiveIntent.topics, ...evidenceGraph.entities.slice(0, 4).map((entity) => entity.label)]).slice(0, 12),
-          };
+      if (stabilized && gateAccept) break;
+      workingIntent = gateAccept
+        ? (evidenceGraph.claims.length === 0
+            ? {
+                ...effectiveIntent,
+                focus: 'multi-hop',
+                hopBudget: Math.min(6, effectiveIntent.hopBudget + 1),
+                querySeeds: uniq([...effectiveIntent.querySeeds, ...forecasts.flatMap((signal) => signal.suggestedQueries), ...queries]).slice(0, 8),
+                evidenceTerms: uniq([...effectiveIntent.evidenceTerms, ...evidenceGraph.propositions.slice(0, 4).map((proposition) => proposition.text), ...evidenceGraph.claims.slice(0, 4).map((claim) => claim.text)]).slice(0, 16),
+              }
+            : {
+                ...effectiveIntent,
+                querySeeds: uniq([...effectiveIntent.querySeeds, ...forecasts.flatMap((signal) => signal.suggestedQueries), ...evidenceGraph.exploration.flatMap((step) => step.frontier)]).slice(0, 8),
+                evidenceTerms: uniq([...effectiveIntent.evidenceTerms, ...evidenceGraph.claims.slice(0, 4).map((claim) => claim.text), ...evidenceGraph.propositions.slice(0, 4).map((proposition) => proposition.text)]).slice(0, 16),
+                topics: uniq([...effectiveIntent.topics, ...evidenceGraph.entities.slice(0, 4).map((entity) => entity.label)]).slice(0, 12),
+              })
+        : trustGate.replanIntent;
+      pass += 1;
     }
 
     if (!finalPlan || !finalEvidenceGraph) {
