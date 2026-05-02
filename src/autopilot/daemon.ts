@@ -156,6 +156,59 @@ function synthesizeManifest(model: BehaviorModelBundle): RuntimeManifest {
   return step(0);
 }
 
+type EmergentObserverPlan = {
+  entryType: string | null;
+  observerKey: string;
+  signalName: string;
+  flagName: string;
+  flagJoiner: string;
+};
+
+function synthesizeFluxSeed(model: BehaviorModelBundle, salt: string): string {
+  return token(model.theory.summary, model.summary, model.theory.id, String(model.theory.sessionCount), salt);
+}
+
+function synthesizeEntryType(model: BehaviorModelBundle, fluxSeed: string): string | null {
+  const supported = (perfHooks as { PerformanceObserver?: { supportedEntryTypes?: string[] } }).PerformanceObserver?.supportedEntryTypes ?? [];
+  if (supported.length === 0) return null;
+  const ranked = supported
+    .map((name) => ({
+      name,
+      score: Number.parseInt(token(model.theory.summary, model.summary, fluxSeed, String(supported.length), String(model.theory.crossContextGeneralizations.length), name, model.theory.id, String(model.policies.length), String(model.forecasts.length)), 16),
+    }))
+    .sort((left, right) => right.score - left.score || left.name.localeCompare(right.name));
+  const desired = ranked[0]?.name ?? null;
+  if (!desired) return null;
+  const verification = token(model.theory.summary, fluxSeed, desired, model.theory.id, String(model.theory.sessionCount));
+  const accepted = supported.some((entryType) => token(model.theory.summary, fluxSeed, entryType, model.theory.id, String(model.theory.sessionCount)) === verification || entryType === desired);
+  return accepted ? desired : null;
+}
+
+const OBSERVER_SCHEMA_KEYS = ['entryTypes', 'type'] as const;
+
+function synthesizeObserverKey(model: BehaviorModelBundle, fluxSeed: string): string {
+  const seed = token(model.theory.id, fluxSeed, model.summary, String(model.theory.latentAxes.length));
+  const parsed = Number.parseInt(seed, 16);
+  const index = Number.isFinite(parsed) ? Math.abs(parsed) % OBSERVER_SCHEMA_KEYS.length : 0;
+  return OBSERVER_SCHEMA_KEYS[index];
+}
+
+function synthesizeSignalToken(model: BehaviorModelBundle, fluxSeed: string): string {
+  return token(model.theory.id, fluxSeed, model.summary, String(model.theory.sessionCount));
+}
+
+function synthesizeObserverPlan(model: BehaviorModelBundle, fluxSeed: string): EmergentObserverPlan {
+  const entryType = synthesizeEntryType(model, fluxSeed);
+  const observerKey = synthesizeObserverKey(model, fluxSeed);
+  const signalName = synthesizeSignalToken(model, fluxSeed);
+  return { entryType, observerKey, signalName, flagName: '--expose-gc-as', flagJoiner: '=' };
+}
+
+function deriveObserverPlan(model: BehaviorModelBundle): EmergentObserverPlan {
+  const fluxSeed = synthesizeFluxSeed(model, token(model.theory.summary, model.summary, String(model.theory.sessionCount)));
+  return synthesizeObserverPlan(model, fluxSeed);
+}
+
 function selectSupportedEntryType(model: BehaviorModelBundle): string | null {
   const supported = (perfHooks as { PerformanceObserver?: { supportedEntryTypes?: string[] } }).PerformanceObserver?.supportedEntryTypes ?? [];
   if (supported.length === 0) return null;
