@@ -243,6 +243,7 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
   const frameCount = Number.parseInt(token(scope, theory.summary, localeHint, 'frames').slice(0, 1), 16) % 3 + 2;
   const frameSeeds = segmentSeeds(scope, 4, frameCount);
   return buildSeries(frameSeeds.length, (index) => {
+    const fragment = frameSeeds[index] ?? scope.slice(index * 4, index * 4 + 4);
     const frameSeed = token(scope, fragment, String(index));
     return {
       id: token(scope, frameSeed, String(index)),
