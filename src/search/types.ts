@@ -106,6 +106,15 @@ export type ReasoningArchitecture = {
   explanationStyle: 'compact' | 'balanced' | 'thorough';
   rewriteHistory: Array<{ at: number; source: string; change: string }>;
   guardrails: string[];
+  strategyLogic?: {
+    search: string;
+    trust: string;
+    conflict: string;
+    searchSources: string[];
+    trustSignals: string[];
+    conflictSignals: string[];
+  };
+  revisionLog?: Array<{ at: number; source: string; focus: 'search' | 'trust' | 'conflict' | 'strategy'; change: string }>;
 };
 
 export type SearchIntent = {
@@ -310,6 +319,8 @@ export type SearchOutcome = {
   hopsUsed?: number;
   resultCount?: number;
   relevantCount?: number;
+  resultUrls?: string[];
+  resultDomains?: string[];
   notes?: string[];
 };
 

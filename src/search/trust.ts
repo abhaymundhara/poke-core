@@ -1,8 +1,64 @@
-import type { PolicyDecision, SearchIntent, SearchPolicyRule, SearchPolicyState, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown } from './types.ts';
+import type { PolicyDecision, SearchIntent, SearchOutcome, SearchPolicyRule, SearchPolicyState, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown } from './types.ts';
 import { average, clamp, hostname, words } from './utils.ts';
 
 const OFFICIAL_DOMAINS = [/\.gov$/i, /\.edu$/i, /github\.com$/i, /docs\./i, /developer\./i, /openai\.com$/i];
 const LOW_QUALITY_DOMAINS = [/medium\.com$/i, /substack\.com$/i, /quora\.com$/i, /reddit\.com$/i];
+
+function officialDomain(domain: string): boolean {
+  return OFFICIAL_DOMAINS.some((pattern) => pattern.test(domain));
+}
+
+function lowQualityDomain(domain: string): boolean {
+  return LOW_QUALITY_DOMAINS.some((pattern) => pattern.test(domain));
+}
+
+function epistemicClassFor(source: SearchSource | string, domain: string): TrustedEvidence['reliability']['epistemicClass'] {
+  if (source === 'scholar' || /\.edu$/i.test(domain) || officialDomain(domain)) return 'expert';
+  if (source === 'github' || source === 'integration' || source === 'email' || source === 'calendar') return 'institutional';
+  if (source === 'web' || source === 'realtime-web') return 'community';
+  return 'unknown';
+}
+
+export function initialEpistemicTrustModel(): NonNullable<SearchPolicyState['epistemicModel']> {
+  return {
+    version: 1,
+    calibration: 0.68,
+    classPriors: { primary: 0.88, expert: 0.82, institutional: 0.76, community: 0.6, unknown: 0.5 },
+    sourceMemory: {},
+    domainMemory: {},
+  };
+}
+
+function ensureTrustEntry(bucket: Record<string, any>, key: string, epistemicClass: TrustedEvidence['reliability']['epistemicClass']) {
+  const entry = bucket[key] ?? (bucket[key] = { mean: 0.5, variance: 0.12, evidenceCount: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [], epistemicClass });
+  return entry;
+}
+
+export function updateEpistemicTrustModel(model: NonNullable<SearchPolicyState['epistemicModel']> | undefined, outcome: { source: SearchSource | string; resultDomains?: string[]; useful?: boolean; score: number; notes?: string[] }): NonNullable<SearchPolicyState['epistemicModel']> {
+  const next = model ?? initialEpistemicTrustModel();
+  const useful = outcome.useful ?? outcome.score >= 0.7;
+  const domains = (outcome.resultDomains ?? []).filter(Boolean);
+  const sourceEntry = ensureTrustEntry(next.sourceMemory, String(outcome.source), epistemicClassFor(outcome.source, ''));
+  sourceEntry.evidenceCount += 1;
+  sourceEntry.successes += useful ? 1 : 0;
+  sourceEntry.failures += useful ? 0 : 1;
+  sourceEntry.lastObservedAt = Date.now();
+  sourceEntry.mean = clamp(sourceEntry.mean * 0.75 + (useful ? 0.7 : 0.3) * 0.25 + outcome.score * 0.1);
+  sourceEntry.variance = clamp(sourceEntry.variance * 0.8 + Math.abs(sourceEntry.mean - outcome.score) * 0.08, 0.02, 0.4);
+  if (outcome.notes?.length) sourceEntry.notes.push(...outcome.notes);
+  for (const domain of domains) {
+    const entry = ensureTrustEntry(next.domainMemory, domain, epistemicClassFor(outcome.source, domain));
+    entry.evidenceCount += 1;
+    entry.successes += useful ? 1 : 0;
+    entry.failures += useful ? 0 : 1;
+    entry.lastObservedAt = Date.now();
+    entry.mean = clamp(entry.mean * 0.7 + (useful ? 0.72 : 0.28) * 0.3 + outcome.score * 0.08);
+    entry.variance = clamp(entry.variance * 0.82 + Math.abs(entry.mean - outcome.score) * 0.08, 0.02, 0.42);
+    if (outcome.notes?.length) entry.notes.push(...outcome.notes);
+  }
+  next.calibration = clamp(next.calibration * 0.85 + (useful ? 0.66 : 0.34) * 0.15 + outcome.score * 0.08);
+  return next;
+}
 
 function daysOld(publishedAt?: string | null): number | null {
   if (!publishedAt) return null;
@@ -122,6 +178,7 @@ export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[]
     return { ...result, trustScore, trustBreakdown: breakdown, trust: trustScore, reliability: reliabilityShape, provenance: { domain, source: result.source, official, primary } };
   }).filter((result) => result.trustScore >= (decision?.minTrustScore ?? 0)).sort((left, right) => right.trustScore - left.trustScore);
 }
+
 
 function ruleBoostFor(source: SearchSource | string, intent: SearchIntent, rules: SearchPolicyRule[], decision?: PolicyDecision): number {
   if (decision) return decision.sourceBoosts[source] ?? 0;
