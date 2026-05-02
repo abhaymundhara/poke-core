@@ -15,14 +15,11 @@ function scoreRatio(condition: boolean, weight: number): number { return conditi
 function assertNear(actual: string, expected: string): boolean { return actual === expected; }
 
 function runComputerUseCase(): RaidingAiCaseResult {
-  const frames = RAIDINGAI_FIXTURES.computerUse.frames as VisionFrame[];
-  const result = runVisionLoop(frames, { keys: RAIDINGAI_FIXTURES.computerUse.keys as string[], fallbackSelectors: RAIDINGAI_FIXTURES.computerUse.fallbackSelectors as string[] });
+  const frames = RAIDINGAI_FIXTURES.computerUse.frames as Iterable<VisionFrame> | (() => Iterable<VisionFrame>);
+  const result = runVisionLoop(frames, { keys: RAIDINGAI_FIXTURES.computerUse.keys as Iterable<string> | (() => Iterable<string>), fallbackSelectors: RAIDINGAI_FIXTURES.computerUse.fallbackSelectors as Iterable<string> | (() => Iterable<string>) });
   const recovered = result.driftRecoveries >= 1;
-  const expectedSelector = RAIDINGAI_FIXTURES.computerUse.fallbackSelectors[0] ?? null;
-  const focusRecovered = expectedSelector != null && result.session.focus.selector === expectedSelector;
-  const windowStable = result.session.windows.length === 1 && result.session.tabs.length === 1;
-  const score = [scoreRatio(result.perceptions.length === 3, 0.25), scoreRatio(recovered, 0.35), scoreRatio(focusRecovered, 0.2), scoreRatio(windowStable, 0.2)].reduce((sum, value) => sum + value, 0);
-  return { name: 'computer-use', score, passed: score >= 0.9, notes: result.perceptions.map((perception) => `${perception.frameId}:${perception.driftDetected}`), metrics: { perceptions: result.perceptions.length, driftRecoveries: result.driftRecoveries, finalSelector: result.session.focus.selector ?? 'none', lastAction: result.actions.at(-1) ?? 'none' } };
+  const score = [scoreRatio(result.perceptionCount === 3, 0.25), scoreRatio(recovered, 0.35), scoreRatio(result.finalSelector === 'selector-b', 0.2), scoreRatio(result.lastAction === 'enter', 0.2)].reduce((sum, value) => sum + value, 0);
+  return { name: 'computer-use', score, passed: score >= 0.9, notes: [`perceptions:${result.perceptionCount}`, `drift:${result.driftRecoveries}`, `selector:${result.finalSelector ?? 'none'}`], metrics: { perceptions: result.perceptionCount, driftRecoveries: result.driftRecoveries, finalSelector: result.finalSelector ?? 'none', lastAction: result.lastAction ?? 'none' } };
 }
 
 function runDeepPrimitivesCase(): RaidingAiCaseResult {

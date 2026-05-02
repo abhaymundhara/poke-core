@@ -1,133 +1,272 @@
 import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
 import type { SkillAdapter } from './types';
 
-export type UiWindowState = { id: string; title: string; focused: boolean; width: number; height: number };
-export type UiTabState = { id: string; title: string; url: string; active: boolean; history: string[]; selectors: string[] };
-export type VisionFrame = { id: string; screenshot?: string; ocr?: string; dom?: string; selectors?: string[]; activeTabId?: string; activeWindowId?: string; viewport?: { width: number; height: number } };
-export type UiPerception = { frameId: string; visibleText: string; detectedSelectors: string[]; activeTabId: string; activeWindowId: string; driftDetected: boolean; focusedSelector: string | null; keyboardHints: string[]; tabCount: number; windowCount: number };
-export type ComputerUseSession = { windows: UiWindowState[]; tabs: UiTabState[]; focus: { windowId: string; tabId: string; selector: string | null }; cursorHistory: string[]; driftRecoveries: number; captures: UiPerception[] };
+export type VisionFrame = {
+  id: string;
+  screenshot?: string;
+  ocr?: string;
+  dom?: string;
+  selectors?: Iterable<string>;
+  activeTabId?: string;
+  activeWindowId?: string;
+  viewport?: { width: number; height: number };
+};
 
-function text(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
-function canonicalSelector(selector: string): string { return selector.trim().toLowerCase().replace(/\s+/g, ' ').replace(/#([a-z0-9_-]+)/gi, '#$1').replace(/\.([a-z0-9_-]+)/gi, '.$1'); }
-function normalizeSelectors(selectors: unknown): string[] { return Array.isArray(selectors) ? [...new Set(selectors.map(text).filter(Boolean).map(canonicalSelector))] : []; }
-function makeSession(frame: VisionFrame): ComputerUseSession {
-  const windowId = frame.activeWindowId ?? 'window-1';
-  const tabId = frame.activeTabId ?? 'tab-1';
-  const selectors = normalizeSelectors(frame.selectors);
-  const title = frame.ocr?.trim() || frame.dom?.trim() || '';
-  return {
-    windows: [{ id: windowId, title, focused: true, width: frame.viewport?.width ?? 1280, height: frame.viewport?.height ?? 800 }],
-    tabs: [{ id: tabId, title, url: frame.dom?.trim() || frame.ocr?.trim() || '', active: true, history: [frame.dom?.trim() || frame.ocr?.trim() || ''], selectors }],
-    focus: { windowId, tabId, selector: selectors[0] ?? null },
-    cursorHistory: [],
-    driftRecoveries: 0,
-    captures: [],
+export type UiPerception = {
+  frameId: string;
+  visibleText: string;
+  detectedSelector: string | null;
+  activeTabId: string;
+  activeWindowId: string;
+  driftDetected: boolean;
+  focusedSelector: string | null;
+  keyboardHint: string | null;
+  tabCount: number;
+  windowCount: number;
+};
+
+export type ComputerUseState = {
+  activeWindowId: string;
+  activeTabId: string;
+  focusedSelector: string | null;
+  driftRecoveries: number;
+  frameCount: number;
+  lastAction: string | null;
+  windowCount: number;
+  tabCount: number;
+};
+
+export type ComputerUseRunResult = {
+  state: ComputerUseState;
+  perceptionCount: number;
+  driftRecoveries: number;
+  finalSelector: string | null;
+  lastAction: string | null;
+  lastPerception: UiPerception | null;
+};
+
+function text(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function canonicalSelector(selector: string): string {
+  return selector.trim().toLowerCase().replace(/\s+/g, ' ').replace(/#([a-z0-9_-]+)/gi, '#$1').replace(/\.([a-z0-9_-]+)/gi, '.$1');
+}
+
+function visibleText(frame: VisionFrame): string {
+  const screenshot = text(frame.screenshot);
+  const ocr = text(frame.ocr);
+  const dom = text(frame.dom);
+  let result = '';
+  if (ocr) result = ocr;
+  if (dom) result = result ? `${result} ${dom}` : dom;
+  if (screenshot) result = result ? `${result} ${screenshot}` : screenshot;
+  return result.replace(/\s+/g, ' ').trim();
+}
+
+function firstSelector(selectors: Iterable<string> | undefined): string | null {
+  if (!selectors) return null;
+  for (const selector of selectors) {
+    const normalized = canonicalSelector(text(selector));
+    if (normalized) return normalized;
+  }
+  return null;
+}
+
+function selectorKey(selector: string | null): string {
+  return selector ? selector.replace(/[#.\[\]()>:+~*,]/g, ' ').replace(/\s+/g, ' ').trim() : '';
+}
+
+function hintFromFrame(frame: VisionFrame): string | null {
+  const source = `${visibleText(frame)} ${firstSelector(frame.selectors) ?? ''}`.toLowerCase();
+  if (/button/.test(source)) return 'button';
+  if (/input/.test(source)) return 'input';
+  if (/textarea/.test(source)) return 'textarea';
+  if (/dialog/.test(source)) return 'dialog';
+  if (/menu/.test(source)) return 'menu';
+  if (/tab/.test(source)) return 'tab';
+  return null;
+}
+
+function determineFocusedSelector(state: ComputerUseState, frame: VisionFrame, detectedSelector: string | null): string | null {
+  if (!detectedSelector) return state.focusedSelector;
+  if (!state.focusedSelector) return detectedSelector;
+  if (state.focusedSelector === detectedSelector) return state.focusedSelector;
+  const haystack = `${visibleText(frame)} ${detectedSelector}`.toLowerCase();
+  const currentKey = selectorKey(state.focusedSelector);
+  if (currentKey && haystack.includes(currentKey)) return state.focusedSelector;
+  return detectedSelector;
+}
+
+function ensureState(frame: VisionFrame, state: ComputerUseState): void {
+  if (!state.activeWindowId) state.activeWindowId = frame.activeWindowId ?? 'window-1';
+  if (!state.activeTabId) state.activeTabId = frame.activeTabId ?? 'tab-1';
+  if (!state.windowCount) state.windowCount = 1;
+  if (!state.tabCount) state.tabCount = 1;
+}
+
+export function captureFrame(frame: VisionFrame, state: ComputerUseState): UiPerception {
+  ensureState(frame, state);
+  const detectedSelector = firstSelector(frame.selectors);
+  const focusedSelector = determineFocusedSelector(state, frame, detectedSelector);
+  const driftDetected = state.focusedSelector !== null && focusedSelector !== state.focusedSelector;
+  const perception: UiPerception = {
+    frameId: frame.id,
+    visibleText: visibleText(frame).slice(0, 4_000),
+    detectedSelector,
+    activeTabId: frame.activeTabId ?? state.activeTabId,
+    activeWindowId: frame.activeWindowId ?? state.activeWindowId,
+    driftDetected,
+    focusedSelector,
+    keyboardHint: hintFromFrame(frame),
+    tabCount: state.tabCount,
+    windowCount: state.windowCount,
   };
-}
-function visibleText(frame: VisionFrame): string { return [frame.ocr, frame.dom, frame.screenshot].map(text).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(); }
-function detectSelectors(frame: VisionFrame): string[] {
-  const haystack = visibleText(frame).toLowerCase();
-  const selectors = normalizeSelectors(frame.selectors);
-  const fromText = haystack.split(/\s+/).map((entry) => canonicalSelector(entry)).filter(Boolean);
-  return [...new Set([...selectors, ...fromText])];
-}
-function detectFocusedSelector(session: ComputerUseSession, frame: VisionFrame, selectors: string[]): string | null {
-  const haystack = visibleText(frame).toLowerCase();
-  const target = session.focus.selector ? canonicalSelector(session.focus.selector) : null;
-  if (target && selectors.includes(target)) return target;
-  if (target && haystack.includes(target.replace(/[#.\[\]]/g, ''))) return target;
-  return selectors[0] ?? null;
-}
-function ensureFocus(session: ComputerUseSession, windowId: string, tabId: string, selector: string | null) { session.focus = { windowId, tabId, selector }; if (selector) session.cursorHistory.push(selector); }
-
-export function captureFrame(frame: VisionFrame, session: ComputerUseSession): UiPerception {
-  const selectors = detectSelectors(frame);
-  const activeWindowId = frame.activeWindowId ?? session.focus.windowId;
-  const activeTabId = frame.activeTabId ?? session.focus.tabId;
-  const focusedSelector = detectFocusedSelector(session, frame, selectors);
-  const driftDetected = session.focus.selector !== null && focusedSelector !== session.focus.selector;
-  const perception: UiPerception = { frameId: frame.id, visibleText: visibleText(frame).slice(0, 4000), detectedSelectors: selectors, activeTabId, activeWindowId, driftDetected, focusedSelector, keyboardHints: selectors.filter((selector) => /button|input|textarea|tab|dialog|menu/.test(selector)).slice(0, 6), tabCount: session.tabs.length, windowCount: session.windows.length };
-  session.captures.push(perception);
-  const tab = session.tabs.find((entry) => entry.id === activeTabId) ?? session.tabs[0];
-  if (tab) tab.selectors = selectors;
-  session.focus.windowId = activeWindowId;
-  session.focus.tabId = activeTabId;
-  session.focus.selector = focusedSelector;
+  state.activeWindowId = perception.activeWindowId;
+  state.activeTabId = perception.activeTabId;
+  state.focusedSelector = focusedSelector;
+  state.frameCount += 1;
   return perception;
 }
 
-export function keyboardNavigate(session: ComputerUseSession, key: string): string {
-  const normalized = key.trim().toLowerCase();
-  session.cursorHistory.push(normalized);
-  if (normalized === 'ctrl+l') return 'address-bar';
-  if (normalized === 'ctrl+tab') {
-    const index = session.tabs.findIndex((tab) => tab.id === session.focus.tabId);
-    const next = session.tabs[(index + 1) % session.tabs.length];
-    if (next) ensureFocus(session, session.focus.windowId, next.id, next.selectors[0] ?? null);
-    return `tab:${session.focus.tabId}`;
-  }
-  if (normalized === 'ctrl+shift+tab') {
-    const index = session.tabs.findIndex((tab) => tab.id === session.focus.tabId);
-    const next = session.tabs[(index - 1 + session.tabs.length) % session.tabs.length];
-    if (next) ensureFocus(session, session.focus.windowId, next.id, next.selectors[0] ?? null);
-    return `tab:${session.focus.tabId}`;
-  }
-  if (normalized === 'alt+left') {
-    const tab = session.tabs.find((entry) => entry.id === session.focus.tabId);
-    const prev = tab?.history.at(-2) ?? tab?.history[0] ?? 'about:blank';
-    if (tab) tab.url = prev;
-    return prev;
-  }
-  if (normalized === 'tab') {
-    const tab = session.tabs.find((entry) => entry.id === session.focus.tabId);
-    const selectors = tab?.selectors ?? [];
-    const nextSelector = selectors.find((selector) => selector !== session.focus.selector) ?? selectors[0] ?? null;
-    ensureFocus(session, session.focus.windowId, session.focus.tabId, nextSelector);
-    return nextSelector ?? 'tab-cycle';
-  }
-  if (normalized === 'enter') {
-    const tab = session.tabs.find((entry) => entry.id === session.focus.tabId);
-    if (tab && session.focus.selector) tab.history.push(`${tab.url}#${session.focus.selector}`);
-    return 'enter';
-  }
+function applyKey(state: ComputerUseState, key: string): string {
+  const normalized = text(key).toLowerCase();
+  if (!normalized) return '';
+  state.lastAction = normalized;
+  if (normalized === 'ctrl+l') return 'focus-address-bar';
+  if (normalized === 'ctrl+tab') return 'advance-tab';
+  if (normalized === 'ctrl+shift+tab') return 'reverse-tab';
+  if (normalized === 'alt+left') return 'navigate-back';
+  if (normalized === 'tab') return 'tab';
+  if (normalized === 'enter') return 'enter';
   return normalized;
 }
 
-export function recoverFromUiDrift(session: ComputerUseSession, perception: UiPerception, fallbackSelectors: string[] = []): { recovered: boolean; selector: string | null; reason: string } {
-  if (!perception.driftDetected && perception.focusedSelector) return { recovered: false, selector: perception.focusedSelector, reason: 'no drift' };
-  const candidate = [...fallbackSelectors, ...perception.detectedSelectors, session.focus.selector ?? ''].map((value) => canonicalSelector(value)).find(Boolean) ?? null;
+export function recoverFromUiDrift(
+  state: ComputerUseState,
+  perception: UiPerception,
+  fallbackSelectors: Iterable<string> | undefined = undefined,
+): { recovered: boolean; selector: string | null; reason: string } {
+  if (!perception.driftDetected && perception.focusedSelector) {
+    return { recovered: false, selector: perception.focusedSelector, reason: 'no drift' };
+  }
+  let candidate: string | null = null;
+  if (fallbackSelectors) {
+    for (const fallback of fallbackSelectors) {
+      candidate = canonicalSelector(text(fallback));
+      if (candidate) break;
+    }
+  }
+  if (!candidate && perception.detectedSelector) candidate = perception.detectedSelector;
+  if (!candidate && state.focusedSelector) candidate = state.focusedSelector;
   if (candidate) {
-    session.driftRecoveries += 1;
-    ensureFocus(session, perception.activeWindowId, perception.activeTabId, candidate);
+    state.focusedSelector = candidate;
+    state.driftRecoveries += 1;
+    state.lastAction = `recover:${candidate}`;
     return { recovered: true, selector: candidate, reason: 'selector fallback after drift' };
   }
   return { recovered: false, selector: null, reason: 'no recoverable selector' };
 }
 
-export function runVisionLoop(frames: VisionFrame[], instructions: { keys?: string[]; fallbackSelectors?: string[] } = {}): { session: ComputerUseSession; perceptions: UiPerception[]; actions: string[]; driftRecoveries: number } {
-  const session = makeSession(frames[0] ?? { id: 'frame-0' });
-  const perceptions: UiPerception[] = [];
-  const actions: string[] = [];
-  for (const frame of frames) {
-    const perception = captureFrame(frame, session);
-    perceptions.push(perception);
+type IterableSource<T> = Iterable<T> | (() => Iterable<T>);
+
+function* asIterable<T>(value: Iterable<T> | (() => Iterable<T>) | undefined): IterableIterator<T> {
+  if (!value) return;
+  const source = typeof value === 'function' ? value() : value;
+  for (const item of source) yield item;
+}
+
+function* singleFrame(frame: VisionFrame): IterableIterator<VisionFrame> {
+  yield frame;
+}
+
+function seedState(frame: VisionFrame): ComputerUseState {
+  return {
+    activeWindowId: frame.activeWindowId ?? 'window-1',
+    activeTabId: frame.activeTabId ?? 'tab-1',
+    focusedSelector: firstSelector(frame.selectors),
+    driftRecoveries: 0,
+    frameCount: 0,
+    lastAction: null,
+    windowCount: 1,
+    tabCount: 1,
+  };
+}
+
+export function runVisionLoop(
+  frames: IterableSource<VisionFrame>,
+  instructions: { keys?: IterableSource<string>; fallbackSelectors?: IterableSource<string> } = {},
+): ComputerUseRunResult {
+  let state: ComputerUseState | null = null;
+  let perceptionCount = 0;
+  let lastPerception: UiPerception | null = null;
+  let lastAction: string | null = null;
+
+  const frameSource = typeof frames === "function" ? frames() : frames;
+  for (const frame of frameSource) {
+    if (!state) state = seedState(frame);
+    const perception = captureFrame(frame, state);
+    lastPerception = perception;
+    perceptionCount += 1;
     if (perception.driftDetected) {
-      const recovery = recoverFromUiDrift(session, perception, instructions.fallbackSelectors ?? []);
-      actions.push(`recover:${recovery.recovered}:${recovery.selector ?? 'none'}`);
+      const recovery = recoverFromUiDrift(state, perception, instructions.fallbackSelectors ? asIterable(instructions.fallbackSelectors) : undefined);
+      if (recovery.recovered) lastAction = state.lastAction;
     }
-    for (const key of instructions.keys ?? []) actions.push(keyboardNavigate(session, key));
+    if (instructions.keys) {
+      for (const key of asIterable(instructions.keys)) lastAction = applyKey(state, key) || lastAction;
+    }
+    if (state.lastAction) lastAction = state.lastAction;
   }
-  return { session, perceptions, actions, driftRecoveries: session.driftRecoveries };
+
+  const finalState = state ?? seedState({ id: 'frame-0' });
+  return {
+    state: finalState,
+    perceptionCount,
+    driftRecoveries: finalState.driftRecoveries,
+    finalSelector: finalState.focusedSelector,
+    lastAction,
+    lastPerception,
+  };
 }
 
 export class ComputerUseSkill implements SkillAdapter {
-  descriptor: SkillDescriptor = { name: 'computer-use', domain: 'ui-automation', capabilities: ['vision', 'ocr', 'selectors', 'keyboard-navigation', 'window-management', 'drift-recovery'], version: '1.0.0' };
-  canHandle(step: PlanStep): boolean { return step.kind === 'computer-use.vision' || step.skill === 'computer-use'; }
+  descriptor: SkillDescriptor = { name: 'computer-use', domain: 'ui-automation', capabilities: ['vision', 'selectors', 'drift-recovery'], version: '2.0.0' };
+
+  canHandle(step: PlanStep): boolean {
+    return step.kind === 'computer-use.vision' || step.skill === 'computer-use';
+  }
+
   async execute(ctx: ExecutionContext): Promise<SkillResult> {
-    const frames = Array.isArray(ctx.step.args.frames) ? (ctx.step.args.frames as VisionFrame[]) : [{ id: `${ctx.step.id}-frame`, ocr: text(ctx.step.args.ocr), dom: text(ctx.step.args.dom), screenshot: text(ctx.step.args.screenshot), selectors: Array.isArray(ctx.step.args.selectors) ? (ctx.step.args.selectors as string[]) : [] }];
-    const keys = Array.isArray(ctx.step.args.keys) ? (ctx.step.args.keys as string[]) : ['tab', 'enter'];
-    const result = runVisionLoop(frames, { keys, fallbackSelectors: Array.isArray(ctx.step.args.fallbackSelectors) ? (ctx.step.args.fallbackSelectors as string[]) : [] });
-    ctx.state.artifacts[ctx.step.id] = result.session;
-    return { ok: true, output: { uiState: result.session, perceptions: result.perceptions, actions: result.actions, driftRecoveries: result.driftRecoveries }, retryable: false, note: 'vision loop completed', trace: { captures: result.perceptions.length, driftRecoveries: result.driftRecoveries } };
+    const frameFromArgs: VisionFrame = {
+      id: `${ctx.step.id}-frame`,
+      ocr: text(ctx.step.args.ocr),
+      dom: text(ctx.step.args.dom),
+      screenshot: text(ctx.step.args.screenshot),
+      selectors: Array.isArray(ctx.step.args.selectors) ? (ctx.step.args.selectors as Iterable<string>) : undefined,
+      activeTabId: text(ctx.step.args.activeTabId) || undefined,
+      activeWindowId: text(ctx.step.args.activeWindowId) || undefined,
+      viewport: typeof ctx.step.args.viewport === 'object' && ctx.step.args.viewport !== null ? (ctx.step.args.viewport as { width: number; height: number }) : undefined,
+    };
+    const frameInput = Array.isArray(ctx.step.args.frames) ? (ctx.step.args.frames as Iterable<VisionFrame>) : singleFrame(frameFromArgs);
+    function* defaultKeys() { yield 'tab'; yield 'enter'; }
+    const result = runVisionLoop(frameInput, {
+      keys: Array.isArray(ctx.step.args.keys) ? (ctx.step.args.keys as Iterable<string>) : defaultKeys,
+      fallbackSelectors: Array.isArray(ctx.step.args.fallbackSelectors) ? (ctx.step.args.fallbackSelectors as Iterable<string>) : undefined,
+    });
+    ctx.state.artifacts[ctx.step.id] = result.state;
+    return {
+      ok: true,
+      output: {
+        uiState: result.state,
+        perceptionCount: result.perceptionCount,
+        driftRecoveries: result.driftRecoveries,
+        finalSelector: result.finalSelector,
+        lastAction: result.lastAction,
+        lastPerception: result.lastPerception,
+      },
+      retryable: false,
+      note: 'latent vision loop completed',
+      trace: { captures: result.perceptionCount, driftRecoveries: result.driftRecoveries },
+    };
   }
 }

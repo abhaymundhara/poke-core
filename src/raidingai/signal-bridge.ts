@@ -18,9 +18,9 @@ export type RaidingAiRuntimeSignals = {
   windowName: string;
   roleName: string;
   threadAnchor: string;
-  frames: VisionFrame[];
-  keys: string[];
-  fallbackSelectors: string[];
+  frames: Iterable<VisionFrame> | (() => Iterable<VisionFrame>);
+  keys: Iterable<string> | (() => Iterable<string>);
+  fallbackSelectors: Iterable<string> | (() => Iterable<string>);
   theory: UserBehaviorTheory;
   observations: BehavioralObservation[];
   facts: LearnedBehaviorFact[];
@@ -46,9 +46,9 @@ export type RaidingAiTrace = {
     episodes: EpisodicMemoryItem[];
   };
   computerUse: {
-    frames: VisionFrame[];
-    keys: string[];
-    fallbackSelectors: string[];
+    frames: Iterable<VisionFrame> | (() => Iterable<VisionFrame>);
+    keys: Iterable<string> | (() => Iterable<string>);
+    fallbackSelectors: Iterable<string> | (() => Iterable<string>);
   };
   deepPrimitives: {
     threadA: ThreadIdentityInput;
@@ -190,22 +190,21 @@ function buildRecurrence(now: number, timeZone: string): RecurrenceSpec {
   return { startLocal: normalizeWallTime('2026-05-04T09:00:00', timeZone).local, timeZone, rule: 'FREQ=WEEKLY;BYDAY=MO,TU,WE;COUNT=3', durationMinutes: Math.max(30, (now % 90) || 30) };
 }
 
-function buildFrames(localeHint: string, timeZone: string, roleName: string, threadAnchor: string, tabName: string, windowName: string): VisionFrame[] {
+function* buildFrames(localeHint: string, timeZone: string, roleName: string, threadAnchor: string, tabName: string, windowName: string): IterableIterator<VisionFrame> {
   const windowId = token(windowName, 'window', localeHint);
   const tabId = token(tabName, 'tab', timeZone);
-  return [
-    { id: token('frame', '0', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-a'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } },
-    { id: token('frame', '1', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-b'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } },
-    { id: token('frame', '2', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-b'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } },
-  ];
+  yield { id: token('frame', '0', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-a'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } };
+  yield { id: token('frame', '1', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-b'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } };
+  yield { id: token('frame', '2', localeHint, timeZone), ocr: '', dom: '', selectors: ['selector-b'], activeTabId: tabId, activeWindowId: windowId, viewport: { width: 1280, height: 800 } };
 }
 
-function buildKeys(): string[] {
-  return ['tab', 'enter'];
+function* buildKeys(): IterableIterator<string> {
+  yield 'tab';
+  yield 'enter';
 }
 
-function buildFallbackSelectors(): string[] {
-  return ['selector-b'];
+function* buildFallbackSelectors(): IterableIterator<string> {
+  yield 'selector-b';
 }
 
 function buildLocales(localeHint: string): string[] {
@@ -216,7 +215,7 @@ function buildTheorySummarySeed(localeHint: string, timeZone: string, roleName: 
   return cleanText(`computer-use ${localeHint} ${timeZone} ${roleName}`);
 }
 
-function captureComputerUse(frames: VisionFrame[], keys: string[], fallbackSelectors: string[]) {
+function captureComputerUse(frames: Iterable<VisionFrame> | (() => Iterable<VisionFrame>), keys: Iterable<string> | (() => Iterable<string>), fallbackSelectors: Iterable<string> | (() => Iterable<string>)) {
   return runVisionLoop(frames, { keys, fallbackSelectors });
 }
 
@@ -243,9 +242,9 @@ export class SignalBridge {
     const episodes = buildEpisodes(theory, localeHint);
     const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
     const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: episodes, sourceDocuments: [] });
-    const frames = buildFrames(localeHint, timeZone, roleName, threadAnchor, tabName, windowName);
-    const keys = buildKeys();
-    const fallbackSelectors = buildFallbackSelectors();
+    const frames = () => buildFrames(localeHint, timeZone, roleName, threadAnchor, tabName, windowName);
+    const keys = buildKeys;
+    const fallbackSelectors = buildFallbackSelectors;
     const computerUse = captureComputerUse(frames, keys, fallbackSelectors);
     const attendees = buildAttendees(localeHint, timeZone, roleName);
     const threadA = buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName);
