@@ -266,7 +266,7 @@ export class ComputerUseSkill implements SkillAdapter {
       },
       retryable: false,
       note: 'latent vision loop completed',
-      trace: { captures: result.perceptionCount, driftRecoveries: result.driftRecoveries },
+      trace: { perceptions: result.perceptionCount, driftRecoveries: result.driftRecoveries },
     };
   }
 }
