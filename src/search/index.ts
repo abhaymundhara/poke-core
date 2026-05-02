@@ -1,10 +1,9 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile, RuntimeComposition } from './types.ts';
-import { buildSourceRanking, evaluateTrustGate, scoreEvidenceTrust } from './trust.ts';
+import { buildSourceRanking, emitTrustEscalation, evaluateTrustGate, scoreEvidenceTrust } from './trust.ts';
 import { buildEvidenceGraph, buildQueries, deriveHopPlan } from './reasoning.ts';
 import { forecastNextSignals, persistForecastTrajectory } from './forecast.ts';
-import { chooseStrategy, fallbackStrategyChoose, DEFAULT_STATE_PATH, evaluatePolicy, SearchPolicyStore, createDefaultPolicyRewriteProvider, registerRuntimeCompositionMutator } from './policy.ts';
+import { chooseStrategy, compileRuntimePipeline, compileRuntimeStrategySelector, fallbackStrategyChoose, DEFAULT_STATE_PATH, evaluatePolicy, SearchPolicyStore, createDefaultPolicyRewriteProvider, registerRuntimeCompositionMutator } from './policy.ts';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, understandSearchIntent, understandSearchIntentWithNlu, type SemanticNluProvider } from './nlu.ts';
 import { clamp, stableHash, uniq } from './utils.ts';
 
@@ -19,9 +18,14 @@ export * from './policy.ts';
 export const SEARCH_INDEX_SOURCE_PATH = resolve(process.cwd(), 'src/search/index.ts');
 
 export function persistSearchIndexSourceRewrite(nextSource: string): string {
-  const currentSource = existsSync(SEARCH_INDEX_SOURCE_PATH) ? readFileSync(SEARCH_INDEX_SOURCE_PATH, 'utf8') : '';
-  if (currentSource !== nextSource) writeFileSync(SEARCH_INDEX_SOURCE_PATH, nextSource);
-  return SEARCH_INDEX_SOURCE_PATH;
+  const revision = String(nextSource.length) + ':' + nextSource.slice(0, 12);
+  return JSON.stringify({
+    kind: 'search-index-rewrite-manifest',
+    target: SEARCH_INDEX_SOURCE_PATH,
+    revision,
+    length: nextSource.length,
+    preview: nextSource.slice(0, 180),
+  });
 }
 
 let activeRuntimeComposition: RuntimeComposition | null = null;
@@ -32,6 +36,97 @@ registerRuntimeCompositionMutator((composition) => {
 
 export function rewriteSearchIndexRuntime(composition: RuntimeComposition): void {
   activeRuntimeComposition = composition;
+}
+
+type EvidenceRefreshRequest = {
+  intent: SearchPlan['intent'];
+  strategy: SearchStrategyProfile;
+  queries: string[];
+  sourceRanking: SearchPlan['sourceRanking'];
+  trustGate: ReturnType<typeof evaluateTrustGate>;
+  evidenceGraph: SearchPlan['evidenceGraph'];
+  forecasts: ReturnType<typeof forecastNextSignals>;
+  pass: number;
+  results: SearchResult[];
+  context: Record<string, unknown>;
+};
+
+type EvidenceRefreshHook = (request: EvidenceRefreshRequest) => SearchResult[] | SearchResult | null | undefined;
+
+type SearchSessionOptions = {
+  policyPath?: string;
+  behaviorSeed?: Record<string, unknown>;
+  clock?: () => number;
+  nluProvider?: SemanticNluProvider;
+  strictSemanticNlu?: boolean;
+  policyRewriteProvider?: ReturnType<typeof createDefaultPolicyRewriteProvider>;
+  retrieveEvidence?: EvidenceRefreshHook;
+  executeTool?: EvidenceRefreshHook;
+  onEscalation?: (signal: Parameters<typeof emitTrustEscalation>[0]) => void;
+};
+
+function normalizeSearchResults(results: unknown): SearchResult[] {
+  if (!results) return [];
+  const list = Array.isArray(results) ? results : [results];
+  return list.filter((result): result is SearchResult => Boolean(result && typeof result === 'object')) as SearchResult[];
+}
+
+function dedupeSearchResults(results: SearchResult[]): SearchResult[] {
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+  for (const result of results) {
+    const key = [result.source, result.url, result.title, result.snippet].map((value) => String(value ?? '')).join('|');
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(result);
+  }
+  return out;
+}
+
+function mergeSearchResults(base: SearchResult[], addition: SearchResult[]): SearchResult[] {
+  return dedupeSearchResults([...base, ...addition]);
+}
+
+function composeRuntimeState(state: any): any {
+  const composition = activeComposition(state);
+  if (!composition) return state;
+  return { ...state, reasoningArchitecture: { ...(state.reasoningArchitecture ?? {}), runtimeComposition: composition } };
+}
+
+function requestFreshEvidence(request: EvidenceRefreshRequest, context: Record<string, unknown>, options: SearchSessionOptions): SearchResult[] {
+  const hooks: Array<unknown> = [
+    (context as any).retrieveEvidence,
+    (context as any).executeTool,
+    (context as any).toolExecutor,
+    options.retrieveEvidence,
+    options.executeTool,
+  ];
+  const collected: SearchResult[] = [];
+  for (const hook of hooks) {
+    if (typeof hook !== 'function') continue;
+    try {
+      const value = (hook as (request: EvidenceRefreshRequest) => unknown)(request);
+      const batch = normalizeSearchResults(value);
+      if (batch.length > 0) collected.push(...batch);
+    } catch {
+      continue;
+    }
+  }
+  return mergeSearchResults([], collected);
+}
+
+function emitEscalationSignal(signal: Parameters<typeof emitTrustEscalation>[0], context: Record<string, unknown>, options: SearchSessionOptions): void {
+  const emitted = emitTrustEscalation(signal);
+  try {
+    options.onEscalation?.(emitted);
+  } catch {
+    undefined;
+  }
+  try {
+    (context as any).onEscalation?.(emitted);
+  } catch {
+    undefined;
+  }
 }
 
 function runtimeCompositionFromState(state: any): RuntimeComposition | null {
@@ -57,24 +152,20 @@ function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan
 }
 
 export function resolveRuntimeStrategy(intent: ReturnType<typeof understandSearchIntent>, state: any): SearchStrategyProfile {
-  const composition = activeComposition(state);
-  const source = composition?.strategySelectorSource;
-  if (!source) return chooseStrategy(intent, state);
+  const runtimeState = composeRuntimeState(state);
   try {
-    const evaluator = new Function('intent', 'policy', 'fallbackChoose', `const factory = (${source}); return factory(intent, policy, fallbackChoose);`) as (intent: any, policy: any, fallbackChoose: typeof fallbackStrategyChoose) => SearchStrategyProfile;
-    return evaluator(intent, state, fallbackStrategyChoose) ?? fallbackStrategyChoose(intent, state);
+    const evaluator = compileRuntimeStrategySelector(runtimeState);
+    return evaluator(intent, runtimeState, fallbackStrategyChoose) ?? fallbackStrategyChoose(intent, runtimeState);
   } catch {
-    return fallbackStrategyChoose(intent, state);
+    return chooseStrategy(intent, runtimeState);
   }
 }
 
 export function applyRuntimePipeline(plan: SearchPlan, state: any): SearchPlan {
-  const composition = activeComposition(state);
-  const source = composition?.pipelineSource;
-  if (!source) return plan;
+  const runtimeState = composeRuntimeState(state);
   try {
-    const evaluator = new Function('plan', 'policy', `const factory = (${source}); return factory(plan, policy);`) as (plan: SearchPlan, policy: any) => SearchPlan;
-    return evaluator(plan, state) ?? plan;
+    const evaluator = compileRuntimePipeline(runtimeState);
+    return (evaluator(plan, runtimeState) as SearchPlan) ?? plan;
   } catch {
     return plan;
   }
@@ -84,7 +175,7 @@ export class SearchSession {
   private readonly store: SearchPolicyStore;
   private state: any;
 
-  constructor(private options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean; policyRewriteProvider?: ReturnType<typeof createDefaultPolicyRewriteProvider> } = {}) {
+  constructor(private options: SearchSessionOptions = {}) {
     this.store = new SearchPolicyStore(options.policyPath);
     this.options.nluProvider ??= DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
     this.options.strictSemanticNlu ??= true;
@@ -98,9 +189,10 @@ export class SearchSession {
     this.state = this.store.load();
     let workingIntent = intent;
     let currentState = this.state;
+    let workingResults = mergeSearchResults([], results);
     let finalPlan: SearchPlan | null = null;
     let finalEvidenceGraph: SearchPlan['evidenceGraph'] | null = null;
-    let finalTrustedResults: SearchResult[] = results;
+    let finalTrustedResults: SearchResult[] = workingResults;
     let finalStrategy = resolveRuntimeStrategy(intent, currentState);
     let previousSignature = '';
     let previousConfidence = 0;
@@ -116,11 +208,11 @@ export class SearchSession {
       const queries = buildQueries(effectiveIntent, strategy);
       const sourceRanking = buildSourceRanking(effectiveIntent, currentState.sourceReliability, currentState.rules, policyDecision);
       const trustNotes = buildTrustNotes(effectiveIntent, sourceRanking, currentState);
-      const trustedResults = scoreEvidenceTrust(effectiveIntent, results, currentState.sourceReliability, policyDecision, currentState);
+      const trustedResults = scoreEvidenceTrust(effectiveIntent, workingResults, currentState.sourceReliability, policyDecision, currentState);
       const trustGate = evaluateTrustGate(effectiveIntent, trustedResults, policyDecision, currentState);
       const evidenceGraph = buildEvidenceGraph(effectiveIntent, queries, trustedResults, strategy, currentState.sourceReliability, policyDecision, currentState);
       const hopPlan = deriveHopPlan(effectiveIntent, strategy, trustedResults);
-      const signature = stableHash(JSON.stringify({ objective: effectiveIntent.semanticQuery, queries, hopPlan, claims: evidenceGraph.claims.map((claim) => claim.id), propositions: evidenceGraph.propositions.map((proposition) => proposition.id), confidence: Number(evidenceGraph.confidence.toFixed(3)), forecasts: forecasts.slice(0, 3).map((signal) => signal.latentNeed.label + ':' + signal.topic), trustGate: trustGate.mode }));
+      const signature = stableHash(JSON.stringify({ objective: effectiveIntent.semanticQuery, queries, hopPlan, claims: evidenceGraph.claims.map((claim) => claim.id), propositions: evidenceGraph.propositions.map((proposition) => proposition.id), confidence: Number(evidenceGraph.confidence.toFixed(3)), forecasts: forecasts.slice(0, 3).map((signal) => signal.latentNeed.label + ':' + signal.topic), trustGate: trustGate.mode, results: trustedResults.map((result) => [result.source, result.url, result.title].join('|')) }));
       const stabilized = signature === previousSignature || (previousConfidence > 0 && Math.abs(evidenceGraph.confidence - previousConfidence) < 0.025 && evidenceGraph.claims.length > 0 && evidenceGraph.propositions.length > 0);
       const gateAccept = trustGate.mode === 'accept';
       currentState = persistForecastTrajectory(currentState, { intent: effectiveIntent, forecasts, signature, pass, stabilized: stabilized && gateAccept });
@@ -129,9 +221,27 @@ export class SearchSession {
       finalTrustedResults = trustedResults;
       finalStrategy = strategy;
       finalEvidenceGraph = evidenceGraph;
-      finalPlan = { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, 'policy=' + (policyDecision.matchedRules.join('|') || 'none'), 'trajectory=' + signature, 'pass=' + String(pass), 'trust-gate=' + trustGate.mode + ':' + (trustGate.reasons.join('|') || 'none')], predictedSignals: forecasts, evidenceGraph };
+      const shouldRefreshEvidence = trustGate.shouldEscalate || trustGate.shouldReplan || evidenceGraph.claims.length === 0 || evidenceGraph.confidence < Math.max(0.52, trustGate.threshold - 0.06);
+      finalPlan = { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, 'policy=' + (policyDecision.matchedRules.join('|') || 'none'), 'trajectory=' + signature, 'pass=' + String(pass), 'trust-gate=' + trustGate.mode + ':' + (trustGate.reasons.join('|') || 'none'), 'evidence-refresh=' + (shouldRefreshEvidence ? 'pending' : 'none')], predictedSignals: forecasts, evidenceGraph };
       previousSignature = signature;
       previousConfidence = evidenceGraph.confidence;
+      if (trustGate.mode === 'escalate' && trustGate.escalationSignal) {
+        emitEscalationSignal({ ...trustGate.escalationSignal, evidenceGraph, results: trustedResults, queries, forecasts, sourceRanking, pass, context: { ...context, objective: effectiveIntent.semanticQuery } }, context, this.options);
+      }
+      const refreshedResults = shouldRefreshEvidence ? requestFreshEvidence({ intent: effectiveIntent, strategy, queries, sourceRanking, trustGate, evidenceGraph, forecasts, pass, results: trustedResults, context }, context, this.options) : [];
+      if (refreshedResults.length > 0) {
+        workingResults = mergeSearchResults(workingResults, refreshedResults);
+        workingIntent = {
+          ...effectiveIntent,
+          focus: trustGate.shouldEscalate ? 'trust' : 'multi-hop',
+          hopBudget: Math.min(6, Math.max(effectiveIntent.hopBudget, effectiveIntent.hopBudget + 1)),
+          querySeeds: uniq([...effectiveIntent.querySeeds, ...forecasts.flatMap((signal) => signal.suggestedQueries), ...queries, ...refreshedResults.flatMap((result) => [result.title, result.snippet, ...(result.claims ?? [])].filter((value): value is string => Boolean(value)))]).slice(0, 8),
+          evidenceTerms: uniq([...effectiveIntent.evidenceTerms, ...refreshedResults.flatMap((result) => [result.title, result.snippet, ...(result.claims ?? [])].filter((value): value is string => Boolean(value))), ...evidenceGraph.claims.slice(0, 4).map((claim) => claim.text), ...evidenceGraph.propositions.slice(0, 4).map((proposition) => proposition.text)]).slice(0, 16),
+          topics: uniq([...effectiveIntent.topics, ...evidenceGraph.entities.slice(0, 4).map((entity) => entity.label)]).slice(0, 12),
+        };
+        pass += 1;
+        continue;
+      }
       if (stabilized && gateAccept) break;
       workingIntent = gateAccept
         ? (evidenceGraph.claims.length === 0
@@ -156,7 +266,7 @@ export class SearchSession {
       const strategy = resolveRuntimeStrategy(workingIntent, currentState);
       const queries = buildQueries(workingIntent, strategy);
       const sourceRanking = buildSourceRanking(workingIntent, currentState.sourceReliability, currentState.rules);
-      const trustedResults = scoreEvidenceTrust(workingIntent, results, currentState.sourceReliability, undefined, currentState);
+      const trustedResults = scoreEvidenceTrust(workingIntent, workingResults, currentState.sourceReliability, undefined, currentState);
       const evidenceGraph = buildEvidenceGraph(workingIntent, queries, trustedResults, strategy, currentState.sourceReliability, undefined, currentState);
       const hopPlan = deriveHopPlan(workingIntent, strategy, trustedResults);
       finalPlan = { intent: workingIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: buildTrustNotes(workingIntent, sourceRanking, currentState), predictedSignals: forecastNextSignals(workingIntent, currentState, this.options.behaviorSeed ?? context), evidenceGraph };
@@ -169,7 +279,7 @@ export class SearchSession {
     const completedEvidenceGraph = finalEvidenceGraph as SearchPlan['evidenceGraph'];
 
     if (learn) {
-      const score = clamp(completedEvidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + finalStrategy.lastScore * 0.2);
+      const score = clamp(completedEvidenceGraph.confidence * 0.55 + Math.min(1, workingResults.length / 4) * 0.25 + finalStrategy.lastScore * 0.2);
       void this.learn(completedPlan.intent, finalStrategy, finalTrustedResults, score).catch(() => undefined);
     }
 
@@ -256,7 +366,7 @@ export class SearchSession {
   }
 }
 
-export function createSearchSession(options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean; policyRewriteProvider?: ReturnType<typeof createDefaultPolicyRewriteProvider> } = {}): SearchSession {
+export function createSearchSession(options: SearchSessionOptions = {}): SearchSession {
   return new SearchSession(options);
 }
 
