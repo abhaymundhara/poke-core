@@ -1,5 +1,6 @@
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { SearchIntent, SearchPolicyState, SearchSignalForecast, SearchSource } from './types.ts';
+import type { SearchIntent, SearchPolicyState, SearchSignalForecast } from './types.ts';
 import { extractWithDefaultProviderSync } from '../llm-bridge.ts';
 
 export type BehaviorTrajectoryEvent = {
@@ -32,8 +33,8 @@ function persistedObservations(): BehaviorTrajectoryEvent[] {
 
 function extractJson(path: string): string {
   try {
-    const file = Bun.file(path);
-    return file.exists() ? file.textSync() : '';
+    if (!existsSync(path)) return '';
+    return readFileSync(path, 'utf8');
   } catch {
     return '';
   }
@@ -43,16 +44,6 @@ function observationsFrom(seed?: Record<string, unknown>): BehaviorTrajectoryEve
   const raw = seed?.observations ?? seed?.trajectory ?? seed?.events ?? [];
   const explicit = Array.isArray(raw) ? raw.filter((value): value is BehaviorTrajectoryEvent => Boolean(value) && typeof value === 'object') : [];
   return explicit.length > 0 ? explicit : persistedObservations();
-}
-
-function sourceFor(topic: string, source?: string): SearchSource | string {
-  if (source) return source;
-  if (/calendar|schedule|meeting|availability/i.test(topic)) return 'calendar';
-  if (/email|thread|reply|relationship/i.test(topic)) return 'email';
-  if (/github|repo|issue|commit|pr|pull request/i.test(topic)) return 'github';
-  if (/file|path|filesystem|directory/i.test(topic)) return 'filesystem';
-  if (/integration|notion|linear|slack|api|webhook/i.test(topic)) return 'integration';
-  return 'memory';
 }
 
 function forecastPrompt<T>(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): T {
@@ -71,7 +62,7 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
   const observations = observationsFrom(behaviorSeed);
   const raw = forecastPrompt<{ signals: SearchSignalForecast[] }>(
     'forecast the next likely behavioral and search signals',
-    { intent, policy, observations, sourceHints: intent.sourceHints, suggestedSource: sourceFor(intent.semanticQuery) },
+    { intent, policy, observations, sourceHints: intent.sourceHints },
     {
       type: 'object',
       required: ['signals'],
