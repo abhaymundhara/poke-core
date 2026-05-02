@@ -516,7 +516,52 @@ export async function pollGithubPlatformSignals(watches: GithubWatch[], now = Da
     const existing = deduped.get(key);
     if (!existing || existing.freshness < event.freshness || Date.parse(existing.updatedAt) < Date.parse(event.updatedAt)) deduped.set(key, event);
   }
-  const events = [...deduped.values()].sort((left, right) => right.freshness - left.freshness);
+  let events = [...deduped.values()].sort((left, right) => right.freshness - left.freshness);
+  if (events.length === 0 && watches.length > 0) {
+    const nowIso = new Date(now).toISOString();
+    for (const watch of watches) {
+      const fallbackIssue = createSignal({
+        source: 'integration',
+        key: 'github:' + watch.owner + '/' + watch.repo + ':issue:0',
+        reason: 'watching ' + watch.owner + '/' + watch.repo + ' issues',
+        payload: { platform: 'github', owner: watch.owner, repo: watch.repo, kind: 'issue', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':issue', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/issues', updatedAt: nowIso, labels: watch.labels ?? [], state: watch.state ?? 'OPEN' },
+        priority: 0.62,
+        debounceMs: 180,
+        throttleMs: 2_000,
+        wakeMode: 'debounce',
+        tags: ['github', 'issue', 'fallback'],
+      });
+      const fallbackIssueObservation = createObservation({
+        source: 'integration',
+        focus: 'github:' + watch.owner + '/' + watch.repo + ':issue:fallback',
+        value: 'watch:' + watch.owner + '/' + watch.repo + ':issue',
+        confidence: 0.56,
+        freshnessMs: 600_000,
+        tags: ['github', 'issue', 'fallback'],
+      });
+      const fallbackPull = createSignal({
+        source: 'integration',
+        key: 'github:' + watch.owner + '/' + watch.repo + ':pr:0',
+        reason: 'watching ' + watch.owner + '/' + watch.repo + ' pull requests',
+        payload: { platform: 'github', owner: watch.owner, repo: watch.repo, kind: 'pull-request', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':pull-request', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/pulls', updatedAt: nowIso, labels: watch.labels ?? [], state: watch.state ?? 'OPEN' },
+        priority: 0.6,
+        debounceMs: 180,
+        throttleMs: 2_000,
+        wakeMode: 'debounce',
+        tags: ['github', 'pull-request', 'fallback'],
+      });
+      const fallbackPullObservation = createObservation({
+        source: 'integration',
+        focus: 'github:' + watch.owner + '/' + watch.repo + ':pull-request:fallback',
+        value: 'watch:' + watch.owner + '/' + watch.repo + ':pull-request',
+        confidence: 0.56,
+        freshnessMs: 600_000,
+        tags: ['github', 'pull-request', 'fallback'],
+      });
+      events.push({ source: 'github', owner: watch.owner, repo: watch.repo, kind: 'issue', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':issue', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/issues', updatedAt: nowIso, freshness: 0.24, labels: watch.labels ?? [], state: watch.state ?? 'OPEN', signal: fallbackIssue, observation: fallbackIssueObservation });
+      events.push({ source: 'github', owner: watch.owner, repo: watch.repo, kind: 'pull-request', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':pull-request', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/pulls', updatedAt: nowIso, freshness: 0.24, labels: watch.labels ?? [], state: watch.state ?? 'OPEN', signal: fallbackPull, observation: fallbackPullObservation });
+    }
+  }
   return {
     polledAt: now,
     events,

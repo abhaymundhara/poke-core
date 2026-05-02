@@ -173,26 +173,48 @@ function transitionLikelihood(model: NonNullable<SearchPolicyState['latentIntent
   return clamp(0.08 + observed / Math.max(1, outgoing));
 }
 
-function generateIntentTrajectory(intent: SearchIntent, model: NonNullable<SearchPolicyState['latentIntentModel']>, observations: BehaviorTrajectoryEvent[], labels: string[], evidenceGraph?: SearchEvidenceGraph) {
-  const features = trajectoryFeatures(intent, observations, evidenceGraph);
+function generativeNeedScore(intent: SearchIntent, model: NonNullable<SearchPolicyState['latentIntentModel']>, observations: BehaviorTrajectoryEvent[], label: string, features: ReturnType<typeof trajectoryFeatures>): number {
+  const prototype = model.statePrototypes?.[label] ?? encodeTrajectory(label);
+  const memoryStrength = model.trajectoryMemory?.[label] ?? 0.25;
+  const semanticFit = cosineSimilarity(features.intentVector, prototype);
+  const recentFit = cosineSimilarity(features.latestVector, prototype);
   const window = observations.slice(-4);
-  const lastLabel = window[window.length - 1] ? labelFromEvent(window[window.length - 1]) : intent.focus;
-  const previousLabel = window.length > 1 ? labelFromEvent(window[window.length - 2]) : lastLabel;
-  return labels.map((label) => {
-    const prototype = model.statePrototypes?.[label] ?? encodeTrajectory(label);
-    const memoryStrength = model.trajectoryMemory?.[label] ?? 0.25;
-    const semanticFit = cosineSimilarity(features.intentVector, prototype);
-    const recentFit = cosineSimilarity(features.latestVector, prototype);
-    const transitionFit = observations.length > 1 ? transitionLikelihood(model, previousLabel, label) : 0.12;
-    const flowFit = observations.length > 2 ? transitionLikelihood(model, lastLabel, label) * 0.6 + transitionLikelihood(model, previousLabel, label) * 0.4 : 0.12;
-    const trajectoryFit = window.length > 0 ? average(window.map((event, index) => cosineSimilarity(encodeTrajectory(trajectoryText(event)), prototype) * (1 + index / Math.max(1, window.length)))) : 0.2;
-    const sourceVariety = new Set(observations.filter((event) => labelFromEvent(event) === label).map((event) => sourceFor(label, event.source))).size;
-    const failurePressure = observations.filter((event) => labelFromEvent(event) === label && event.outcome === 'failure').length / Math.max(1, observations.filter((event) => labelFromEvent(event) === label).length || 1);
-    const recency = Math.exp(-features.lastGapHours / 48);
-    const novelty = 1 - cosineSimilarity(prototype, encodeTrajectory(label));
-    const structuralDemand = features.sourceShift * 0.08 + features.topicDrift * 0.08 + features.graphPressure * 0.12;
-    const score = memoryStrength * 0.14 + semanticFit * 0.18 + recentFit * 0.16 + transitionFit * 0.14 + flowFit * 0.08 + trajectoryFit * 0.12 + recency * 0.06 + sourceVariety * 0.03 + novelty * 0.02 + structuralDemand - failurePressure * 0.08 - features.ignored * 0.01;
-    return { label, score };
+  const recentTransitions = window.length > 1 ? average(window.slice(1).map((event, index) => transitionLikelihood(model, labelFromEvent(window[index]), labelFromEvent(event)))) : 0.12;
+  const recency = Math.exp(-features.lastGapHours / 48);
+  const sourceVariety = new Set(observations.filter((event) => labelFromEvent(event) === label).map((event) => sourceFor(label, event.source))).size;
+  const failurePressure = observations.filter((event) => labelFromEvent(event) === label && event.outcome === 'failure').length / Math.max(1, observations.filter((event) => labelFromEvent(event) === label).length || 1);
+  const novelty = 1 - cosineSimilarity(prototype, encodeTrajectory(label));
+  const graphPressure = features.graphPressure;
+  const cadenceLift = features.cadence > 0 ? clamp(features.cadence / 10_000, 0, 0.08) : 0;
+  const intentPull = intent.freshness === 'live' ? 0.06 : intent.trustMode === 'official-first' ? 0.03 : 0.02;
+  return memoryStrength * 0.16 + semanticFit * 0.18 + recentFit * 0.16 + recentTransitions * 0.14 + recency * 0.08 + sourceVariety * 0.03 + novelty * 0.02 + graphPressure * 0.12 + cadenceLift + intentPull - failurePressure * 0.08 - features.ignored * 0.01;
+}
+
+function generateIntentTrajectory(intent: SearchIntent, model: NonNullable<SearchPolicyState['latentIntentModel']>, observations: BehaviorTrajectoryEvent[], labels: string[]) {
+  const features = trajectoryFeatures(intent, observations);
+  const scores = labels.map((label) => ({ label, score: generativeNeedScore(intent, model, observations, label, features) }));
+  const probabilities = softmax(scores.map((entry) => entry.score));
+  return scores.map((entry, index) => {
+    const probability = probabilities[index] ?? 0;
+    const matchingEvents = observations.filter((event) => labelFromEvent(event) === entry.label);
+    const successRate = matchingEvents.length === 0 ? 0 : matchingEvents.filter((event) => event.outcome === 'success').length / matchingEvents.length;
+    const failureRate = matchingEvents.length === 0 ? 0 : matchingEvents.filter((event) => event.outcome === 'failure').length / matchingEvents.length;
+    const ignoredRate = matchingEvents.length === 0 ? 0 : matchingEvents.filter((event) => event.outcome === 'ignored').length / matchingEvents.length;
+    return {
+      label: entry.label,
+      score: entry.score,
+      probability,
+      features: {
+        frequency: matchingEvents.length,
+        successRate,
+        failureRate,
+        ignoredRate,
+        confidence: average(matchingEvents.map((event) => Number(event.confidence ?? 0.5))),
+        value: matchingEvents.reduce((sum, event) => sum + Number(event.value ?? (event.outcome === 'success' ? 1 : event.outcome === 'failure' ? -0.6 : 0.1)), 0),
+        durationMs: average(matchingEvents.map((event) => Number(event.durationMs ?? 0))),
+        sourceVariety: new Set(matchingEvents.map((event) => sourceFor(entry.label, event.source))).size,
+      },
+    };
   });
 }
 
@@ -239,16 +261,15 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
   const evidenceGraph = behaviorSeed?.evidenceGraph as SearchEvidenceGraph | undefined;
   const latentModel = updateLatentIntentModel(policy.latentIntentModel, intent, observations);
   const labels = latentModel.archetypes.length > 0 ? latentModel.archetypes.map((archetype) => archetype.label) : candidateIntentLabels(intent, observations);
-  const trajectoryScores = generateIntentTrajectory(intent, latentModel, observations, labels, evidenceGraph);
+  const trajectoryScores = generateIntentTrajectory(intent, latentModel, observations, labels);
   const probabilities = softmax(trajectoryScores.map((entry) => entry.score));
-  const distributionNormalizer = Math.max(1e-6, probabilities.reduce((sum, value) => sum + value, 0));
   const ranked = trajectoryScores.map((entry, index) => {
     const probability = probabilities[index] ?? 0;
     const archetype = latentModel.archetypes.find((candidate) => candidate.label === entry.label);
     const source = archetype?.sources[0] ?? intent.sourceHints[0] ?? sourceFor(entry.label);
     const distribution = trajectoryScores.slice(0, 5).map((candidate, candidateIndex) => ({
       label: candidate.label,
-      probability: clamp((probabilities[candidateIndex] ?? 0) / distributionNormalizer),
+      probability: clamp((probabilities[candidateIndex] ?? 0)),
       trajectory: [...new Set([...observations.slice(-3).map((event) => labelFromEvent(event)), candidate.label])].filter(Boolean),
       source: latentModel.archetypes.find((item) => item.label === candidate.label)?.sources[0] ?? sourceFor(candidate.label),
     }));
@@ -257,7 +278,7 @@ export function forecastNextSignals(intent: SearchIntent, policy: SearchPolicySt
       source,
       topic: entry.label,
       confidence,
-      reason: `trajectory=${entry.label} score=${entry.score.toFixed(2)} next=${probability.toFixed(2)} source-shift=${observations.length > 1 ? new Set(observations.slice(-4).map((event) => sourceFor(labelFromEvent(event), event.source))).size : 1} graph=${evidenceGraph?.confidence?.toFixed(2) ?? '0.00'}`,
+      reason: `generative=${entry.label} score=${entry.score.toFixed(2)} next=${probability.toFixed(2)} source-shift=${observations.length > 1 ? new Set(observations.slice(-4).map((event) => sourceFor(labelFromEvent(event), event.source))).size : 1} graph=${evidenceGraph?.confidence?.toFixed(2) ?? '0.00'}`,
       suggestedQueries: uniq([`${intent.objective} ${entry.label}`, `${entry.label} ${intent.entities[0] ?? ''}`.trim(), intent.semanticQuery]).slice(0, 3),
       priority: clamp(confidence + (intent.freshness === 'live' ? 0.08 : 0) - index * 0.02),
       distribution,

@@ -430,6 +430,10 @@ export class AutopilotEngine {
       triggers.push(buildTrigger('signal-observer', 'signal intensity suggests the loop should re-run without a user nudge', 90, 'observe signals, summarize drift, and refresh the working set', 'system', 'signal', 'debounce'));
     }
 
+    if ((Array.isArray(this.context.githubWatches) && this.context.githubWatches.length > 0) || /github|issue|pull request|pull-request|repo|platform/i.test(this.objective)) {
+      triggers.push(buildTrigger('platform-event-watch', 'github watches should feed the live loop with repository events', 30, 'poll GitHub issue and pull-request activity and adapt the working set', 'github', 'platform', 'immediate'));
+    }
+
     if ((this.lastLiveWeb?.results.length ?? 0) > 0) {
       triggers.push(buildTrigger('live-web-refresh', 'fresh live web results should be rechecked before they age out', 30, 'refresh live web search results and crawl the freshest pages', 'browser', 'live-web', 'debounce'));
     }

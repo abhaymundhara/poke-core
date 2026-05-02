@@ -51,10 +51,6 @@ function bundle(objective: string, context: Record<string, unknown>): string {
   return [objective.trim(), contextText].filter(Boolean).join('\n');
 }
 
-function tokensFrom(objective: string, context: Record<string, unknown>): string[] {
-  return uniq([...words(objective), ...words(bundle('', context))]);
-}
-
 function extractEntities(text: string): string[] {
   const matches = text.match(/(?:[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+|[A-Z]{2,}(?:-[A-Z0-9]+)?|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|https?:\/\/\S+|\b[a-z0-9_.-]+\/[a-z0-9_.-]+\b)/gi) ?? [];
   return uniq(matches.map((value) => value.replace(/[),.;]+$/g, ''))).slice(0, 16);
@@ -123,7 +119,7 @@ function inferTrustMode(text: string): TrustMode {
 }
 
 function inferSemanticQuery(objective: string, entities: string[], topics: string[]): string {
-  const terms = uniq([...entities.slice(0, 4), ...topics.slice(0, 6), ...tokensFrom(objective, {})]).filter((token) => token.length > 1);
+  const terms = uniq([...entities.slice(0, 4), ...topics.slice(0, 6), ...words(objective)]).filter((token) => token.length > 1);
   return terms.join(' ').trim() || objective.trim();
 }
 
@@ -179,7 +175,7 @@ function estimateConfidence(objective: string, context: Record<string, unknown>,
   return clamp(structure + contextClarity + lexicalCoverage);
 }
 
-function deepSemanticExtraction(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
+function localSemanticExtraction(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
   const text = bundle(objective, context);
   const entities = uniq([...extractEntities(text), ...(Array.isArray(context.entities) ? (context.entities as unknown[]).map(String) : [])]).slice(0, 16);
   const freshness = detectFreshness(text);
@@ -319,7 +315,88 @@ function asNluOutput(value: unknown): SemanticNluOutput | null {
   };
 }
 
-export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider: string, fallbackUsed: boolean): SearchIntent {
+function llmEndpoint(): string | null {
+  return (process.env?.POKE_SEMANTIC_NLU_ENDPOINT ?? process.env?.OPENAI_BASE_URL ?? process.env?.OPENAI_API_BASE ?? null) || null;
+}
+
+function llmModel(): string {
+  return process.env?.POKE_SEMANTIC_NLU_MODEL ?? process.env?.OPENAI_MODEL ?? process.env?.OPENAI_DEFAULT_MODEL ?? 'gpt-4.1-mini';
+}
+
+function promptForExtraction(objective: string, context: Record<string, unknown>): string {
+  return [
+    'Return JSON only.',
+    'Extract a deep semantic decomposition of the search objective.',
+    'Required fields: semanticQuery, entities, topics, constraints, sourcePriors, semanticFrames, decomposedQuestions, ambiguities, freshness, focus, hopBudget, trustMode, confidence, warnings.',
+    'Interpret intents, constraints, source priors, and hop budget from the objective and context.',
+    `Objective: ${objective}`,
+    `Context: ${JSON.stringify(context)}`,
+    `Schema: ${JSON.stringify(SEMANTIC_NLU_SCHEMA)}`,
+  ].join('\n');
+}
+
+function extractTextFromResponse(payload: unknown): string {
+  if (!payload || typeof payload !== 'object') return '';
+  const record = payload as Record<string, unknown>;
+  if (typeof record.output_text === 'string') return record.output_text;
+  if (typeof record.text === 'string') return record.text;
+  if (typeof record.content === 'string') return record.content;
+  const choices = Array.isArray(record.choices) ? record.choices : [];
+  for (const choice of choices) {
+    if (!choice || typeof choice !== 'object') continue;
+    const candidate = choice as Record<string, unknown>;
+    if (typeof candidate.message === 'object' && candidate.message && !Array.isArray(candidate.message)) {
+      const message = candidate.message as Record<string, unknown>;
+      if (typeof message.content === 'string') return message.content;
+    }
+    if (typeof candidate.text === 'string') return candidate.text;
+  }
+  if (Array.isArray(record.output)) {
+    for (const item of record.output) {
+      if (item && typeof item === 'object' && !Array.isArray(item)) {
+        const entry = item as Record<string, unknown>;
+        if (typeof entry.content === 'string') return entry.content;
+      }
+    }
+  }
+  return '';
+}
+
+async function invokeSemanticNluProvider(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): Promise<unknown> {
+  const endpoint = llmEndpoint();
+  if (!endpoint) throw new Error('semantic-nlu-provider-not-configured');
+  const apiKey = process.env?.POKE_SEMANTIC_NLU_API_KEY ?? process.env?.OPENAI_API_KEY ?? process.env?.ANTHROPIC_API_KEY ?? '';
+  const url = endpoint.replace(/\/$/, '').includes('/v1') ? endpoint.replace(/\/$/, '') : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
+  const body = {
+    model: llmModel(),
+    temperature: 0,
+    messages: [
+      { role: 'system', content: 'You are a semantic search NLU model. Return valid JSON only. Do not add prose.' },
+      { role: 'user', content: promptForExtraction(objective, context) },
+    ],
+    response_format: { type: 'json_object' },
+    metadata: { schema },
+  };
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) throw new Error(`semantic-nlu-provider-error:${response.status}`);
+  const payload = await response.json();
+  const text = extractTextFromResponse(payload);
+  if (!text.trim()) {
+    if (typeof payload === 'object' && payload && 'json' in (payload as Record<string, unknown>)) return (payload as Record<string, unknown>).json;
+    return payload;
+  }
+  const cleaned = text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
+  return JSON.parse(cleaned);
+}
+
+function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider: string, fallbackUsed: boolean): SearchIntent {
   const normalizedObjective = objective.trim();
   const sourceHints = uniq(nlu.sourcePriors.map((prior) => prior.source).filter((source): source is SearchSource => source === 'web' || source === 'realtime-web' || source === 'scholar' || source === 'github' || source === 'memory' || source === 'email' || source === 'calendar' || source === 'filesystem' || source === 'integration'));
   const querySeeds = uniq([nlu.semanticQuery, ...nlu.entities.map((entity) => `${entity} ${nlu.topics[0] ?? ''}`.trim()), ...nlu.topics.map((topic) => `${topic} ${nlu.entities[0] ?? ''}`.trim())]).slice(0, 6);
@@ -351,19 +428,19 @@ export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, pr
 export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
   const activeProvider = provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
-  if (!extracted) throw new Error(`invalid-semantic-nlu-output:${activeProvider.name}`);
-  return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, activeProvider.name !== DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name && !strict);
+  if (!extracted) throw new Error(`invalid-semantic-nlu-output:${activeProvider.name}${strict ? ':strict' : ''}`);
+  return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, false);
 }
 
 export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
-  const extracted = normalizeSemanticOutput(deepSemanticExtraction(objective, context));
+  const extracted = normalizeSemanticOutput(localSemanticExtraction(objective, context));
   return buildIntentFromNlu(objective, extracted, DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
 }
 
 export const DEFAULT_LLM_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
-  name: 'llm-backed-semantic-default',
-  async extract({ objective, context }) {
-    return normalizeSemanticOutput(deepSemanticExtraction(objective, context));
+  name: 'llm-semantic-inference',
+  async extract({ objective, context, schema }) {
+    return invokeSemanticNluProvider(objective, context, schema);
   },
 };
 

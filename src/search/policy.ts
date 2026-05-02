@@ -9,6 +9,17 @@ type PolicySnapshot = Omit<SearchPolicyState, 'history'>;
 
 type StrategyLogic = NonNullable<NonNullable<SearchPolicyState['reasoningArchitecture']>['strategyLogic']>;
 
+type RuntimeCompositionMutator = (composition: RuntimeComposition) => void;
+let runtimeCompositionMutator: RuntimeCompositionMutator | null = null;
+
+export function registerRuntimeCompositionMutator(mutator: RuntimeCompositionMutator | null): void {
+  runtimeCompositionMutator = mutator;
+}
+
+export function rewriteSearchIndexRuntime(composition: RuntimeComposition): void {
+  runtimeCompositionMutator?.(composition);
+}
+
 export type PolicyRewriteProvider = {
   name: string;
   synthesize(input: { feedback: SearchPolicyFeedback; current: SearchPolicyState; guardrails: string[] }): Promise<unknown>;
@@ -136,7 +147,7 @@ export function defaultPolicy(): SearchPolicyState {
     epistemicModel: {
       version: 2,
       calibration: 0.68,
-      classPriors: { primary: 0.9, expert: 0.84, institutional: 0.76, community: 0.62, unknown: 0.5 },
+      classPriors: { primary: 0.5, expert: 0.5, institutional: 0.5, community: 0.5, unknown: 0.5 },
       sourceMemory: {},
       domainMemory: {},
       knowledgeClassRepresentations: {
@@ -310,7 +321,7 @@ function rulesFromFeedback(feedback: SearchPolicyFeedback): SearchPolicyRule[] {
       enabled: true,
       when: { latentNeed: feedback.latentNeeds?.[0] },
       actions: [{ type: 'prefer-provider-nlu', value: 'semantic-frame-required', weight: 0.3 }],
-      guardrails: ['fallback-required', 'audit-required'],
+      guardrails: ['audit-required'],
     });
   }
   return rules;
@@ -499,7 +510,7 @@ export class SearchPolicyStore {
         runtimeComposition: payload.runtimeComposition ?? feedback.runtimeComposition,
       };
       const nextState = this.rewriteFromFeedback(mergedFeedback);
-      if (payload.runtimeComposition) rewriteSearchIndexRuntime(payload.runtimeComposition as RuntimeComposition);
+      if (payload.runtimeComposition) runtimeCompositionMutator?.(payload.runtimeComposition as RuntimeComposition);
       return nextState;
     } catch {
       return this.rewriteFromFeedback(feedback);

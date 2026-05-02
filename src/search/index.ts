@@ -1,9 +1,9 @@
-import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile } from './types.ts';
+import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile, RuntimeComposition } from './types.ts';
 import { buildSourceRanking, scoreEvidenceTrust } from './trust.ts';
 import { buildEvidenceGraph, buildQueries, deriveHopPlan } from './reasoning.ts';
 import { forecastNextSignals } from './forecast.ts';
-import { chooseStrategy, fallbackStrategyChoose, DEFAULT_STATE_PATH, evaluatePolicy, SearchPolicyStore } from './policy.ts';
-import { DEFAULTLLMSEMANTICNLUPROVIDER, understandSearchIntent, understandSearchIntentWithNlu, type SemanticNluProvider } from './nlu.ts';
+import { chooseStrategy, fallbackStrategyChoose, DEFAULT_STATE_PATH, evaluatePolicy, SearchPolicyStore, createDefaultPolicyRewriteProvider, registerRuntimeCompositionMutator } from './policy.ts';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, understandSearchIntent, understandSearchIntentWithNlu, type SemanticNluProvider } from './nlu.ts';
 import { clamp } from './utils.ts';
 
 export * from './types.ts';
@@ -14,19 +14,37 @@ export * from './knowledge-graph.ts';
 export * from './forecast.ts';
 export * from './policy.ts';
 
+let activeRuntimeComposition: RuntimeComposition | null = null;
+
+registerRuntimeCompositionMutator((composition) => {
+  activeRuntimeComposition = composition;
+});
+
+export function rewriteSearchIndexRuntime(composition: RuntimeComposition): void {
+  activeRuntimeComposition = composition;
+}
+
+function runtimeCompositionFromState(state: any): RuntimeComposition | null {
+  return (state?.reasoningArchitecture?.runtimeComposition ?? null) as RuntimeComposition | null;
+}
+
+function activeComposition(state: any): RuntimeComposition | null {
+  return activeRuntimeComposition ?? runtimeCompositionFromState(state);
+}
+
 function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan['sourceRanking']): string[] {
   return [
     `trust-mode=${intent.trustMode}`,
     `freshness=${intent.freshness}`,
     `hop-budget=${intent.hopBudget}`,
-    `nlu=${intent.nlu.provider}:${intent.nlu.confidence.toFixed(2)} path=${intent.nlu.fallbackUsed ? 'bootstrap' : 'semantic'}`,
+    `nlu=${intent.nlu.provider}:${intent.nlu.confidence.toFixed(2)} path=${intent.nlu.fallbackUsed ? 'legacy' : 'semantic'}`,
     ...sourceRanking.slice(0, 3).map((entry) => `${entry.source}:${entry.score.toFixed(2)}:${entry.reason}`),
   ];
 }
 
-// BEGIN GENERATED SEARCH RUNTIME
 export function resolveRuntimeStrategy(intent: ReturnType<typeof understandSearchIntent>, state: any): SearchStrategyProfile {
-  const source = state.reasoningArchitecture?.runtimeComposition?.strategySelectorSource;
+  const composition = activeComposition(state);
+  const source = composition?.strategySelectorSource;
   if (!source) return chooseStrategy(intent, state);
   try {
     const evaluator = new Function('intent', 'policy', 'fallbackChoose', `const factory = (${source}); return factory(intent, policy, fallbackChoose);`) as (intent: any, policy: any, fallbackChoose: typeof fallbackStrategyChoose) => SearchStrategyProfile;
@@ -37,7 +55,8 @@ export function resolveRuntimeStrategy(intent: ReturnType<typeof understandSearc
 }
 
 export function applyRuntimePipeline(plan: SearchPlan, state: any): SearchPlan {
-  const source = state.reasoningArchitecture?.runtimeComposition?.pipelineSource;
+  const composition = activeComposition(state);
+  const source = composition?.pipelineSource;
   if (!source) return plan;
   try {
     const evaluator = new Function('plan', 'policy', `const factory = (${source}); return factory(plan, policy);`) as (plan: SearchPlan, policy: any) => SearchPlan;
@@ -46,16 +65,16 @@ export function applyRuntimePipeline(plan: SearchPlan, state: any): SearchPlan {
     return plan;
   }
 }
-// END GENERATED SEARCH RUNTIME
 
 export class SearchSession {
   private readonly store: SearchPolicyStore;
   private state: any;
 
-  constructor(private options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean } = {}) {
+  constructor(private options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean; policyRewriteProvider?: ReturnType<typeof createDefaultPolicyRewriteProvider> } = {}) {
     this.store = new SearchPolicyStore(options.policyPath);
-    this.options.nluProvider ??= DEFAULTLLMSEMANTICNLUPROVIDER;
+    this.options.nluProvider ??= DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
     this.options.strictSemanticNlu ??= true;
+    this.options.policyRewriteProvider ??= createDefaultPolicyRewriteProvider();
     this.state = this.store.load();
   }
 
@@ -76,7 +95,7 @@ export class SearchSession {
     const hopPlan = deriveHopPlan(effectiveIntent, strategy, trustedResults);
     if (learn) {
       const score = clamp(evidenceGraph.confidence * 0.55 + Math.min(1, results.length / 4) * 0.25 + strategy.lastScore * 0.2);
-      this.learn(intent, strategy, trustedResults, score);
+      void this.learn(intent, strategy, trustedResults, score).catch(() => undefined);
     }
     const plan: SearchPlan = { intent: effectiveIntent, strategy, queries, sourceRanking, hopPlan, trustNotes: [...trustNotes, `policy=${policyDecision.matchedRules.join('|') || 'none'}`], predictedSignals, evidenceGraph };
     return applyRuntimePipeline(plan, this.state);
@@ -92,7 +111,7 @@ export class SearchSession {
 
   async planAuto(objective: string, context: Record<string, unknown> = {}): Promise<SearchPlan> {
     this.state = this.store.load();
-    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULTLLMSEMANTICNLUPROVIDER, this.options.strictSemanticNlu), context);
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, this.options.strictSemanticNlu), context);
   }
 
   fuse(intent: ReturnType<typeof understandSearchIntent>, results: SearchResult[], strategy = resolveRuntimeStrategy(intent, this.state)) {
@@ -106,9 +125,20 @@ export class SearchSession {
     return this.state;
   }
 
-  learn(intent: ReturnType<typeof understandSearchIntent>, strategy: SearchStrategyProfile, results: SearchResult[], score = 0.5) {
+  async learn(intent: ReturnType<typeof understandSearchIntent>, strategy: SearchStrategyProfile, results: SearchResult[], score = 0.5) {
     const source = results[0]?.source ?? intent.sourceHints[0] ?? 'web';
-    return this.recordOutcome({ sessionKey: intent.sessionKey, strategyId: strategy.id, query: intent.semanticQuery, source, score, useful: score >= 0.7, hopsUsed: Math.max(1, intent.hopBudget), resultCount: results.length, relevantCount: results.filter((result) => (result.score ?? result.trust ?? 0.5) >= 0.7).length, resultUrls: results.map((result) => result.url).filter(Boolean), resultDomains: results.map((result) => { try { return new URL(result.url).hostname.replace(/^www\./, ''); } catch { return ''; } }).filter(Boolean), notes: [] });
+    const state = this.recordOutcome({ sessionKey: intent.sessionKey, strategyId: strategy.id, query: intent.semanticQuery, source, score, useful: score >= 0.7, hopsUsed: Math.max(1, intent.hopBudget), resultCount: results.length, relevantCount: results.filter((result) => (result.score ?? result.trust ?? 0.5) >= 0.7).length, resultUrls: results.map((result) => result.url).filter(Boolean), resultDomains: results.map((result) => { try { return new URL(result.url).hostname.replace(/^www\./, ''); } catch { return ''; } }).filter(Boolean), notes: [] });
+    if (score < 0.68 || results.length === 0) {
+      const feedback = {
+        summary: `outcome failure for ${intent.semanticQuery}`,
+        failedQueries: [intent.semanticQuery],
+        failedSources: [source],
+        latentNeeds: intent.topics.slice(0, 3),
+        desiredBehavior: 'rewrite the live search composition to emphasize the failing semantic and trust signals',
+      };
+      void this.rewritePolicyFromFeedbackSemantic(feedback, this.options.policyRewriteProvider).catch(() => state);
+    }
+    return state;
   }
 
   forecast(objective: string, context: Record<string, unknown> = {}) {
@@ -127,12 +157,12 @@ export class SearchSession {
   }
 
   async runSemantic(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): Promise<SearchPlan> {
-    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULTLLMSEMANTICNLUPROVIDER, this.options.strictSemanticNlu), context, results, true);
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, this.options.strictSemanticNlu), context, results, true);
   }
 
   async runAuto(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): Promise<SearchPlan> {
     this.state = this.store.load();
-    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULTLLMSEMANTICNLUPROVIDER, this.options.strictSemanticNlu), context, results, true);
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, this.options.strictSemanticNlu), context, results, true);
   }
 
   rewritePolicyFromFeedback(feedback: Parameters<SearchPolicyStore['rewriteFromFeedback']>[0]) {
@@ -151,7 +181,7 @@ export class SearchSession {
   }
 }
 
-export function createSearchSession(options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean } = {}): SearchSession {
+export function createSearchSession(options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean; policyRewriteProvider?: ReturnType<typeof createDefaultPolicyRewriteProvider> } = {}): SearchSession {
   return new SearchSession(options);
 }
 
@@ -160,7 +190,7 @@ export function buildSearchIntent(objective: string, context: Record<string, unk
 }
 
 export async function buildSemanticSearchIntent(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider) {
-  return understandSearchIntentWithNlu(objective, context, provider ?? DEFAULTLLMSEMANTICNLUPROVIDER, true);
+  return understandSearchIntentWithNlu(objective, context, provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, true);
 }
 
 export function formatSearchAudit(): string {
