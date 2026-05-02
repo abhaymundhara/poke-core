@@ -1,6 +1,7 @@
 import { resolve } from 'node:path';
 import type { PolicyDecision, SearchFocus, SearchIntent, SearchOutcome, SearchPolicyRule, SearchPolicyState, SearchSignalForecast, SearchSource, SearchSourceReliability, SearchStrategyProfile } from './types.ts';
-import { clamp, nowMs, readJson, writeJson } from './utils.ts';
+import { clamp, nowMs, readJson, writeJson, stableHash } from './utils.ts';
+import { updateEpistemicTrustModel } from './trust.ts';
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.poke-core', 'search-policy.json');
 
@@ -35,6 +36,45 @@ function strategyTemplate(id: string, name: string, description: string, sourceW
 function reliability(source: SearchSource, score: number): SearchSourceReliability {
   return { source, score, uses: 0, successes: 0, failures: 0, lastObservedAt: null, notes: [] };
 }
+function architectureBias(policy: SearchPolicyState, strategy: SearchStrategyProfile): number {
+  const logic = policy.reasoningArchitecture?.strategyLogic;
+  if (!logic) return 1;
+  let bias = 1;
+  if (logic.search.includes('semantic') && strategy.id === 'semantic-first') bias += 0.14;
+  if (logic.trust.includes('bayesian') && strategy.id === 'trust-first') bias += 0.16;
+  if (logic.conflict.includes('proposition') && strategy.id === 'multi-hop') bias += 0.12;
+  if (logic.search.includes('distribution') && strategy.id === 'blend') bias += 0.08;
+  return bias;
+}
+
+function ensureArchitecture(state: SearchPolicyState): NonNullable<SearchPolicyState['reasoningArchitecture']> {
+  return state.reasoningArchitecture ?? (state.reasoningArchitecture = {
+    version: 1,
+    name: 'llm-first-adaptive-architecture',
+    activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'],
+    primaryReasoner: 'llm-default',
+    strategyBias: {},
+    selfModificationCount: 0,
+    explanationStyle: 'balanced',
+    rewriteHistory: [],
+    guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'],
+    strategyLogic: { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: ['web', 'realtime-web', 'scholar', 'github'], trustSignals: ['corroboration', 'recency', 'domainMemory'], conflictSignals: ['negation', 'entailment', 'counterevidence'] },
+    revisionLog: [],
+  });
+}
+
+function rewriteArchitectureFromFeedback(architecture: NonNullable<SearchPolicyState['reasoningArchitecture']>, summary: string, source: string): string[] {
+  const changes: string[] = [];
+  if (/semantic|intent|ambiguous|nlu/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: 'llm-semantic-decomposition', trust: architecture.strategyLogic?.trust ?? 'bayesian-domain-learning', conflict: architecture.strategyLogic?.conflict ?? 'proposition-entailment', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: architecture.strategyLogic?.trustSignals ?? [], conflictSignals: architecture.strategyLogic?.conflictSignals ?? [] }; changes.push('search->llm-semantic-decomposition'); architecture.explanationStyle = 'thorough'; architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.08); }
+  if (/trust|verify|reliable|hallucinat|wrong|source/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: architecture.strategyLogic?.search ?? 'semantic-decomposition', trust: 'epistemic-calibration-with-domain-memory', conflict: architecture.strategyLogic?.conflict ?? 'proposition-entailment', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: ['domainMemory', 'outcomeFeedback', 'corroboration'], conflictSignals: architecture.strategyLogic?.conflictSignals ?? [] }; changes.push('trust->epistemic-calibration-with-domain-memory'); architecture.strategyBias['trust-first'] = clamp((architecture.strategyBias['trust-first'] ?? 0.08) + 0.1); architecture.strategyBias['multi-hop'] = clamp((architecture.strategyBias['multi-hop'] ?? 0.08) + 0.04); }
+  if (/conflict|contradict|entail|proposition|claim/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: architecture.strategyLogic?.search ?? 'semantic-decomposition', trust: architecture.strategyLogic?.trust ?? 'bayesian-domain-learning', conflict: 'proposition-graph-reconciliation', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: architecture.strategyLogic?.trustSignals ?? [], conflictSignals: ['entailment', 'contradiction', 'propositionGraph'] }; changes.push('conflict->proposition-graph-reconciliation'); architecture.strategyBias['multi-hop'] = clamp((architecture.strategyBias['multi-hop'] ?? 0.08) + 0.08); }
+  if (/forecast|predict|future|trajectory/i.test(summary)) { architecture.strategyLogic = { ...(architecture.strategyLogic ?? { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: [], trustSignals: [], conflictSignals: [] }), search: 'distributional-trajectory-search', trust: architecture.strategyLogic?.trust ?? 'bayesian-domain-learning', conflict: architecture.strategyLogic?.conflict ?? 'proposition-entailment', searchSources: architecture.strategyLogic?.searchSources ?? [], trustSignals: architecture.strategyLogic?.trustSignals ?? [], conflictSignals: architecture.strategyLogic?.conflictSignals ?? [] }; changes.push('search->distributional-trajectory-search'); architecture.strategyBias['freshness-first'] = clamp((architecture.strategyBias['freshness-first'] ?? 0.08) + 0.06); }
+  architecture.revisionLog = [...(architecture.revisionLog ?? []), { at: nowMs(), source, focus: 'strategy', change: changes.join(';') || summary }].slice(-25);
+  architecture.rewriteHistory.push({ at: nowMs(), source, change: summary });
+  architecture.selfModificationCount += 1;
+  return changes;
+}
+
 
 export function defaultPolicy(): SearchPolicyState {
   return {
@@ -81,6 +121,8 @@ export function defaultPolicy(): SearchPolicyState {
       explanationStyle: 'balanced',
       rewriteHistory: [],
       guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'],
+      strategyLogic: { search: 'semantic-decomposition', trust: 'bayesian-domain-learning', conflict: 'proposition-entailment', searchSources: ['web', 'realtime-web', 'scholar', 'github'], trustSignals: ['corroboration', 'recency', 'domainMemory'], conflictSignals: ['negation', 'entailment', 'counterevidence'] },
+      revisionLog: [],
     },
     queryProfiles: {},
     forecasts: [],
@@ -119,11 +161,12 @@ function scoreStrategy(intent: SearchIntent, strategy: SearchStrategyProfile, po
   const semanticBoost = strategy.semanticBias * (intent.focus === 'semantic' ? 1.1 : 1);
   const profile = policy.queryProfiles[intent.sessionKey];
   const historicalBoost = profile ? 0.8 + profile.averageScore * 0.4 : 1;
-  return sourceScore * freshnessBoost * trustBoost * hopBoost * semanticBoost * historicalBoost;
+  return sourceScore * freshnessBoost * trustBoost * hopBoost * semanticBoost * historicalBoost * architectureBias(policy, strategy);
 }
 
 export function chooseStrategy(intent: SearchIntent, policy: SearchPolicyState): SearchStrategyProfile {
-  const scored = policy.strategies.map((strategy) => ({ strategy, score: scoreStrategy(intent, strategy, policy) * (0.7 + strategy.lastScore * 0.3) }));
+  const architecture = policy.reasoningArchitecture ?? ensureArchitecture(policy);
+  const scored = policy.strategies.map((strategy) => ({ strategy, score: scoreStrategy(intent, strategy, policy) * (0.7 + strategy.lastScore * 0.3) * architectureBias(policy, strategy) }));
   scored.sort((left, right) => right.score - left.score);
   return scored[0]?.strategy ?? defaultPolicy().strategies[0];
 }
@@ -242,7 +285,7 @@ export class SearchPolicyStore {
     profile.lastUpdatedAt = nowMs();
     profile.averageScore = profile.averageScore === 0 ? outcome.score : profile.averageScore * 0.7 + outcome.score * 0.3;
     state.queryProfiles[outcome.sessionKey] = profile;
-    const architecture = state.reasoningArchitecture ?? (state.reasoningArchitecture = { version: 1, name: 'llm-first-adaptive-architecture', activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'], primaryReasoner: 'llm-default', strategyBias: {}, selfModificationCount: 0, explanationStyle: 'balanced', rewriteHistory: [], guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] });
+    const architecture = ensureArchitecture(state);
     architecture.selfModificationCount += 1;
     architecture.rewriteHistory.push({ at: nowMs(), source: 'outcome', change: (useful ? 'reinforce:' : 'correct:') + outcome.strategyId + ':' + outcome.query });
     architecture.strategyBias[outcome.strategyId] = clamp((architecture.strategyBias[outcome.strategyId] ?? 0) * 0.85 + outcome.score * 0.15);
@@ -250,6 +293,7 @@ export class SearchPolicyStore {
       architecture.strategyBias['proposition-reasoning'] = clamp((architecture.strategyBias['proposition-reasoning'] ?? 0.08) + 0.04);
       architecture.strategyBias['epistemic-trust'] = clamp((architecture.strategyBias['epistemic-trust'] ?? 0.08) + 0.04);
     }
+    state.epistemicModel = updateEpistemicTrustModel(state.epistemicModel, { source, resultDomains: outcome.resultDomains ?? [], useful, score: outcome.score, notes: outcome.notes ?? [] });
     state.reasoningArchitecture = architecture;
     this.save(state);
     return state;
@@ -268,15 +312,8 @@ export class SearchPolicyStore {
       entry.notes.push(`rewrite:${feedback.summary}`);
     }
     if (feedback.forecasts) next.forecasts = feedback.forecasts;
-    const architecture = next.reasoningArchitecture ?? (next.reasoningArchitecture = { version: 1, name: 'llm-first-adaptive-architecture', activeModules: ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'], primaryReasoner: 'llm-default', strategyBias: {}, selfModificationCount: 0, explanationStyle: 'balanced', rewriteHistory: [], guardrails: ['bounded-hop-budget', 'audit-required', 'fallback-required'] });
-    architecture.selfModificationCount += 1;
-    architecture.rewriteHistory.push({ at: nowMs(), source: 'rewrite', change: feedback.summary });
-    if (/semantic|intent|ambiguous/i.test(feedback.summary)) architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.08);
-    if (/trust|verify|reliable|hallucinat|wrong/i.test(feedback.summary)) {
-      architecture.strategyBias['trust-first'] = clamp((architecture.strategyBias['trust-first'] ?? 0.08) + 0.1);
-      architecture.strategyBias['multi-hop'] = clamp((architecture.strategyBias['multi-hop'] ?? 0.08) + 0.04);
-    }
-    if (/forecast|predict|future/i.test(feedback.summary)) architecture.strategyBias['freshness-first'] = clamp((architecture.strategyBias['freshness-first'] ?? 0.08) + 0.06);
+    const architecture = ensureArchitecture(next);
+    rewriteArchitectureFromFeedback(architecture, feedback.summary, 'rewrite');
     const violations = validateRules(next.rules);
     next.auditLog.push({ at: nowMs(), action: 'rewrite-from-feedback', version: next.version, summary: feedback.summary, accepted: violations.length === 0, guardrails: violations });
     if (violations.length > 0) {
