@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { buildBehavioralModel } from '../memory/behavioral-theory';
 import { BehavioralLearningLayer, type BehavioralObservation, type BehavioralPattern, type LearnedBehaviorFact } from '../memory/behavioral-learning';
-import { createFixedClock } from '../runtime/clock';
+import { createDriftingClock } from '../runtime/clock';
 import type { Attendee, RecurrenceSpec, ThreadIdentityInput } from '../deep-primitives';
 import type { VisionFrame } from '../skills/computer-use';
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
@@ -165,9 +165,9 @@ function buildTheory(seed: string, now: number, rng: Rng): UserBehaviorTheory {
 function synthesizeEpisodesFromTheory(theory: UserBehaviorTheory, seed: string, now: number): EpisodicMemoryItem[] {
   const source = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
   return source.slice(0, 3).map((text, index) => ({
-    id: `ep-${hashText(seed, text, String(index)).slice(0, 18)}`,
-    taskId: `task-${hashText(seed, 'task', String(index)).slice(0, 18)}`,
-    category: token(seed, 'episode-category', index),
+    id: hashText(seed, text, String(index)).slice(0, 18),
+    taskId: hashText(seed, String(index), 'task').slice(0, 18),
+    category: token(seed, String(index), index),
     summary: phraseFromText(text, seed, index),
     signals: words(text).slice(0, 5),
     score: Number((0.78 + index * 0.04).toFixed(3)),
@@ -178,11 +178,10 @@ function synthesizeEpisodesFromTheory(theory: UserBehaviorTheory, seed: string, 
 function buildParticipants(seed: string, theory: UserBehaviorTheory): ThreadIdentityInput['participants'] {
   const pools = theoryWords(theory);
   const derived = pools.slice(0, 3).map((word, index) => ({
-    email: `${word.replace(/[^a-z0-9]+/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '')}.${index}.${hashText(seed, 'email', String(index)).slice(0, 8)}@${hashText(seed, 'domain').slice(0, 10)}.local`,
-    name: cleanText(`${word} ${token(seed, 'name', index)}`),
-    role: token(seed, 'participant-role', index),
+    email: `${word.replace(/[^a-z0-9]+/g, '.').replace(/\.+/g, '.').replace(/^\.|\.$/g, '')}.${index}.${hashText(seed, String(index), 'email').slice(0, 8)}@${hashText(seed, String(index), 'domain').slice(0, 10)}.local`,
+    name: cleanText(`${word} ${token(seed, String(index), index)}`),
   }));
-  return derived.length > 0 ? derived : [{ email: `${token(seed, 'email', 0)}@${hashText(seed, 'domain').slice(0, 10)}.local`, name: token(seed, 'name', 0), role: 'required' as const }];
+  return derived.length > 0 ? derived : [{ email: `${token(seed, '0', 0)}@${hashText(seed, '0', 'domain').slice(0, 10)}.local`, name: token(seed, '0', 0) }];
 }
 
 function buildThreadIdentity(theory: UserBehaviorTheory, seed: string, scope: string, index: number, participants: ThreadIdentityInput['participants'], rootMessageId: string): ThreadIdentityInput {
@@ -190,7 +189,7 @@ function buildThreadIdentity(theory: UserBehaviorTheory, seed: string, scope: st
   return {
     subject,
     participants,
-    messageId: `<${hashText(seed, scope, 'message', String(index)).slice(0, 18)}@${hashText(seed, 'mail').slice(0, 12)}.local>`,
+    messageId: hashText(seed, scope, String(index), 'message').slice(0, 32),
     rootMessageId,
     inReplyTo: rootMessageId,
     references: [rootMessageId],
@@ -200,24 +199,24 @@ function buildThreadIdentity(theory: UserBehaviorTheory, seed: string, scope: st
 }
 
 function buildUiFrames(theory: UserBehaviorTheory, seed: string): VisionFrame[] {
-  const stableSelectors = [token(seed, 'selector', 0), token(seed, 'selector', 1)];
-  const driftSelectors = [token(seed, 'selector', 2), token(seed, 'selector', 3)];
+  const stableSelectors = [token(seed, '0', 0), token(seed, '1', 1)];
+  const driftSelectors = [token(seed, '2', 2), token(seed, '3', 3)];
   return [0, 1, 2].map((index) => {
-    const overlay = index === 1;
-    const selectors = overlay ? driftSelectors : stableSelectors;
-    const mode = token(seed, 'mode', index);
-    const title = phraseFromTheory(theory, seed, `title-${mode}`, index);
-    const body = phraseFromTheory(theory, seed, `body-${mode}`, index + 1);
-    const overlayCopy = overlay ? phraseFromTheory(theory, seed, `overlay-${mode}`, index + 2) : phraseFromTheory(theory, seed, `steady-${mode}`, index + 2);
-    const dom = JSON.stringify({ mode, title, body, overlay, selectors, overlayCopy, seed: token(seed, 'ui', index) });
+    const over = index === 1;
+    const selectors = over ? driftSelectors : stableSelectors;
+    const scope = token(seed, String(index), index);
+    const a = phraseFromTheory(theory, seed, scope, index);
+    const b = phraseFromTheory(theory, seed, token(seed, scope, 1), index + 1);
+    const c = phraseFromTheory(theory, seed, token(seed, scope, 2), index + 2);
+    const dom = JSON.stringify({ a, b, c, d: over ? token(seed, scope, 3) : token(seed, scope, 4), e: selectors, f: token(seed, scope, 5) });
     return {
-      id: hashText(seed, mode).slice(0, 20),
-      ocr: cleanText([title, body, overlayCopy, theory.summary, ...theory.persistentGoals.map((goal) => goal.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].join(' ')),
+      id: hashText(seed, scope).slice(0, 20),
+      ocr: cleanText([a, b, c, theory.summary, ...theory.persistentGoals.map((goal) => goal.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].join(' ')),
       dom,
       selectors,
-      activeTabId: hashText(seed, 'tab', mode).slice(0, 18),
-      activeWindowId: hashText(seed, 'window', mode).slice(0, 18),
-      viewport: { width: 1280, height: overlay ? 790 : 816 },
+      activeTabId: hashText(seed, 'tab', scope).slice(0, 18),
+      activeWindowId: hashText(seed, 'window', scope).slice(0, 18),
+      viewport: { width: 1280, height: over ? 790 : 816 },
     };
   });
 }
@@ -234,9 +233,9 @@ function buildMemoryFacts(theory: UserBehaviorTheory, seed: string, now: number)
 
 function buildEpisodes(theory: UserBehaviorTheory, seed: string, now: number): EpisodicMemoryItem[] {
   return [...theory.persistentGoals, ...theory.crossContextGeneralizations].slice(0, 3).map((entry, index) => ({
-    id: `ep-${hashText(seed, entry.goal ?? entry.generalization, String(index)).slice(0, 18)}`,
-    taskId: `task-${hashText(seed, 'task', String(index)).slice(0, 18)}`,
-    category: token(seed, 'memory-category', index),
+    id: hashText(seed, entry.goal ?? entry.generalization, String(index)).slice(0, 18),
+    taskId: hashText(seed, String(index), 'task').slice(0, 18),
+    category: token(seed, String(index), index),
     summary: cleanText(`${index === 0 ? entry.goal : entry.generalization} ${phraseFromText(entry.goal ?? entry.generalization, seed, index)}`),
     signals: words(entry.goal ?? entry.generalization).slice(0, 5),
     score: Number((0.8 + index * 0.05).toFixed(3)),
@@ -315,15 +314,11 @@ function buildTaskHint(theory: UserBehaviorTheory, seed: string): string {
 }
 
 function buildLabel(seed: string, taskHint: string, theory: UserBehaviorTheory): string {
-  return cleanText(`${phraseFromTheory(theory, seed, 'label', 0)} ${taskHint} ${token(seed, 'label', 1)}`);
+  return hashText(seed, taskHint, theory.summary, token(seed, taskHint, 0)).slice(0, 24);
 }
 
 function buildLearningLayer(seed: string): BehavioralLearningLayer {
   return new BehavioralLearningLayer({ storagePath: `.poke-core/generated/${seed}/behavioral-state.json` });
-}
-
-function buildScenarioKind(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
-  return cleanText(`${phraseFromTheory(theory, seed, `${scope}-kind`, index, 2, 4)} ${token(seed, scope, index)}`);
 }
 
 export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string; now?: number } = {}): RaidingAiScenario {
@@ -345,7 +340,7 @@ export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string
   const label = buildLabel(seed, taskHint, theory);
   const frames = buildUiFrames(theory, seed);
   const participants = buildParticipants(seed, theory);
-  const threadRoot = `<${hashText(seed, 'root-message').slice(0, 18)}@${hashText(seed, 'mail').slice(0, 12)}.local>`;
+  const threadRoot = hashText(seed, String(now), 'root');
   const threadA = buildThreadIdentity(theory, seed, 'thread-a', 0, participants, threadRoot);
   const threadB = buildThreadIdentity(theory, seed, 'thread-b', 1, participants, threadRoot);
   threadB.references = [threadRoot, threadA.messageId].filter(Boolean) as string[];
@@ -377,31 +372,31 @@ export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string
     memory: { facts, episodes },
     traces: [
       {
-        id: `trace-${hashText(seed, 'computer-use').slice(0, 18)}`,
-        kind: buildScenarioKind(theory, seed, 'computer-use', 0),
+        id: hashText(seed, String(now), '0').slice(0, 18),
+        kind: hashText(seed, theory.summary, '0').slice(0, 24),
         description: cleanText(`${taskHint} ${phraseFromText(theory.summary, seed, 1)}`),
         frames,
         fallbackSelectors: frames[0]?.selectors.slice(0, 2) ?? [],
         expected: { driftRecoveries: 1, frameCount: 3, contextRich: true },
       },
       {
-        id: `trace-${hashText(seed, 'thread-identity').slice(0, 18)}`,
-        kind: buildScenarioKind(theory, seed, 'thread-identity', 1),
+        id: hashText(seed, String(now), '1').slice(0, 18),
+        kind: hashText(seed, theory.summary, '1').slice(0, 24),
         description: cleanText(`${taskHint} ${phraseFromText(theory.crossContextGeneralizations[0]?.generalization ?? theory.summary, seed, 2)}`),
         threadInputs: [threadA, threadB],
         expected: { distinctThreads: true, headerAnchored: true },
       },
       {
-        id: `trace-${hashText(seed, 'memory').slice(0, 18)}`,
-        kind: buildScenarioKind(theory, seed, 'memory', 2),
+        id: hashText(seed, String(now), '2').slice(0, 18),
+        kind: hashText(seed, theory.summary, '2').slice(0, 24),
         description: cleanText(`${taskHint} ${phraseFromText(theory.persistentGoals[0]?.goal ?? theory.summary, seed, 3)}`),
         workingFacts: facts,
         episodicItems: episodes,
         expected: { factsPersisted: true, episodesPersisted: true, theoryAligned: true },
       },
       {
-        id: `trace-${hashText(seed, 'planner').slice(0, 18)}`,
-        kind: buildScenarioKind(theory, seed, 'planner', 3),
+        id: hashText(seed, String(now), '3').slice(0, 18),
+        kind: hashText(seed, theory.summary, '3').slice(0, 24),
         description: cleanText(`${taskHint} ${phraseFromText(theory.summary, seed, 4)}`),
         objective: cleanText(`${phraseFromText(theory.summary, seed, 5)} ${phraseFromText(theory.persistentGoals[0]?.goal ?? theory.summary, seed, 6)} ${phraseFromText(theory.crossContextGeneralizations[0]?.generalization ?? theory.summary, seed, 7)}`),
         expected: { recoveryAware: true, multiStep: true },
@@ -410,5 +405,5 @@ export function buildRaidingAiScenario(input: { seed?: string; taskHint?: string
   };
 }
 
-export const RAIDINGAI_CLOCK = createFixedClock(Date.now());
+export const RAIDINGAI_CLOCK = createDriftingClock();
 export const RAIDINGAI_FIXTURES = buildRaidingAiScenario();
