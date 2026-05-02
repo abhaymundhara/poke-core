@@ -3,7 +3,11 @@ import { clamp, stableHash, uniq, words } from './utils.ts';
 import { scoreEvidenceTrust } from './trust.ts';
 
 function normalizeText(text: string): string {
-  return text.toLowerCase().replace(/[^a-z0-9@._:-]+/g, ' ').replace(/s+/g, ' ').trim();
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9@._:-]+/g, ' ')
+    .replace(/s+/g, ' ')
+    .trim();
 }
 
 function splitSentences(text: string): string[] {
@@ -11,8 +15,8 @@ function splitSentences(text: string): string[] {
     .split(/(?<=[.!?])s+|
 +/)
     .map((part) => part.trim())
-    .filter((part) => part.length > 12)
-    .slice(0, 4);
+    .filter((part) => part.length > 8)
+    .slice(0, 6);
 }
 
 function claimTextsFromResult(result: SearchResult): string[] {
@@ -25,13 +29,16 @@ function claimTextsFromResult(result: SearchResult): string[] {
 type GroundedSpan = {
   sourceId: string;
   source: string;
+  domain: string;
   url: string;
   kind: 'title' | 'snippet' | 'claim';
   text: string;
   normalized: string;
-  start: number;
-  end: number;
   tokens: string[];
+  polarity: 'affirmed' | 'negated' | 'conditional';
+  modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative';
+  qualifiers: string[];
+  numericFacts: Array<{ value: number; raw: string; unit: string | null }>;
   trust: number;
 };
 
@@ -41,6 +48,9 @@ type GroundedMatch = {
   score: number;
   overlap: number;
   exact: boolean;
+  frameAlignment: number;
+  polarityAgreement: boolean;
+  modalityAgreement: boolean;
 };
 
 type GroundedCandidate = {
@@ -56,6 +66,13 @@ type GroundedCandidate = {
   rationale: string;
 };
 
+const NEGATION_PATTERN = /(not|never|no|without|lacks?|lacking|missing|none|cannot|can't|won't|isn't|aren't|wasn't|weren't|didn't|doesn't|don't)/i;
+const POSSIBLE_PATTERN = /(may|might|could|possibly|probable|likely|uncertain|unverified|appears?|suggests?)/i;
+const REQUIRED_PATTERN = /(must|required|needs? to|necessary|shall|required to)/i;
+const TEMPORAL_PATTERN = /(today|now|current|recent|latest|live|during|before|after|as of|at the time|ongoing)/i;
+const COMPARATIVE_PATTERN = /(compare|versus|against|than|more|less|greater|fewer|higher|lower)/i;
+const PREDICATE_PATTERN = /(is|are|was|were|has|have|can|could|should|would|must|may|might|means|implies|indicates|shows|supports|proves|contradicts|equals|relates to|requires|depends on|contains|includes|confirms|denies)/i;
+
 function tokenize(text: string): string[] {
   return uniq(words(normalizeText(text))).filter((token) => token.length > 1);
 }
@@ -64,74 +81,125 @@ function sourceIdFor(result: TrustedEvidence): string {
   return stableHash((result.url || result.title || result.snippet || String(result.source)) + '|' + String(result.source)).slice(0, 12);
 }
 
+function domainFor(result: TrustedEvidence): string {
+  try {
+    return new URL(result.url).hostname.replace(/^www./, '');
+  } catch {
+    return String(result.source);
+  }
+}
+
+function numericFactsFrom(text: string): Array<{ value: number; raw: string; unit: string | null }> {
+  const facts: Array<{ value: number; raw: string; unit: string | null }> = [];
+  for (const match of text.matchAll(/(-?d+(?:.d+)?)(s?(%|ms|s|sec|seconds|m|min|minutes|h|hr|hours|gb|mb|kb|tb|usd|gbp|eur|km|mi|kg|g|lbs|percent))?/gi)) {
+    facts.push({ value: Number(match[1]), raw: match[0], unit: match[3] ?? null });
+  }
+  return facts;
+}
+
+function extractFrame(text: string): { subject: string; predicate: string; object: string; polarity: 'affirmed' | 'negated' | 'conditional'; modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative'; qualifiers: string[]; tokens: string[]; numericFacts: Array<{ value: number; raw: string; unit: string | null }>; } {
+  const normalized = normalizeText(text);
+  const tokens = tokenize(text);
+  const predicateIndex = tokens.findIndex((token) => /^(is|are|was|were|has|have|can|could|should|would|must|may|might|means|implies|indicates|shows|supports|proves|contradicts|equals|relates|requires|depends|contains|includes|confirms|denies)$/.test(token));
+  let subject = text.trim();
+  let predicate = 'relates-to';
+  let object = normalized;
+  if (predicateIndex > 0 && predicateIndex < tokens.length - 1) {
+    subject = tokens.slice(0, predicateIndex).join(' ');
+    predicate = tokens[predicateIndex];
+    object = tokens.slice(predicateIndex + 1).join(' ');
+  } else {
+    const split = normalized.split(' ');
+    subject = split.slice(0, Math.max(1, Math.min(4, split.length - 1))).join(' ');
+    object = split.slice(Math.max(1, Math.min(4, split.length - 1))).join(' ');
+  }
+  const qualifiers: string[] = [];
+  if (NEGATION_PATTERN.test(text)) qualifiers.push('negated');
+  if (POSSIBLE_PATTERN.test(text)) qualifiers.push('possible');
+  if (REQUIRED_PATTERN.test(text)) qualifiers.push('required');
+  if (TEMPORAL_PATTERN.test(text)) qualifiers.push('temporal');
+  if (COMPARATIVE_PATTERN.test(text)) qualifiers.push('comparative');
+  const polarity: 'affirmed' | 'negated' | 'conditional' = NEGATION_PATTERN.test(text) ? 'negated' : /(if|when|unless|assuming|provided that|in case)/i.test(text) || POSSIBLE_PATTERN.test(text) ? 'conditional' : 'affirmed';
+  const modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative' = qualifiers.includes('required') ? 'required' : qualifiers.includes('temporal') ? 'temporal' : qualifiers.includes('comparative') ? 'comparative' : qualifiers.includes('possible') ? 'possible' : 'asserted';
+  return { subject, predicate, object, polarity, modality, qualifiers, tokens, numericFacts: numericFactsFrom(text) };
+}
+
 function collectGroundedSpans(result: TrustedEvidence): GroundedSpan[] {
   const sourceId = sourceIdFor(result);
   const trust = clamp(result.trustScore ?? result.score ?? result.trust ?? 0.5);
   const source = String(result.source);
+  const domain = domainFor(result);
   const spans: GroundedSpan[] = [];
-  const pushSpan = (kind: GroundedSpan['kind'], text: string, start: number, end: number) => {
+  const pushSpan = (kind: GroundedSpan['kind'], text: string) => {
     const trimmed = text.trim();
     if (!trimmed) return;
+    const frame = extractFrame(trimmed);
     spans.push({
       sourceId,
       source,
+      domain,
       url: result.url,
       kind,
       text: trimmed,
       normalized: normalizeText(trimmed),
-      start,
-      end,
-      tokens: tokenize(trimmed),
+      tokens: frame.tokens,
+      polarity: frame.polarity,
+      modality: frame.modality,
+      qualifiers: frame.qualifiers,
+      numericFacts: frame.numericFacts,
       trust,
     });
   };
 
-  pushSpan('title', result.title, 0, result.title.length);
+  pushSpan('title', result.title);
   if (result.snippet) {
-    let cursor = 0;
-    for (const sentence of splitSentences(result.snippet)) {
-      const index = result.snippet.toLowerCase().indexOf(sentence.toLowerCase(), cursor);
-      const start = index >= 0 ? index : cursor;
-      const end = start + sentence.length;
-      cursor = Math.max(cursor, end);
-      pushSpan('snippet', sentence, start, end);
-    }
+    for (const sentence of splitSentences(result.snippet)) pushSpan('snippet', sentence);
   }
-  for (const claim of result.claims ?? []) {
-    pushSpan('claim', claim, 0, claim.length);
-  }
+  for (const claim of result.claims ?? []) pushSpan('claim', claim);
   return spans;
 }
 
-function scoreSpanMatch(candidateTokens: string[], candidateNormalized: string, span: GroundedSpan, result: TrustedEvidence): GroundedMatch | null {
-  if (!span.normalized) return null;
-  const spanTokens = span.tokens.length > 0 ? span.tokens : tokenize(span.text);
-  const candidateSet = new Set(candidateTokens);
-  const spanSet = new Set(spanTokens);
-  let overlapCount = 0;
-  for (const token of candidateSet) {
-    if (spanSet.has(token)) overlapCount += 1;
-  }
-  const union = new Set([...candidateSet, ...spanSet]).size || 1;
-  const overlap = overlapCount / union;
-  const exact = span.normalized === candidateNormalized || span.normalized.includes(candidateNormalized) || candidateNormalized.includes(span.normalized);
-  const containment = span.normalized.includes(candidateNormalized) || candidateNormalized.includes(span.normalized) ? 1 : 0;
-  const kindBoost = span.kind === 'claim' ? 0.09 : span.kind === 'snippet' ? 0.06 : 0.03;
-  const score = clamp(0.16 + overlap * 0.54 + containment * 0.17 + kindBoost + clamp(result.trustScore ?? result.trust ?? result.score ?? 0.5) * 0.11);
-  if (score < 0.24) return null;
-  return { result, span, score, overlap, exact };
+function frameSimilarity(candidate: ReturnType<typeof extractFrame>, span: GroundedSpan, result: TrustedEvidence): { score: number; overlap: number; exact: boolean; polarityAgreement: boolean; modalityAgreement: boolean; } {
+  const candidateTokens = new Set(candidate.tokens);
+  const spanTokens = new Set(span.tokens);
+  const shared = [...candidateTokens].filter((token) => spanTokens.has(token));
+  const overlap = shared.length / Math.max(1, new Set([...candidateTokens, ...spanTokens]).size);
+  const subjectOverlap = tokenize(candidate.subject).some((token) => spanTokens.has(token)) ? 1 : 0;
+  const objectOverlap = tokenize(candidate.object).some((token) => spanTokens.has(token)) ? 1 : 0;
+  const exact = span.normalized === normalizeText(candidate.subject + ' ' + candidate.predicate + ' ' + candidate.object) || span.normalized === normalizeText(candidate.subject) || span.normalized.includes(normalizeText(candidate.object));
+  const polarityAgreement = candidate.polarity === span.polarity || (candidate.polarity === 'conditional' && span.polarity !== 'negated');
+  const modalityAgreement = candidate.modality === span.modality || (candidate.modality === 'asserted' && span.modality !== 'possible') || (candidate.modality === 'required' && span.modality === 'required');
+  const predicateAgreement = span.text.toLowerCase().includes(candidate.predicate.toLowerCase()) || candidate.predicate === 'relates-to';
+  const numericAgreement = candidate.numericFacts.length === 0 || span.numericFacts.length === 0 || candidate.numericFacts.some((left) => span.numericFacts.some((right) => left.unit === right.unit && Math.abs(left.value - right.value) <= Math.max(0.001, Math.abs(left.value) * 0.05)));
+  let score = 0.28 + overlap * 0.32 + subjectOverlap * 0.12 + objectOverlap * 0.12 + (predicateAgreement ? 0.08 : -0.08) + (numericAgreement ? 0.07 : -0.1) + (span.kind === 'claim' ? 0.04 : span.kind === 'snippet' ? 0.02 : 0);
+  score += 0.08 + span.trust * 0.18 + clamp(result.trustScore ?? result.trust ?? result.score ?? 0.5) * 0.08;
+  if (!polarityAgreement) score -= 0.24;
+  if (!modalityAgreement) score -= candidate.modality === 'asserted' && span.modality === 'possible' ? 0.12 : 0.08;
+  if (!numericAgreement) score -= 0.14;
+  if (candidateTokens.size > 0 && spanTokens.size > 0 && shared.length === 0) score -= 0.18;
+  return { score: clamp(score), overlap, exact, polarityAgreement, modalityAgreement };
 }
 
 function buildGroundedCandidate(text: string, trustedResults: TrustedEvidence[]): GroundedCandidate {
+  const candidate = extractFrame(text);
   const normalized = normalizeText(text);
-  const tokens = tokenize(text);
+  const tokens = candidate.tokens;
   const matches: GroundedMatch[] = [];
   for (const result of trustedResults) {
-    const spans = collectGroundedSpans(result);
     let best: GroundedMatch | null = null;
-    for (const span of spans) {
-      const match = scoreSpanMatch(tokens, normalized, span, result);
-      if (!match) continue;
+    for (const span of collectGroundedSpans(result)) {
+      const similarity = frameSimilarity(candidate, span, result);
+      if (similarity.score < 0.3) continue;
+      const match: GroundedMatch = {
+        result,
+        span,
+        score: similarity.score,
+        overlap: similarity.overlap,
+        exact: similarity.exact,
+        frameAlignment: similarity.score,
+        polarityAgreement: similarity.polarityAgreement,
+        modalityAgreement: similarity.modalityAgreement,
+      };
       if (!best || match.score > best.score) best = match;
     }
     if (best) matches.push(best);
@@ -140,13 +208,23 @@ function buildGroundedCandidate(text: string, trustedResults: TrustedEvidence[])
   const supportSources = uniq(matches.map((match) => String(match.result.source)));
   const supportCount = supportSources.length;
   const independentSources = new Set(matches.map((match) => String(match.result.source))).size;
+  const independentDomains = new Set(matches.map((match) => match.result.provenance?.domain ?? domainFor(match.result))).size;
   const avgScore = matches.length > 0 ? matches.reduce((sum, match) => sum + match.score, 0) / matches.length : 0;
-  const hasNegation = /(not|never|no|without|lacks|missing)/i.test(normalized);
-  const conflictingPolarity = matches.some((match) => /(not|never|no|without|lacks|missing)/i.test(match.span.normalized)) && matches.some((match) => !/(not|never|no|without|lacks|missing)/i.test(match.span.normalized));
-  const crossVerified = supportCount >= 2 && independentSources >= 2 && (avgScore >= 0.38 || matches.some((match) => match.exact));
-  const conflict = Boolean(conflictingPolarity || (hasNegation && !matches.some((match) => /(not|never|no|without|lacks|missing)/i.test(match.span.normalized))));
-  const confidence = clamp(0.2 + avgScore * 0.36 + supportCount * 0.07 + (crossVerified ? 0.22 : 0) - (conflict ? 0.16 : 0));
-  const rationale = 'grounded-spans=' + String(matches.length) + ';cross-source=' + (crossVerified ? 'verified' : 'pending') + ';conflict=' + (conflict ? 'yes' : 'no');
+  const negatedMatches = matches.filter((match) => match.span.polarity === 'negated' || match.result.snippet.toLowerCase().includes(' not ')).length;
+  const assertedMatches = matches.filter((match) => match.span.polarity !== 'negated').length;
+  const conflictingPolarity = negatedMatches > 0 && assertedMatches > 0;
+  const modalityConflict = matches.some((match) => match.span.modality === 'possible') && matches.some((match) => match.span.modality === 'asserted');
+  const crossVerified = supportCount >= 2 && independentSources >= 2 && independentDomains >= 2 && avgScore >= 0.44 && !conflictingPolarity && !modalityConflict;
+  const conflict = Boolean(conflictingPolarity || modalityConflict || (candidate.polarity === 'negated' && assertedMatches > 0));
+  const confidence = clamp(0.14 + avgScore * 0.44 + supportCount * 0.06 + independentDomains * 0.04 + (crossVerified ? 0.22 : 0) - (conflict ? 0.2 : 0) - (tokens.length > 0 && matches.length === 0 ? 0.08 : 0));
+  const rationale = [
+    'frame=' + candidate.subject + '|' + candidate.predicate + '|' + candidate.object,
+    'support=' + String(matches.length),
+    'sources=' + (supportSources.join('|') || 'none'),
+    'cross-source=' + (crossVerified ? 'verified' : 'pending'),
+    'negation=' + (conflict ? 'conflict' : candidate.polarity),
+    'modality=' + candidate.modality,
+  ].join(';');
   return { text, normalized, tokens, matches, supportSources, supportCount, crossVerified, conflict, confidence, rationale };
 }
 
@@ -162,61 +240,23 @@ function candidateTextsFromResults(results: TrustedEvidence[], queries: string[]
 }
 
 function subjectPredicateObject(text: string): { subject: string; predicate: string; object: string; polarity: 'affirmed' | 'negated' | 'conditional'; modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative'; qualifiers: string[] } {
-  const normalized = normalizeText(text);
-  const predicateMatch = normalized.match(/^(.*?)(?:s+(is|are|was|were|has|have|can|could|should|would|must|may|might|means|implies|indicates|shows|supports|proves|contradicts|equals|relates to)s+)(.*)$/i);
-  let subject = text.trim();
-  let predicate = 'relates-to';
-  let object = normalized;
-  if (predicateMatch) {
-    subject = predicateMatch[1].trim() || text.trim();
-    predicate = predicateMatch[2].trim();
-    object = predicateMatch[3].trim();
-  } else {
-    const parts = normalized.split(' ');
-    subject = parts.slice(0, Math.max(1, Math.min(4, parts.length - 1))).join(' ');
-    object = parts.slice(Math.max(1, Math.min(4, parts.length - 1))).join(' ');
-  }
-  const qualifiers: string[] = [];
-  if (/(not|never|no|without|lacks|missing)/i.test(text)) qualifiers.push('negated');
-  if (/(may|might|could|possible|possibly|uncertain)/i.test(text)) qualifiers.push('possible');
-  if (/(required|must|needs to|necessary)/i.test(text)) qualifiers.push('required');
-  if (/(today|now|current|recent|latest|live|during|before|after)/i.test(text)) qualifiers.push('temporal');
-  if (/(compare|versus|against|than|more|less|greater)/i.test(text)) qualifiers.push('comparative');
-  const polarity: 'affirmed' | 'negated' | 'conditional' = /(not|never|no|without|lacks|missing)/i.test(text) ? 'negated' : /(may|might|could|possible|possibly|uncertain|if|when|unless)/i.test(text) ? 'conditional' : 'affirmed';
-  const modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative' = qualifiers.includes('required') ? 'required' : qualifiers.includes('temporal') ? 'temporal' : qualifiers.includes('comparative') ? 'comparative' : qualifiers.includes('possible') ? 'possible' : 'asserted';
-  return { subject, predicate, object, polarity, modality, qualifiers };
-} {
-  const normalized = normalizeText(text);
-  const predicateMatch = normalized.match(/^(.*?)( is | are | was | were | has | have | can | could | should | would | must | may | might | means | implies | indicates | shows | supports | proves | contradicts | equals | equals to | relates to )(.*)$/i);
-  let subject = text.trim();
-  let predicate = 'relates-to';
-  let object = normalized;
-  if (predicateMatch) {
-    subject = predicateMatch[1].trim() || text.trim();
-    predicate = predicateMatch[2].trim();
-    object = predicateMatch[3].trim();
-  } else {
-    const parts = normalized.split(' ');
-    subject = parts.slice(0, Math.max(1, Math.min(4, parts.length - 1))).join(' ');
-    object = parts.slice(Math.max(1, Math.min(4, parts.length - 1))).join(' ');
-  }
-  const qualifiers: string[] = [];
-  if (/(not|never|no|without|lacks|missing)/i.test(text)) qualifiers.push('negated');
-  if (/(may|might|could|possible|possibly|uncertain)/i.test(text)) qualifiers.push('possible');
-  if (/(required|must|needs to|necessary)/i.test(text)) qualifiers.push('required');
-  if (/(today|now|current|recent|latest|live|during|before|after)/i.test(text)) qualifiers.push('temporal');
-  if (/(compare|versus|against|than|more|less|greater)/i.test(text)) qualifiers.push('comparative');
-  const polarity: 'affirmed' | 'negated' | 'conditional' = /(not|never|no|without|lacks|missing)/i.test(text) ? 'negated' : /(may|might|could|possible|possibly|uncertain|if|when|unless)/i.test(text) ? 'conditional' : 'affirmed';
-  const modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative' = qualifiers.includes('required') ? 'required' : qualifiers.includes('temporal') ? 'temporal' : qualifiers.includes('comparative') ? 'comparative' : qualifiers.includes('possible') ? 'possible' : 'asserted';
-  return { subject, predicate, object, polarity, modality, qualifiers };
+  const frame = extractFrame(text);
+  return {
+    subject: frame.subject,
+    predicate: frame.predicate,
+    object: frame.object,
+    polarity: frame.polarity,
+    modality: frame.modality,
+    qualifiers: frame.qualifiers,
+  };
 }
 
 function makeProposition(text: string, index: number, grounding: GroundedCandidate): Proposition {
   const parsed = subjectPredicateObject(text);
-  const trustMass = grounding.matches.length > 0 ? grounding.matches.reduce((sum, match) => sum + clamp(match.result.trustScore ?? match.result.trust ?? match.result.score ?? 0.5) * match.score, 0) / grounding.matches.length : 0.42;
-  const confidence = clamp(0.24 + trustMass * 0.34 + (grounding.crossVerified ? 0.2 : 0) + Math.min(0.12, grounding.supportCount * 0.03) - (grounding.conflict ? 0.18 : 0));
-  const support = clamp(Math.max(confidence * 0.72, 0.38 + Math.min(0.22, grounding.supportCount * 0.08) + (grounding.crossVerified ? 0.12 : 0)));
-  const contradiction = clamp(parsed.polarity === 'negated' || grounding.conflict ? 0.36 + (1 - confidence) * 0.28 : parsed.qualifiers.includes('possible') ? 0.18 : 0.08);
+  const trustMass = grounding.matches.length > 0 ? grounding.matches.reduce((sum, match) => sum + clamp(match.result.trustScore ?? match.result.trust ?? match.result.score ?? 0.5) * match.score, 0) / grounding.matches.length : 0.34;
+  const confidence = clamp(0.18 + trustMass * 0.38 + (grounding.crossVerified ? 0.24 : 0) - (grounding.conflict ? 0.22 : 0) + Math.min(0.08, grounding.supportCount * 0.02));
+  const support = clamp(Math.max(confidence * 0.8, 0.32 + Math.min(0.24, grounding.supportCount * 0.08) + (grounding.crossVerified ? 0.14 : 0)));
+  const contradiction = clamp(parsed.polarity === 'negated' || grounding.conflict ? 0.42 + (1 - confidence) * 0.22 : parsed.qualifiers.includes('possible') ? 0.16 : 0.08);
   return {
     id: stableHash(text + '|' + String(index)).slice(0, 14),
     text: text.trim(),
