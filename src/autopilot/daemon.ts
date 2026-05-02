@@ -156,6 +156,16 @@ function synthesizeManifest(model: BehaviorModelBundle): RuntimeManifest {
   return step(0);
 }
 
+function selectSupportedEntryType(model: BehaviorModelBundle): string | null {
+  const supported = (perfHooks as { PerformanceObserver?: { supportedEntryTypes?: string[] } }).PerformanceObserver?.supportedEntryTypes ?? [];
+  if (supported.length === 0) return null;
+  const ordered = [...supported].sort((left, right) => left.localeCompare(right));
+  const seed = token(model.theory.id, model.summary, String(model.theory.sessionCount));
+  const parsed = Number.parseInt(seed, 16);
+  const index = (Number.isNaN(parsed) ? 0 : parsed) % ordered.length;
+  return ordered[index] ?? null;
+}
+
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
   const corpus = theoryCorpus(model);
   const uniqueTerms = new Set(corpus);
