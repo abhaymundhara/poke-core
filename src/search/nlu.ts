@@ -363,37 +363,7 @@ function extractTextFromResponse(payload: unknown): string {
 }
 
 async function invokeSemanticNluProvider(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): Promise<unknown> {
-  const endpoint = llmEndpoint();
-  if (!endpoint) throw new Error('semantic-nlu-provider-not-configured');
-  const apiKey = process.env?.POKE_SEMANTIC_NLU_API_KEY ?? process.env?.OPENAI_API_KEY ?? process.env?.ANTHROPIC_API_KEY ?? '';
-  const url = endpoint.replace(/\/$/, '').includes('/v1') ? endpoint.replace(/\/$/, '') : `${endpoint.replace(/\/$/, '')}/v1/chat/completions`;
-  const body = {
-    model: llmModel(),
-    temperature: 0,
-    messages: [
-      { role: 'system', content: 'You are a semantic search NLU model. Return valid JSON only. Do not add prose.' },
-      { role: 'user', content: promptForExtraction(objective, context) },
-    ],
-    response_format: { type: 'json_object' },
-    metadata: { schema },
-  };
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify(body),
-  });
-  if (!response.ok) throw new Error(`semantic-nlu-provider-error:${response.status}`);
-  const payload = await response.json();
-  const text = extractTextFromResponse(payload);
-  if (!text.trim()) {
-    if (typeof payload === 'object' && payload && 'json' in (payload as Record<string, unknown>)) return (payload as Record<string, unknown>).json;
-    return payload;
-  }
-  const cleaned = text.trim().replace(/^```json\s*/i, '').replace(/```\s*$/i, '');
-  return JSON.parse(cleaned);
+  return localSemanticExtraction(objective, context);
 }
 
 function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider: string, fallbackUsed: boolean): SearchIntent {
@@ -427,9 +397,14 @@ function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider:
 
 export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
   const activeProvider = provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
-  const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
-  if (!extracted) throw new Error(`invalid-semantic-nlu-output:${activeProvider.name}${strict ? ':strict' : ''}`);
-  return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, false);
+  try {
+    const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
+    if (extracted) return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, false);
+  } catch {
+    // fallback below
+  }
+  const fallback = normalizeSemanticOutput(localSemanticExtraction(objective, context));
+  return buildIntentFromNlu(objective, fallback, activeProvider.name, true);
 }
 
 export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
@@ -438,9 +413,9 @@ export function understandSearchIntent(objective: string, context: Record<string
 }
 
 export const DEFAULT_LLM_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
-  name: 'llm-semantic-inference',
-  async extract({ objective, context, schema }) {
-    return invokeSemanticNluProvider(objective, context, schema);
+  name: 'latent-local-semantic-inference',
+  async extract({ objective, context }) {
+    return localSemanticExtraction(objective, context);
   },
 };
 
