@@ -350,14 +350,8 @@ function generateSearchIndexSourceRewrite(feedback: SearchPolicyFeedback, curren
     return currentSource.replace(/export const SEARCH_INDEX_REWRITE_REVISION = '.*?';/, revisionLine);
   }
   return currentSource.replace(
-    "export * from './policy.ts';
-
-export const SEARCH_INDEX_SOURCE_PATH",
-    "export * from './policy.ts';
-
-" + revisionLine + "
-
-export const SEARCH_INDEX_SOURCE_PATH",
+    "export * from './policy.ts';\n\nexport const SEARCH_INDEX_SOURCE_PATH",
+    "export * from './policy.ts';\n\n" + revisionLine + "\n\nexport const SEARCH_INDEX_SOURCE_PATH",
   );
 }
 

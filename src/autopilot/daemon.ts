@@ -127,7 +127,7 @@ function discoverConstructor(moduleNamespace: Record<string, unknown>, seed: str
   if (!first) return null;
 
   const staticNames = Object.getOwnPropertyNames(first.value as Function);
-  const hasArrayStatic = staticNames.some((name) => Array.isArray((first.value as Record<string, unknown>)[name]));
+  const hasArrayStatic = staticNames.some((name) => Array.isArray((first.value as unknown as Record<string, unknown>)[name]));
   return hasArrayStatic ? first.value : null;
 }
 
