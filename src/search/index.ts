@@ -19,7 +19,7 @@ function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan
     `trust-mode=${intent.trustMode}`,
     `freshness=${intent.freshness}`,
     `hop-budget=${intent.hopBudget}`,
-    `nlu=${intent.nlu.provider}:${intent.nlu.confidence.toFixed(2)} fallback=${intent.nlu.fallbackUsed}`,
+    `nlu=${intent.nlu.provider}:${intent.nlu.confidence.toFixed(2)} path=${intent.nlu.fallbackUsed ? 'bootstrap' : 'semantic'}`,
     ...sourceRanking.slice(0, 3).map((entry) => `${entry.source}:${entry.score.toFixed(2)}:${entry.reason}`),
   ];
 }

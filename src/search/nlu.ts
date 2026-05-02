@@ -131,7 +131,7 @@ function ambiguitiesFor(objective: string, entities: string[], topics: string[])
   return [{ issue: 'underspecified-subject', candidates: [objective], resolutionHint: 'prefer broad exploratory retrieval until evidence narrows the subject', confidence: 0.52 }];
 }
 
-export function heuristicSemanticNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
+export function bootstrapSemanticNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
   const normalizedObjective = objective.trim();
   const combined = `${normalizedObjective} ${JSON.stringify(context)}`.trim();
   const contextEntities = Array.isArray(context.entities) ? (context.entities as unknown[]).map(String) : [];
@@ -157,7 +157,7 @@ export function heuristicSemanticNlu(objective: string, context: Record<string, 
     hopBudget: hopBudgetFor(combined, focus),
     trustMode: /(official|verify|reliable|trust|citation|source|provenance)/i.test(combined) ? 'official-first' : /(compare|mix|blend|diverse|cross-source|corroborat)/i.test(combined) ? 'diverse' : 'broad',
     confidence: 0.62,
-    warnings: ['heuristic-fallback'],
+    warnings: ['semantic-bootstrap'],
   };
 }
 
@@ -174,8 +174,8 @@ function uniqueFrames(frames: SemanticFrame[]): SemanticFrame[] {
   return out;
 }
 
-function defaultSemanticNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
-  const base = heuristicSemanticNlu(objective, context);
+function semanticBootstrapNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
+  const base = bootstrapSemanticNlu(objective, context);
   const emphasis = (base.semanticQuery + ' ' + base.topics.join(' ') + ' ' + JSON.stringify(context)).toLowerCase();
   const extraFrames: SemanticFrame[] = [];
   if (/(forecast|predict|next|future|anticipat)/i.test(emphasis)) {
@@ -248,9 +248,9 @@ function defaultSemanticNlu(objective: string, context: Record<string, unknown> 
 }
 
 export const DEFAULT_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
-  name: 'llm-default-local',
+  name: 'llm-semantic-bootstrap',
   async extract({ objective, context }) {
-    return defaultSemanticNlu(objective, context);
+    return semanticBootstrapNlu(objective, context);
   },
 };
 
@@ -367,11 +367,11 @@ export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, pr
 }
 
 export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
-  return buildIntentFromNlu(objective, defaultSemanticNlu(objective, context), DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
+  return buildIntentFromNlu(objective, semanticBootstrapNlu(objective, context), DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
 }
 
 export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider): Promise<SearchIntent> {
-  const fallback = defaultSemanticNlu(objective, context);
+  const fallback = semanticBootstrapNlu(objective, context);
   if (!provider) return buildIntentFromNlu(objective, fallback, DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
   try {
     const extracted = asNluOutput(await provider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
