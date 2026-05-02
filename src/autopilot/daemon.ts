@@ -97,10 +97,11 @@ function theoryCorpus(model: BehaviorModelBundle): string[] {
 function selectSupportedEntryType(model: BehaviorModelBundle): string | null {
   const supported = PerformanceObserver.supportedEntryTypes ?? [];
   if (supported.length === 0) return null;
-  const ordered = [...supported].sort((left, right) => left.length - right.length || left.localeCompare(right));
-  const shortest = ordered[0];
-  if (!shortest) return null;
-  return shortest;
+  const ordered = [...supported].sort((left, right) => left.localeCompare(right));
+  const seed = token(model.theory.id, model.summary, String(model.theory.sessionCount));
+  const parsed = Number.parseInt(seed, 16);
+  const index = (Number.isNaN(parsed) ? 0 : parsed) % ordered.length;
+  return ordered[index] ?? null;
 }
 
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
