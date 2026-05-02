@@ -40,12 +40,12 @@ export type PlannerRecoveryEvent = {
   at: number;
 };
 
-export class PlannerRecoverySignal extends Error {
+export class RecoveryRequired extends Error {
   readonly recoveryEvent: PlannerRecoveryEvent;
 
   constructor(event: PlannerRecoveryEvent) {
-    super('planner-recovery:' + event.phase + ':' + event.provider + ':' + event.reason);
-    this.name = 'PlannerRecoverySignal';
+    super('recovery-required:' + event.phase + ':' + event.provider + ':' + event.reason);
+    this.name = 'RecoveryRequired';
     this.recoveryEvent = event;
   }
 }
@@ -293,7 +293,7 @@ function buildPlannerDraft(input: TaskInput, intent: SearchIntent, context: Plan
     };
   }).catch((err) => {
     const reason = err instanceof Error ? err.message : String(err);
-    throw new PlannerRecoverySignal({ phase: 'plan', provider: provider.name, objective: input.objective, reason, at: Date.now() });
+    throw new RecoveryRequired({ phase: 'plan', provider: provider.name, objective: input.objective, reason, at: Date.now() });
   });
 }
 
@@ -303,7 +303,7 @@ export async function resolvePlannerIntent(objective: string, context: PlannerRe
     return await understandSearchIntentWithNlu(objective, context, provider, true);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    throw new PlannerRecoverySignal({ phase: 'intent', provider: provider.name, objective, reason, at: Date.now() });
+    throw new RecoveryRequired({ phase: 'intent', provider: provider.name, objective, reason, at: Date.now() });
   }
 }
 

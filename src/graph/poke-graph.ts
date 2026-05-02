@@ -105,45 +105,49 @@ function normalizeRecoveryDraft(value: unknown, provider: string): RecoveryTraje
   };
 }
 
-async function synthesizeRecoveryTrajectory(state: PokeGraphState): Promise<RecoveryTrajectoryDraft & { latentGoals: string[] }> {
-  const journal = normalizeJournal(state);
-  const sessionKey = state.sessionKey ?? state.semanticIntent?.sessionKey ?? state.intentGraph?.id ?? state.objective;
-  const latentGoals = inferLatentGoalsFromTrajectory({
-    sessionKey,
-    objective: state.objective,
-    query: state.query,
-    eventJournal: journal,
-    breadcrumbs: state.breadcrumbs,
-    intentGraph: state.intentGraph,
-    semanticIntent: state.semanticIntent,
-  });
-  const provider: SemanticNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
-  const raw = await provider.extract({
-    objective: 'recover trajectory for ' + state.objective,
-    context: {
+export class RecoveryPlanner {
+  constructor(private provider: SemanticNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER) {}
+
+  async synthesize(state: PokeGraphState): Promise<RecoveryTrajectoryDraft & { latentGoals: string[] }> {
+    const journal = normalizeJournal(state);
+    const sessionKey = state.sessionKey ?? state.semanticIntent?.sessionKey ?? state.intentGraph?.id ?? state.objective;
+    const latentGoals = inferLatentGoalsFromTrajectory({
+      sessionKey,
       objective: state.objective,
       query: state.query,
-      sessionKey,
       eventJournal: journal,
-      breadcrumbs: state.breadcrumbs ?? [],
-      recovery: state.recovery ?? [],
-      latentGoals,
-      intentGraph: state.intentGraph ?? null,
-      semanticIntent: state.semanticIntent ?? null,
-      executionProfile: state.executionProfile ?? null,
-    },
-    schema: RECOVERY_SCHEMA,
-  });
-  return { ...normalizeRecoveryDraft(raw, provider.name), latentGoals };
+      breadcrumbs: state.breadcrumbs,
+      intentGraph: state.intentGraph,
+      semanticIntent: state.semanticIntent,
+    });
+    const raw = await this.provider.extract({
+      objective: 'recover trajectory for ' + state.objective,
+      context: {
+        objective: state.objective,
+        query: state.query,
+        sessionKey,
+        eventJournal: journal,
+        breadcrumbs: state.breadcrumbs ?? [],
+        recovery: state.recovery ?? [],
+        latentGoals,
+        intentGraph: state.intentGraph ?? null,
+        semanticIntent: state.semanticIntent ?? null,
+        executionProfile: state.executionProfile ?? null,
+      },
+      schema: RECOVERY_SCHEMA,
+    });
+    return { ...normalizeRecoveryDraft(raw, this.provider.name), latentGoals };
+  }
 }
 
 export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; episodic: EpisodicMemory; }) {
+  const recoveryPlanner = new RecoveryPlanner();
   const nodes: GraphNode<PokeGraphState>[] = [
     {
       id: 'recovery-policy',
       name: 'plan recovery policy from event journal',
       run: async (state) => {
-        const synthesis = await synthesizeRecoveryTrajectory(state);
+        const synthesis = await recoveryPlanner.synthesize(state);
         return {
           ...state,
           eventJournal: normalizeJournal(state),

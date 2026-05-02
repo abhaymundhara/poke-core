@@ -19,9 +19,6 @@ export class SkillRouter {
   resolve(step: PlanStep): SkillAdapter {
     const exact = this.skills.get(step.skill);
     if (exact && exact.canHandle(step)) return exact;
-    for (const skill of this.skills.values()) {
-      if (skill.canHandle(step)) return skill;
-    }
     throw new Error(`no skill available for step kind=${step.kind} skill=${step.skill}`);
   }
 }

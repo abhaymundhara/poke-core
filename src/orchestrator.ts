@@ -135,7 +135,7 @@ export class PokeCoreOrchestrator {
       return { name: entry.name, score: entry.score, reason: toStringArray(entry.reason), invoke: entry.invoke };
     }).sort((left, right) => right.score - left.score);
     const selectedName = typeof raw.selectedAdapterName === 'string' ? raw.selectedAdapterName : normalized[0]!.name;
-    const selected = normalized.find((entry) => entry.name === selectedName && entry.invoke) ?? normalized.find((entry) => entry.invoke) ?? normalized[0];
+    const selected = normalized.find((entry) => entry.name === selectedName && entry.invoke);
     if (!selected) throw new Error('no-adapter-selected:' + provider.name);
     return {
       selectedAdapterName: selected.name,
@@ -150,7 +150,7 @@ export class PokeCoreOrchestrator {
     if (candidates.length === 0) throw new Error('no skill adapter can handle step ' + step.id + ' (' + step.kind + ')');
     const evaluation = await this.evaluateSkillAdapterAffordance(candidates, step, plan, state);
     const selected = candidates.find((candidate) => candidate.descriptor.name === evaluation.selectedAdapterName);
-    if (!selected) throw new Error('invalid-affordance-evaluation:' + provider.name);
+    if (!selected) throw new Error('invalid-affordance-evaluation:' + evaluation.selectedAdapterName);
     return selected;
   }
 

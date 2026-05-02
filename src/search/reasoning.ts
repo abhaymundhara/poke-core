@@ -92,7 +92,7 @@ function parseProposition(text: string, sourceId: string, confidence: number): P
   const predicate = clausePredicate(tokens);
   const object = clauseObject(tokens);
   return {
-    id: `prop-${stableHash(`${subject}|${predicate}|${object}|${sourceId}`)}`,
+    id: 'prop-' + stableHash([subject, predicate, object, sourceId].join('|')),
     text: text.trim(),
     subject,
     predicate,
@@ -125,129 +125,67 @@ function propositionShape(text: string): SemanticPropositionShape {
   };
 }
 
-function headMatch(left: string, right: string): boolean {
-  if (!left || !right) return false;
-  if (left === right) return true;
-  const leftTokens = left.split(' ');
-  const rightTokens = right.split(' ');
-  return leftTokens.some((token) => rightTokens.includes(token)) || left.includes(right) || right.includes(left);
+function tokenOverlap(left: string, right: string): number {
+  const leftTokens = new Set(words(left).filter((token) => token.length > 2));
+  const rightTokens = new Set(words(right).filter((token) => token.length > 2));
+  if (leftTokens.size === 0 || rightTokens.size === 0) return 0;
+  let overlap = 0;
+  for (const token of leftTokens) if (rightTokens.has(token)) overlap += 1;
+  return overlap / Math.max(leftTokens.size, rightTokens.size);
 }
 
 function numericContradiction(left: SemanticPropositionShape, right: SemanticPropositionShape): number {
   if (left.numericFacts.length === 0 || right.numericFacts.length === 0) return 0;
-  const sharedUnits = left.numericFacts.flatMap((l) => right.numericFacts.filter((r) => l.unit === r.unit && l.unit !== null).map((r) => ({ l, r })));
-  if (sharedUnits.length === 0) return 0;
-  const mismatch = sharedUnits.some(({ l, r }) => Math.abs(l.value - r.value) > Math.max(1, Math.abs(l.value) * 0.05));
+  const mismatch = left.numericFacts.some((l) => right.numericFacts.some((r) => l.unit === r.unit && l.unit !== null && Math.abs(l.value - r.value) > Math.max(1, Math.abs(l.value) * 0.05)));
   return mismatch ? 0.26 : 0;
 }
 
-function semanticFeatures(left: SemanticPropositionShape, right: SemanticPropositionShape) {
-  const subjectAgreement = headMatch(left.subject, right.subject) ? 1 : 0;
-  const predicateAgreement = headMatch(left.predicate, right.predicate) ? 1 : 0;
-  const objectCoverage = right.object && (left.object.includes(right.object) || right.object.includes(left.object)) ? 1 : 0;
-  const entityOverlap = right.entities.length === 0 ? 0 : right.entities.filter((entity) => left.entities.some((candidate) => headMatch(candidate, entity))).length / right.entities.length;
-  const qualifierOverlap = right.qualifiers.length === 0 ? 0 : right.qualifiers.filter((qualifier) => left.qualifiers.includes(qualifier)).length / right.qualifiers.length;
-  const polarityCompatibility = left.polarity === right.polarity ? 1 : left.polarity === 'conditional' || right.polarity === 'conditional' ? 0.46 : 0;
-  const modalityCompatibility = left.modality === right.modality ? 1 : left.modality === 'asserted' && right.modality !== 'required' ? 0.68 : 0.38;
-  const numericConflict = numericContradiction(left, right);
-  const directionalWords = /(increase|more|higher|up|faster|better|expand|grow|improve)/i.test(left.object) && /(decrease|less|lower|down|slower|worse|shrink|decline|degrade)/i.test(right.object) ? 1 : 0;
-  return {
-    subjectAgreement,
-    predicateAgreement,
-    objectCoverage,
-    entityOverlap,
-    qualifierOverlap,
-    polarityCompatibility,
-    modalityCompatibility,
-    numericConflict,
-    directionalWords,
-  };
-}
-
-function neuralEntailment(left: SemanticPropositionShape, right: SemanticPropositionShape): number {
-  const features = semanticFeatures(left, right);
-  const projection = features.subjectAgreement * 0.28 + features.predicateAgreement * 0.22 + features.objectCoverage * 0.14 + features.entityOverlap * 0.1 + features.qualifierOverlap * 0.08 + features.polarityCompatibility * 0.1 + features.modalityCompatibility * 0.06;
-  const numericPenalty = features.numericConflict > 0 ? 0.12 : 0;
-  const specificity = left.object.length >= right.object.length ? 0.1 : 0.04;
-  return clamp(projection + specificity - numericPenalty);
-}
-
-function neuralContradiction(left: SemanticPropositionShape, right: SemanticPropositionShape): number {
-  const features = semanticFeatures(left, right);
-  const polarityPressure = features.polarityCompatibility < 1 ? 0.24 : 0;
-  const modalityPressure = left.modality === 'required' && right.modality === 'possible' || left.modality === 'possible' && right.modality === 'required' ? 0.16 : 0;
-  const directNegation = features.subjectAgreement > 0 && features.predicateAgreement > 0 && left.polarity !== right.polarity ? 0.28 : 0;
-  const objectConflict = features.objectCoverage === 0 && features.directionalWords ? 0.2 : 0;
-  return clamp(features.subjectAgreement * 0.18 + features.predicateAgreement * 0.16 + polarityPressure + modalityPressure + directNegation + objectConflict + features.numericConflict);
-}
-
-function graphNeighborhoodSupport(graph: SearchEvidenceGraph, proposition: Proposition): number {
-  const edges = [...graph.edges, ...(graph.propositionGraph?.edges ?? [])].filter((edge) => edge.from === proposition.id || edge.to === proposition.id);
-  if (edges.length === 0) return 0.5;
-  const support = edges.reduce((sum, edge) => sum + (edge.relation === 'supports' || edge.relation === 'entails' || edge.relation === 'corroborates' ? edge.weight : -edge.weight * 0.6), 0);
-  return clamp(0.5 + support / Math.max(3, edges.length * 2));
-}
-
-function propositionEntails(left: Proposition, right: Proposition, _graph?: SearchEvidenceGraph): number {
+function propositionEntails(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
   const leftShape = propositionShape(left.text);
   const rightShape = propositionShape(right.text);
-  const semanticFit = neuralEntailment(leftShape, rightShape);
-  const qualifierFit = rightShape.qualifiers.every((qualifier) => leftShape.qualifiers.includes(qualifier) || left.text.toLowerCase().includes(qualifier)) ? 0.12 : 0.04;
-  const modalityFit = leftShape.modality === rightShape.modality ? 0.16 : leftShape.modality === 'asserted' ? 0.1 : 0.05;
-  const numericAgreement = numericContradiction(leftShape, rightShape) > 0 ? -0.18 : 0.08;
-  return clamp(semanticFit * 0.62 + qualifierFit + modalityFit + numericAgreement);
+  const lexicalSupport = tokenOverlap(left.text, right.text);
+  const subjectSupport = leftShape.subject && rightShape.subject && (leftShape.subject.includes(rightShape.subject) || rightShape.subject.includes(leftShape.subject)) ? 0.2 : 0.04;
+  const predicateSupport = leftShape.predicate && rightShape.predicate && (leftShape.predicate.includes(rightShape.predicate) || rightShape.predicate.includes(leftShape.predicate)) ? 0.16 : 0.05;
+  const qualifierSupport = rightShape.qualifiers.every((qualifier) => leftShape.qualifiers.includes(qualifier) || left.text.toLowerCase().includes(qualifier)) ? 0.1 : 0.03;
+  const numericAgreement = numericContradiction(leftShape, rightShape) > 0 ? -0.12 : 0.08;
+  const graphSupport = graph.edges.filter((edge) => edge.from === left.id || edge.to === right.id).reduce((sum, edge) => sum + (edge.relation === 'supports' || edge.relation === 'entails' ? edge.weight : -edge.weight * 0.4), 0);
+  return clamp(lexicalSupport * 0.36 + subjectSupport + predicateSupport + qualifierSupport + numericAgreement + clamp(graphSupport / 10));
 }
 
-function propositionContradicts(left: Proposition, right: Proposition, _graph?: SearchEvidenceGraph): number {
+function propositionContradicts(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
   const leftShape = propositionShape(left.text);
   const rightShape = propositionShape(right.text);
-  const semanticConflict = neuralContradiction(leftShape, rightShape);
-  const polarityPressure = leftShape.polarity !== rightShape.polarity ? 0.24 : 0.04;
-  const modalityPressure = leftShape.modality === 'required' && rightShape.modality !== 'required' || rightShape.modality === 'required' && leftShape.modality !== 'required' ? 0.16 : 0.05;
-  const numericConflict = numericContradiction(leftShape, rightShape);
-  return clamp(semanticConflict * 0.72 + polarityPressure + modalityPressure + numericConflict);
+  const lexicalConflict = tokenOverlap(left.text, right.text) * 0.18;
+  const polarityPressure = leftShape.polarity !== rightShape.polarity ? 0.24 : 0;
+  const modalityPressure = leftShape.modality !== rightShape.modality ? 0.08 : 0;
+  const directNegation = leftShape.subject && rightShape.subject && (leftShape.subject.includes(rightShape.subject) || rightShape.subject.includes(leftShape.subject)) && leftShape.polarity !== rightShape.polarity ? 0.18 : 0;
+  const numericPressure = numericContradiction(leftShape, rightShape);
+  const graphTension = graph.edges.filter((edge) => edge.relation === 'contradicts' || edge.relation === 'rebuts').length > 0 ? 0.05 : 0;
+  return clamp(lexicalConflict + polarityPressure + modalityPressure + directNegation + numericPressure + graphTension);
 }
 
-function assessClaim(premise: Proposition, hypothesis: Proposition, _graph?: SearchEvidenceGraph): ClaimAssessment {
-  const contradiction = propositionContradicts(premise, hypothesis);
-  const entailment = propositionEntails(premise, hypothesis);
+function assessClaim(premise: Proposition, hypothesis: Proposition, graph: SearchEvidenceGraph): ClaimAssessment {
+  const contradiction = propositionContradicts(premise, hypothesis, graph);
+  const entailment = propositionEntails(premise, hypothesis, graph);
   const consistency = clamp(1 - contradiction * 0.72 + entailment * 0.18);
   if (contradiction >= Math.max(0.5, entailment + 0.06)) {
-    return {
-      premise: premise.text,
-      hypothesis: hypothesis.text,
-      relation: 'contradicts',
-      confidence: clamp(0.42 + contradiction * 0.5 + (1 - consistency) * 0.08),
-      rationale: 'the proposition comparison detects incompatible polarity, modality, or quantitative content',
-    };
+    return { premise: premise.text, hypothesis: hypothesis.text, relation: 'contradicts', confidence: clamp(0.42 + contradiction * 0.5 + (1 - consistency) * 0.08), rationale: 'the proposition comparison detects incompatible polarity, modality, or quantitative content' };
   }
   if (entailment >= Math.max(0.48, contradiction + 0.08) && consistency >= 0.46) {
-    return {
-      premise: premise.text,
-      hypothesis: hypothesis.text,
-      relation: 'entails',
-      confidence: clamp(0.38 + entailment * 0.52 + consistency * 0.1),
-      rationale: 'the structured proposition representation supports a stable entailment path through compatible claims',
-    };
+    return { premise: premise.text, hypothesis: hypothesis.text, relation: 'entails', confidence: clamp(0.38 + entailment * 0.52 + consistency * 0.1), rationale: 'the proposition comparison finds compatible semantic structure and supporting evidence' };
   }
-  return {
-    premise: premise.text,
-    hypothesis: hypothesis.text,
-    relation: 'unknown',
-    confidence: clamp(0.24 + entailment * 0.36 + (1 - contradiction) * 0.2),
-    rationale: 'the proposition engine cannot establish a definitive entailment or contradiction from the current semantic evidence',
-  };
+  return { premise: premise.text, hypothesis: hypothesis.text, relation: 'unknown', confidence: clamp(0.24 + entailment * 0.36 + (1 - contradiction) * 0.2), rationale: 'the current evidence does not establish a stable entailment or contradiction' };
 }
 
 export function buildQueries(intent: SearchIntent, strategy: SearchStrategyProfile): string[] {
   const seeds = [
     intent.semanticQuery,
     ...intent.querySeeds,
-    ...intent.entities.map((entity) => `${entity} ${intent.topics[0] ?? ''}`.trim()),
-    ...(intent.sourceHints.includes('github') ? intent.entities.map((entity) => `repo:${entity}`) : []),
-    ...(intent.sourceHints.includes('scholar') ? intent.entities.map((entity) => `${entity} citation evidence`) : []),
+    ...intent.entities.map((entity) => (entity + ' ' + (intent.topics[0] ?? '')).trim()),
+    ...(intent.sourceHints.includes('github') ? intent.entities.map((entity) => 'repo:' + entity) : []),
+    ...(intent.sourceHints.includes('scholar') ? intent.entities.map((entity) => entity + ' citation evidence') : []),
   ];
-  if (strategy.id === 'multi-hop' && intent.entities.length > 0) seeds.push(`${intent.entities[0]} ${intent.topics[0] ?? intent.objective} evidence`);
+  if (strategy.id === 'multi-hop' && intent.entities.length > 0) seeds.push(intent.entities[0] + ' ' + (intent.topics[0] ?? intent.objective) + ' evidence');
   return [...new Set(seeds.filter(Boolean))].slice(0, 6);
 }
 
@@ -256,9 +194,9 @@ export function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProf
   for (const result of results.slice(0, Math.max(1, intent.hopBudget - 1))) {
     const extracted = claimTexts(result).join(' ').split(/\s+/).slice(0, 10).join(' ');
     const sourceHint = result.source === 'github' ? 'repository evidence' : result.source === 'scholar' ? 'citation trail' : result.source === 'realtime-web' ? 'fresh source' : 'supporting source';
-    hopPlan.push(`${extracted} ${sourceHint}`.trim());
+    hopPlan.push((extracted + ' ' + sourceHint).trim());
   }
-  if (strategy.id === 'multi-hop' && intent.entities.length > 1) hopPlan.push(`${intent.entities.slice(0, 2).join(' ')} cross-source synthesis`);
+  if (strategy.id === 'multi-hop' && intent.entities.length > 1) hopPlan.push(intent.entities.slice(0, 2).join(' ') + ' cross-source synthesis');
   return [...new Set(hopPlan)].slice(0, Math.max(2, intent.hopBudget + 1));
 }
 
@@ -269,13 +207,13 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
   const propositionMap = new Map<string, { proposition: Proposition; support: TrustedEvidence[]; contradiction: TrustedEvidence[]; assessments: ClaimAssessment[] }>();
 
   const queryIds = queries.map((query, index) => {
-    const id = `query-${index}-${stableHash(query)}`;
+    const id = 'query-' + index + '-' + stableHash(query);
     nodes.push({ id, label: query, type: 'query', weight: 1, metadata: { query, intent: intent.sessionKey } });
     return id;
   });
 
   for (const [index, result] of trusted.entries()) {
-    const resultId = `result-${index}-${stableHash(result.url || result.title)}`;
+    const resultId = 'result-' + index + '-' + stableHash(result.url || result.title);
     nodes.push({ id: resultId, label: result.title, type: 'result', weight: result.trustScore, metadata: { url: result.url, source: result.source, snippet: result.snippet, trust: result.trustScore, breakdown: result.trustBreakdown } });
     for (const queryId of queryIds) edges.push({ from: queryId, to: resultId, relation: 'supports', weight: clamp(0.26 + strategy.semanticBias * 0.12 + result.trustScore * 0.22) });
     const sourceId = result.provenance.domain || String(result.source);
@@ -320,7 +258,7 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
         propositionEdges.push({ from: left.id, to: right.id, relation: 'contradicts', weight: assessment.confidence });
       } else if (assessment.relation === 'entails') {
         propositionEdges.push({ from: left.id, to: right.id, relation: 'entails', weight: assessment.confidence });
-      } else if (headMatch(left.subject, right.subject) && headMatch(left.predicate, right.predicate)) {
+      } else if (left.subject && right.subject && (left.subject === right.subject || left.subject.includes(right.subject) || right.subject.includes(left.subject))) {
         propositionEdges.push({ from: left.id, to: right.id, relation: 'refines', weight: assessment.confidence });
       }
     }
@@ -335,8 +273,8 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
     claims.push({ id: left.id, text: left.text, confidence, supportedBy: supportIds, contradictedBy: contradictionIds, verdict, assessments: leftEntry.assessments });
     if (contradictionIds.length > 0) {
       conflicts.push({ claim: left.text, supporting: supportIds, contradicting: contradictionIds, resolution: support >= contradiction ? 'prefer higher-trust corroborated support' : 'prefer higher-trust contradiction', confidence: clamp(Math.abs(support - contradiction)) });
-      nodes.push({ id: `conflict-${stableHash(left.text)}`, label: left.text, type: 'conflict', weight: clamp(Math.abs(support - contradiction)), metadata: { support, contradiction } });
-      edges.push({ from: left.id, to: `conflict-${stableHash(left.text)}`, relation: verdict === 'contested' ? 'contradicts' : 'supports', weight: confidence });
+      nodes.push({ id: 'conflict-' + stableHash(left.text), label: left.text, type: 'conflict', weight: clamp(Math.abs(support - contradiction)), metadata: { support, contradiction } });
+      edges.push({ from: left.id, to: 'conflict-' + stableHash(left.text), relation: verdict === 'contested' ? 'contradicts' : 'supports', weight: confidence });
     }
   }
 
@@ -349,9 +287,23 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
   const propositionGraph: PropositionGraph = {
     propositions,
     edges: propositionEdges,
-    summary: `${propositions.length} propositions, ${propositionEdges.filter((edge) => edge.relation === 'entails').length} entailments, ${propositionEdges.filter((edge) => edge.relation === 'contradicts').length} contradictions`,
+    summary: propositions.length + ' propositions, ' + propositionEdges.filter((edge) => edge.relation === 'entails').length + ' entailments, ' + propositionEdges.filter((edge) => edge.relation === 'contradicts').length + ' contradictions',
     confidence: clamp(average(propositions.map((proposition) => proposition.confidence)) * 0.45 + synthesis.confidence * 0.55),
   };
   const confidence = clamp(synthesis.confidence * 0.42 + average(claims.map((claim) => claim.confidence)) * 0.28 + average(trusted.map((item) => item.trustScore)) * 0.18 + Math.min(1, queries.length / 5) * 0.08 - conflicts.length * 0.04);
-  return { nodes, edges, queries, entities, communities, exploration, claims, propositions, propositionGraph, conflicts, synthesis: { ...synthesis, confidence }, summary: `${queries.length} query seeds, ${results.length} results, ${claims.length} claims, propositions=${propositions.length}, communities=${communities.length}, conflicts=${conflicts.length}, stance=${synthesis.stance}, strategy=${strategy.name}`, confidence };
+  return {
+    nodes,
+    edges,
+    queries,
+    entities,
+    communities,
+    exploration,
+    claims,
+    propositions,
+    propositionGraph,
+    conflicts,
+    synthesis: { ...synthesis, confidence },
+    summary: queries.length + ' query seeds, ' + results.length + ' results, ' + claims.length + ' claims, propositions=' + propositions.length + ', communities=' + communities.length + ', conflicts=' + conflicts.length + ', stance=' + synthesis.stance + ', strategy=' + strategy.name,
+    confidence,
+  };
 }

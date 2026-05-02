@@ -1,22 +1,18 @@
 export * from './planner-intelligence';
 import { buildPlan as buildPlannerPlan } from './planner-intelligence';
 import type { PlannerIntentGraph, SearchIntent, TaskInput, TaskPlan } from './types';
-import { stableHash, uniq } from './search/utils';
-
-const TRAJECTORY_DIMENSIONS = 24;
 
 type TrajectoryEntry = {
   label: string;
-  vector: number[];
+  history: string[];
   weight: number;
   updatedAt: number;
 };
 
 type TrajectorySession = {
   key: string;
-  centroid: number[];
-  entries: TrajectoryEntry[];
-  memory: string[];
+  history: string[];
+  entries: Map<string, TrajectoryEntry>;
   lastUpdated: number;
 };
 
@@ -32,109 +28,101 @@ export type PlannerTrajectoryProbe = {
 
 const sessions = new Map<string, TrajectorySession>();
 
-function normalizeVector(vector: number[]): number[] {
-  const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0));
-  return magnitude > 0 ? vector.map((value) => value / magnitude) : vector.slice();
-}
-
-function blendVectors(base: number[], addition: number[], weight: number): number[] {
-  const next = base.length === addition.length ? base.slice() : Array.from({ length: TRAJECTORY_DIMENSIONS }, (_, index) => base[index] ?? 0);
-  for (let index = 0; index < next.length; index += 1) next[index] += (addition[index] ?? 0) * weight;
-  return normalizeVector(next);
-}
-
-function projectText(text: string, dimensions = TRAJECTORY_DIMENSIONS): number[] {
-  const vector = Array.from({ length: dimensions }, () => 0);
-  const seed = parseInt(stableHash(text).slice(0, 8), 16) || 1;
-  for (let index = 0; index < text.length; index += 1) {
-    const code = text.charCodeAt(index);
-    const slot = Math.abs((seed + code * 31 + index * 17) % dimensions);
-    vector[slot] += ((code % 23) - 11) / 11;
-  }
-  return normalizeVector(vector);
-}
-
 function ensureSession(key: string): TrajectorySession {
   const existing = sessions.get(key);
   if (existing) return existing;
-  const created: TrajectorySession = { key, centroid: Array.from({ length: TRAJECTORY_DIMENSIONS }, () => 0), entries: [], memory: [], lastUpdated: Date.now() };
+  const created: TrajectorySession = { key, history: [], entries: new Map(), lastUpdated: Date.now() };
   sessions.set(key, created);
   return created;
 }
 
-function observeLabel(session: TrajectorySession, label: string, text: string, weight = 1): void {
-  if (!text.trim()) return;
-  const vector = projectText(text);
-  session.centroid = blendVectors(session.centroid, vector, weight);
-  session.entries.push({ label, vector, weight, updatedAt: Date.now() });
-  session.memory = uniq([...session.memory, label]);
+function tokenize(text: string): string[] {
+  return text.toLowerCase().split(/[^a-z0-9]+/g).filter((token) => token.length > 3);
+}
+
+function observeText(session: TrajectorySession, text: string, weight = 1): void {
+  const tokens = tokenize(text);
+  if (tokens.length === 0) return;
+  session.history.push(text);
+  for (const token of tokens) {
+    const current = session.entries.get(token);
+    session.entries.set(token, {
+      label: token,
+      history: [...(current?.history ?? []), text],
+      weight: (current?.weight ?? 0.2) * 0.82 + weight * 0.18,
+      updatedAt: Date.now(),
+    });
+  }
   session.lastUpdated = Date.now();
 }
 
-export function observePlannerTrajectory(plan: TaskPlan): void {
-  const sessionKey = plan.semanticIntent?.sessionKey ?? plan.taskId;
-  const session = ensureSession(sessionKey);
-  observeLabel(session, 'objective', plan.objective, 1.4);
-  observeLabel(session, 'semanticQuery', plan.semanticIntent?.semanticQuery ?? plan.objective, 1.2);
-  observeLabel(session, 'strategy', plan.planner?.strategy ?? 'blend', 0.9);
-  observeLabel(session, 'confidence', String(plan.planner?.confidence ?? plan.semanticIntent?.nlu.confidence ?? 0.5), 0.6);
-
-  for (const step of plan.steps) {
-    observeLabel(session, step.title, [step.kind, step.skill, JSON.stringify(step.args), step.dependsOn?.join(',') ?? ''].join(' | '), 1.1);
-  }
-
-  for (const affordance of plan.intentGraph?.toolAffordances ?? []) {
-    observeLabel(session, affordance.skill, [affordance.skill, affordance.domain, affordance.reasons.join(' | ')].join(' | '), 0.8 + affordance.score * 0.6);
-  }
-
-  for (const note of plan.planner?.warnings ?? []) observeLabel(session, note, note, 0.7);
-  for (const note of plan.intentGraph?.warnings ?? []) observeLabel(session, note, note, 0.7);
-  for (const node of plan.intentGraph?.nodes ?? []) observeLabel(session, node.label, [node.summary, node.kind, JSON.stringify(node.metadata ?? {})].join(' | '), 0.9);
+function relevanceScore(label: string, probe: PlannerTrajectoryProbe, session: TrajectorySession): number {
+  const probeText = [
+    probe.objective,
+    probe.query,
+    probe.semanticIntent?.semanticQuery ?? '',
+    ...(probe.eventJournal ?? []).map((entry) => [entry.kind, entry.status, entry.reason, JSON.stringify(entry.detail ?? {})].filter(Boolean).join(' | ')),
+    ...(probe.breadcrumbs ?? []).map((crumb) => [crumb.kind, crumb.skill, crumb.status].join(' | ')),
+    ...(probe.intentGraph?.nodes ?? []).map((node) => [node.label, node.summary, node.kind].join(' | ')),
+  ].filter(Boolean).join(' ');
+  const labelTokens = tokenize(label);
+  const probeTokens = new Set(tokenize(probeText));
+  const overlap = labelTokens.filter((token) => probeTokens.has(token)).length;
+  const remembered = session.entries.get(label);
+  const recency = remembered ? Math.max(0.1, 1 - Math.min(0.8, (Date.now() - remembered.updatedAt) / 12_000_000)) : 0.15;
+  const historyHits = session.history.slice(-24).filter((entry) => tokenize(entry).some((token) => labelTokens.includes(token))).length;
+  return (remembered?.weight ?? 0.25) * 0.4 + overlap * 0.2 + historyHits * 0.08 + recency;
 }
 
-function cosineSimilarity(left: number[], right: number[]): number {
-  let dot = 0;
-  let leftMagnitude = 0;
-  let rightMagnitude = 0;
-  const length = Math.max(left.length, right.length);
-  for (let index = 0; index < length; index += 1) {
-    const a = left[index] ?? 0;
-    const b = right[index] ?? 0;
-    dot += a * b;
-    leftMagnitude += a * a;
-    rightMagnitude += b * b;
+export class LatentGoalTracker {
+  observe(input: PlannerTrajectoryProbe): void {
+    const session = ensureSession(input.sessionKey);
+    observeText(session, input.objective, 1.4);
+    observeText(session, input.query, 1.2);
+    observeText(session, input.semanticIntent?.semanticQuery ?? '', 1.1);
+    for (const entry of input.eventJournal ?? []) observeText(session, [entry.kind, entry.status, entry.reason, JSON.stringify(entry.detail ?? {})].filter(Boolean).join(' | '), 0.9);
+    for (const crumb of input.breadcrumbs ?? []) observeText(session, [crumb.kind, crumb.skill, crumb.status].join(' | '), 0.8);
+    for (const node of input.intentGraph?.nodes ?? []) observeText(session, [node.label, node.summary, node.kind].join(' | '), 0.75);
   }
-  const scale = Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude);
-  return scale > 0 ? dot / scale : 0;
+
+  infer(input: PlannerTrajectoryProbe): string[] {
+    const session = ensureSession(input.sessionKey);
+    const candidates = new Set<string>();
+    for (const value of [
+      input.objective,
+      input.query,
+      input.semanticIntent?.semanticQuery ?? '',
+      ...(input.intentGraph?.nodes ?? []).slice(0, 6).map((node) => node.summary || node.label),
+      ...(input.eventJournal ?? []).slice(0, 8).map((entry) => entry.reason ?? entry.kind ?? ''),
+      ...(input.breadcrumbs ?? []).slice(0, 8).map((crumb) => crumb.kind),
+      ...session.history.slice(-32),
+    ]) {
+      for (const token of tokenize(String(value))) candidates.add(token);
+    }
+    return [...candidates]
+      .map((label) => ({ label, score: relevanceScore(label, input, session) }))
+      .sort((left, right) => right.score - left.score)
+      .slice(0, 6)
+      .map((entry) => entry.label);
+  }
+}
+
+const tracker = new LatentGoalTracker();
+
+export function observePlannerTrajectory(plan: TaskPlan): void {
+  tracker.observe({
+    sessionKey: plan.semanticIntent?.sessionKey ?? plan.taskId,
+    objective: plan.objective,
+    query: plan.semanticIntent?.semanticQuery ?? plan.objective,
+    intentGraph: plan.intentGraph,
+    semanticIntent: plan.semanticIntent,
+    breadcrumbs: plan.steps.map((step) => ({ stepId: step.id, kind: step.kind, skill: step.skill, status: 'done' as const })),
+  });
 }
 
 export function inferLatentGoalsFromTrajectory(input: PlannerTrajectoryProbe): string[] {
-  const session = ensureSession(input.sessionKey);
-  const probeText = [
-    input.objective,
-    input.query,
-    input.semanticIntent?.semanticQuery ?? '',
-    ...(input.eventJournal ?? []).map((entry) => [entry.kind, entry.status, entry.reason, JSON.stringify(entry.detail ?? {})].filter(Boolean).join(' | ')),
-    ...(input.breadcrumbs ?? []).map((crumb) => [crumb.kind, crumb.skill, crumb.status].join(' | ')),
-    ...(input.intentGraph?.nodes ?? []).map((node) => [node.label, node.summary, node.kind].join(' | ')),
-  ].filter(Boolean).join('\n');
-  const probeVector = projectText(probeText);
-
-  const candidates = uniq([
-    ...session.memory,
-    ...session.entries.map((entry) => entry.label),
-    input.semanticIntent?.semanticQuery ?? input.objective,
-    ...(input.intentGraph?.nodes ?? []).slice(0, 6).map((node) => node.summary || node.label),
-  ].filter((value) => typeof value === 'string' && value.trim().length > 0));
-
-  const ranked = candidates.map((label) => {
-    const known = session.entries.find((entry) => entry.label === label);
-    const vector = known?.vector ?? projectText(label);
-    const recencyBoost = known ? Math.min(0.2, (Date.now() - known.updatedAt) / 1000000000) : 0;
-    return { label, score: cosineSimilarity(probeVector, vector) + recencyBoost };
-  }).sort((left, right) => right.score - left.score);
-
-  return ranked.slice(0, Math.max(3, Math.min(6, ranked.length))).map((entry) => entry.label);
+  tracker.observe(input);
+  return tracker.infer(input);
 }
 
 export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
