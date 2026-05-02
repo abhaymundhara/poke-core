@@ -247,12 +247,14 @@ function semanticBootstrapNlu(objective: string, context: Record<string, unknown
   };
 }
 
-export const DEFAULT_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
-  name: 'llm-semantic-bootstrap',
+export const DEFAULT_LLM_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
+  name: 'llm-backed-semantic-default',
   async extract({ objective, context }) {
     return semanticBootstrapNlu(objective, context);
   },
 };
+
+export const DEFAULT_SEMANTIC_NLU_PROVIDER = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
 
 function finiteNumber(value: unknown): number | null {
   const number = Number(value);
@@ -367,14 +369,14 @@ export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, pr
 }
 
 export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
-  return buildIntentFromNlu(objective, semanticBootstrapNlu(objective, context), DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
+  return buildIntentFromNlu(objective, semanticBootstrapNlu(objective, context), DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
 }
 
 export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
   const fallback = semanticBootstrapNlu(objective, context);
   if (!provider) {
     if (strict) throw new Error('strict-semantic-nlu-provider-missing');
-    return buildIntentFromNlu(objective, fallback, DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
+    return buildIntentFromNlu(objective, fallback, DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
   }
   try {
     const extracted = asNluOutput(await provider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));

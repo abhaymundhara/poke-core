@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { createObservation, createSignal, createSubscription, signalKey, type AutopilotObservation, type AutopilotSignal, type AutopilotSignalSource, type AutopilotSubscription, type AutopilotWake } from './events';
 import { AutopilotSchedulerWorker, type SchedulerSnapshot } from './scheduler';
 import { AutopilotLiveDaemon, type GithubWatch, type LiveDaemonSnapshot, type LiveWebSignalBundle, type PlatformSignalBundle } from './live-signals';
-import { DEFAULT_SEMANTIC_NLU_PROVIDER } from '../search/index.ts';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from '../search/index.ts';
 import type { SearchPlan } from '../search/index.ts';
 
 export type AutopilotTrigger = {
@@ -198,10 +198,14 @@ export class AutopilotEngine {
         this.auditTrail.push(`live-wake:${reason}`);
         this.auditTrail.push(`live-wake-payload:${JSON.stringify(payload)}`);
       },
-      nluProvider: DEFAULT_SEMANTIC_NLU_PROVIDER,
+      nluProvider: this.resolveLiveNluProvider(),
     }, asNumber(this.context.daemonIntervalMs, 15_000));
     this.seed();
     if (this.context.liveDaemon !== false) this.startDaemon(asNumber(this.context.daemonIntervalMs, 15_000));
+  }
+
+  private resolveLiveNluProvider(): SemanticNluProvider {
+    return (this.context.nluProvider as SemanticNluProvider | undefined) ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   }
 
   private seed(): void {
@@ -409,8 +413,34 @@ export class AutopilotEngine {
     const triggers: AutopilotTrigger[] = [];
     const schedulerSnapshot = this.scheduler.snapshot();
     const forecasted = this.lastSearchPlan?.predictedSignals ?? [];
+    const hasEmailSubscription = this.subscriptions.some((subscription) => subscription.enabled && subscription.source === 'email');
+    const hasCalendarSubscription = this.subscriptions.some((subscription) => subscription.enabled && subscription.source === 'calendar');
 
-    for (const [index, signal] of forecasted.slice(0, 5).entries()) {
+    if (snapshot.relationshipWeight >= 0.45 || hasEmailSubscription || /relationship|contact|follow up|reply|thread/i.test(this.objective)) {
+      triggers.push(buildTrigger('relationship-recall', 'relationship context is active and should not rot', 1_440, 'recall relationships and compact stale thread noise', 'email', 'relationship', 'debounce'));
+    }
+
+    if (snapshot.openThreads > 0 || hasEmailSubscription || /thread|inbox|reply|email|message/i.test(this.objective)) {
+      triggers.push(buildTrigger('thread-watcher', 'open threads need a follow-up cycle', 360, 'compact the current thread and identify the next reply', 'email', 'thread', 'debounce'));
+    }
+
+    if (snapshot.calendarConflicts > 0 || hasCalendarSubscription || /calendar|meeting|schedule|conflict|availability/i.test(this.objective)) {
+      triggers.push(buildTrigger('calendar-conflict-watch', 'calendar state has unresolved overlap or scheduling risk', 180, 'run conflict detection and propose a reschedule', 'calendar', 'calendar', 'debounce'));
+    }
+
+    if (snapshot.signalIntensity > 0.35 || this.signals.length > 3 || /signal|telemetry|monitor|anomaly|trend/i.test(this.objective)) {
+      triggers.push(buildTrigger('signal-observer', 'signal intensity suggests the loop should re-run without a user nudge', 90, 'observe signals, summarize drift, and refresh the working set', 'system', 'signal', 'debounce'));
+    }
+
+    if ((this.lastLiveWeb?.results.length ?? 0) > 0) {
+      triggers.push(buildTrigger('live-web-refresh', 'fresh live web results should be rechecked before they age out', 30, 'refresh live web search results and crawl the freshest pages', 'browser', 'live-web', 'debounce'));
+    }
+
+    if ((this.lastPlatformSignals?.events.length ?? 0) > 0) {
+      triggers.push(buildTrigger('platform-event-watch', 'external platform events were ingested and should keep waking the loop', 20, 'poll external platforms for new issue and pull-request events', 'integration', 'platform', 'debounce'));
+    }
+
+    for (const [index, signal] of forecasted.slice(0, 4).entries()) {
       triggers.push(buildTrigger(
         `${signal.topic}-forecast`,
         `semantic forecast ${index + 1} from ${signal.source} with posterior ${signal.confidence.toFixed(2)}`,
@@ -422,16 +452,8 @@ export class AutopilotEngine {
       ));
     }
 
-    if (forecasted.length === 0) {
+    if (forecasted.length === 0 && triggers.length === 0) {
       triggers.push(buildTrigger('semantic-forecast-refresh', 'no semantic forecast was available from the latest model pass', 45, 'refresh the semantic model and recompute future need distribution', 'system', 'forecast', 'debounce'));
-    }
-
-    if ((this.lastLiveWeb?.results.length ?? 0) > 0) {
-      triggers.push(buildTrigger('live-web-refresh', 'fresh live web results should be rechecked before they age out', 30, 'refresh live web search results and crawl the freshest pages', 'browser', 'live-web', 'debounce'));
-    }
-
-    if ((this.lastPlatformSignals?.events.length ?? 0) > 0) {
-      triggers.push(buildTrigger('platform-event-watch', 'external platform events were ingested and should keep waking the loop', 20, 'poll external platforms for new issue and pull-request events', 'integration', 'platform', 'debounce'));
     }
 
     if (this.status === 'paused' && schedulerSnapshot.pendingCount > 0) {
