@@ -32,6 +32,7 @@ export type LiveWebSignalBundle = {
   observations: AutopilotObservation[];
   freshnessScore: number;
   sourceCount: number;
+  warnings?: string[];
 };
 
 export type GithubWatch = {
@@ -65,6 +66,7 @@ export type PlatformSignalBundle = {
   signals: AutopilotSignal[];
   observations: AutopilotObservation[];
   sourceCount: number;
+  warnings?: string[];
 };
 
 export type LiveDaemonSnapshot = {
@@ -395,7 +397,7 @@ export async function pollLiveWebSignals(query: string, now = Date.now()): Promi
     result.freshness,
   ));
   const observations = results.slice(0, 4).map((result, index) => buildWebObservation('browser', `live-web:${index}`, result.title, result.freshness, [normalizeKey(query), normalizeKey(result.source)]));
-  return { query, searchedAt: now, results, crawls, signals, observations, freshnessScore, sourceCount: results.length };
+  return { query, searchedAt: now, results, crawls, signals, observations, freshnessScore, sourceCount: results.length, warnings: results.length === 0 ? ['web:no-verified-results'] : undefined };
 }
 
 function normalizeGithubLabels(labels: unknown): string[] {
@@ -487,6 +489,7 @@ function pullRequestEventsFromPayload(owner: string, repo: string, payload: unkn
 
 export async function pollGithubPlatformSignals(watches: GithubWatch[], now = Date.now()): Promise<PlatformSignalBundle> {
   const allEvents: PlatformEvent[] = [];
+  const warnings: string[] = [];
   for (const watch of watches) {
     const state = (watch.state ?? 'OPEN').toLowerCase();
     try {
@@ -500,14 +503,21 @@ export async function pollGithubPlatformSignals(watches: GithubWatch[], now = Da
         allEvents.push(...issueEvents, ...pullEvents);
         continue;
       }
+      warnings.push(`github:${watch.owner}/${watch.repo}:no-verified-issues-or-pulls`);
     } catch {
-      // fall back to HTML scraping below
+      warnings.push(`github:${watch.owner}/${watch.repo}:poll-error`);
     }
+
     const issuePage = 'https://github.com/' + encodeURIComponent(watch.owner) + '/' + encodeURIComponent(watch.repo) + '/issues?q=is%3Aissue+is%3A' + (state === 'all' ? 'open' : state) + '+sort%3Aupdated-desc';
     const pullPage = 'https://github.com/' + encodeURIComponent(watch.owner) + '/' + encodeURIComponent(watch.repo) + '/pulls?q=is%3Apr+is%3A' + (state === 'all' ? 'open' : state) + '+sort%3Aupdated-desc';
     const [issueHtml, pullHtml] = await Promise.all([fetchText(issuePage, 12_000), fetchText(pullPage, 12_000)]);
-    if (issueHtml) allEvents.push(...parseGithubListHtml(issueHtml, 'issue', watch.owner, watch.repo, now));
-    if (pullHtml) allEvents.push(...parseGithubListHtml(pullHtml, 'pull-request', watch.owner, watch.repo, now));
+    const scrapedIssueEvents = issueHtml ? parseGithubListHtml(issueHtml, 'issue', watch.owner, watch.repo, now) : [];
+    const scrapedPullEvents = pullHtml ? parseGithubListHtml(pullHtml, 'pull-request', watch.owner, watch.repo, now) : [];
+    if (scrapedIssueEvents.length > 0 || scrapedPullEvents.length > 0) {
+      allEvents.push(...scrapedIssueEvents, ...scrapedPullEvents);
+    } else {
+      warnings.push(`github:${watch.owner}/${watch.repo}:no-verified-html-events`);
+    }
   }
 
   const deduped = new Map<string, PlatformEvent>();
@@ -516,61 +526,17 @@ export async function pollGithubPlatformSignals(watches: GithubWatch[], now = Da
     const existing = deduped.get(key);
     if (!existing || existing.freshness < event.freshness || Date.parse(existing.updatedAt) < Date.parse(event.updatedAt)) deduped.set(key, event);
   }
-  let events = [...deduped.values()].sort((left, right) => right.freshness - left.freshness);
-  if (events.length === 0 && watches.length > 0) {
-    const nowIso = new Date(now).toISOString();
-    for (const watch of watches) {
-      const fallbackIssue = createSignal({
-        source: 'integration',
-        key: 'github:' + watch.owner + '/' + watch.repo + ':issue:0',
-        reason: 'watching ' + watch.owner + '/' + watch.repo + ' issues',
-        payload: { platform: 'github', owner: watch.owner, repo: watch.repo, kind: 'issue', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':issue', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/issues', updatedAt: nowIso, labels: watch.labels ?? [], state: watch.state ?? 'OPEN' },
-        priority: 0.62,
-        debounceMs: 180,
-        throttleMs: 2_000,
-        wakeMode: 'debounce',
-        tags: ['github', 'issue', 'fallback'],
-      });
-      const fallbackIssueObservation = createObservation({
-        source: 'integration',
-        focus: 'github:' + watch.owner + '/' + watch.repo + ':issue:fallback',
-        value: 'watch:' + watch.owner + '/' + watch.repo + ':issue',
-        confidence: 0.56,
-        freshnessMs: 600_000,
-        tags: ['github', 'issue', 'fallback'],
-      });
-      const fallbackPull = createSignal({
-        source: 'integration',
-        key: 'github:' + watch.owner + '/' + watch.repo + ':pr:0',
-        reason: 'watching ' + watch.owner + '/' + watch.repo + ' pull requests',
-        payload: { platform: 'github', owner: watch.owner, repo: watch.repo, kind: 'pull-request', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':pull-request', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/pulls', updatedAt: nowIso, labels: watch.labels ?? [], state: watch.state ?? 'OPEN' },
-        priority: 0.6,
-        debounceMs: 180,
-        throttleMs: 2_000,
-        wakeMode: 'debounce',
-        tags: ['github', 'pull-request', 'fallback'],
-      });
-      const fallbackPullObservation = createObservation({
-        source: 'integration',
-        focus: 'github:' + watch.owner + '/' + watch.repo + ':pull-request:fallback',
-        value: 'watch:' + watch.owner + '/' + watch.repo + ':pull-request',
-        confidence: 0.56,
-        freshnessMs: 600_000,
-        tags: ['github', 'pull-request', 'fallback'],
-      });
-      events.push({ source: 'github', owner: watch.owner, repo: watch.repo, kind: 'issue', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':issue', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/issues', updatedAt: nowIso, freshness: 0.24, labels: watch.labels ?? [], state: watch.state ?? 'OPEN', signal: fallbackIssue, observation: fallbackIssueObservation });
-      events.push({ source: 'github', owner: watch.owner, repo: watch.repo, kind: 'pull-request', number: 0, title: 'watch:' + watch.owner + '/' + watch.repo + ':pull-request', url: 'https://github.com/' + watch.owner + '/' + watch.repo + '/pulls', updatedAt: nowIso, freshness: 0.24, labels: watch.labels ?? [], state: watch.state ?? 'OPEN', signal: fallbackPull, observation: fallbackPullObservation });
-    }
-  }
+  const events = [...deduped.values()].sort((left, right) => right.freshness - left.freshness);
+  if (events.length === 0 && watches.length > 0) warnings.push('github-watch:no-verified-events-found');
   return {
     polledAt: now,
     events,
     signals: events.map((event) => event.signal),
     observations: events.map((event) => event.observation),
     sourceCount: events.length,
+    warnings,
   };
 }
-
 export type LiveDaemonDependencies = {
   clock: () => number;
   query: string;
@@ -618,7 +584,12 @@ export class AutopilotLiveDaemon {
   async pollOnce(): Promise<{ web: LiveWebSignalBundle; platform: PlatformSignalBundle; wakeReasons: string[]; searchPlan: SearchPlan }> {
     this.pollCount += 1;
     const now = this.deps.clock();
-    const searchPlan = await this.session.planSemantic(this.deps.query, { ...(this.deps.context ?? {}), liveSignals: true, query: this.deps.query, providerNluAvailable: true });
+    let searchPlan: SearchPlan;
+    try {
+      searchPlan = await this.session.planSemantic(this.deps.query, { ...(this.deps.context ?? {}), liveSignals: true, query: this.deps.query, providerNluAvailable: true });
+    } catch {
+      searchPlan = this.session.run(this.deps.query, { ...(this.deps.context ?? {}), liveSignals: true, query: this.deps.query, providerNluAvailable: false });
+    }
     const [web, platform] = await Promise.all([
       pollLiveWebSignals(searchPlan.intent.semanticQuery, now),
       pollGithubPlatformSignals(this.deps.githubWatches ?? [], now),
@@ -635,13 +606,14 @@ export class AutopilotLiveDaemon {
       if (signal.wakeMode === 'immediate' || signal.priority >= 0.8) wakeReasons.push(signal.reason ?? signal.key ?? signal.payload?.reason ?? signal.payload?.title ?? signal.source);
     }
     for (const event of platform.events) this.deps.onEvent?.(event);
+    if (web.warnings?.length) wakeReasons.unshift(`web-uncertainty:${web.warnings.join('|')}`);
+    if (platform.warnings?.length) wakeReasons.unshift(`platform-uncertainty:${platform.warnings.join('|')}`);
     if (wakeReasons.length > 0) {
       this.lastWakeAt = now;
-      this.deps.onWake?.(wakeReasons[0], { reasons: wakeReasons, webFreshness: web.freshnessScore, platformSignals: platform.sourceCount, searchStrategy: searchPlan.strategy.name });
+      this.deps.onWake?.(wakeReasons[0], { reasons: wakeReasons, webFreshness: web.freshnessScore, platformSignals: platform.sourceCount, searchStrategy: searchPlan.strategy.name, nluFallback: searchPlan.intent.nlu.fallbackUsed });
     }
     return { web, platform, wakeReasons, searchPlan };
   }
-
   snapshot(): LiveDaemonSnapshot {
     return {
       running: this.running,
