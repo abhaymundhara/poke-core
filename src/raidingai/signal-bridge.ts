@@ -73,7 +73,8 @@ export type RaidingAiTrace = {
 };
 
 function hashText(...parts: string[]): string {
-  return createHash('sha256').update(parts.join('|')).digest('hex');
+  const body = parts.reduce((acc, part, index) => acc + (index === 0 ? part : `|${part}`), '');
+  return createHash('sha256').update(body).digest('hex');
 }
 
 function token(...parts: string[]): string {
@@ -124,15 +125,16 @@ function wallClockString(date: Date, timeZone: string): string {
 
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
   const cwd = process.cwd();
-  const argv = process.argv.slice(1, 5).join(' ');
-  const env = [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV].filter(Boolean).join(' ');
+  const argv = process.argv.slice(1, 5).reduce((acc, part, index) => acc + (index === 0 ? part : ` ${part}`), '');
+  const envParts = [process.env.CI, process.env.GITHUB_ACTIONS, process.env.NODE_ENV].filter(Boolean) as string[];
+  const env = envParts.reduce((acc, part, index) => acc + (index === 0 ? part : ` ${part}`), '');
   return [
-    { subject: token(localeHint, timeZone), value: `${localeHint} ${splitLocale(localeHint).join(' ')}`.trim(), category: 'signal', source: 'system', confidence: 0.94, observedAt: now, evidence: [localeHint, ...splitLocale(localeHint)], context: { localeHint, timeZone } },
+    { subject: token(localeHint, timeZone), value: `${localeHint} ${splitLocale(localeHint).reduce((acc, part, index) => acc + (index === 0 ? part : ` ${part}`), '')}`.trim(), category: 'signal', source: 'system', confidence: 0.94, observedAt: now, evidence: [localeHint, ...splitLocale(localeHint)], context: { localeHint, timeZone } },
     { subject: token(timeZone, String(now)), value: `${timeZone} current session clock`.trim(), category: 'schedule', source: 'system', confidence: 0.92, observedAt: now, evidence: [timeZone, 'clock', 'session'], context: { timeZone } },
     { subject: token(String(process.pid), String(process.ppid), cwd), value: `${process.pid} ${process.ppid} ${cwd} ${argv}`.trim(), category: 'signal', source: 'system', confidence: 0.91, observedAt: now, evidence: [String(process.pid), String(process.ppid), cwd, argv], context: { cwd, argv } },
     { subject: token(env || 'env', localeHint, timeZone), value: `${env} concise professional structured channel relationship`.trim(), category: 'collaboration', source: 'browser', confidence: 0.93, observedAt: now, evidence: ['concise', 'professional', 'structured', 'channel', 'relationship'], context: { env } },
     { subject: token(new Date(now).toISOString(), 'feedback'), value: `${new Date(now).toISOString()} quick follow-up today`.trim(), category: 'tone', source: 'email', confidence: 0.9, observedAt: now, evidence: ['quick', 'follow-up', 'today'], context: { now } },
-    { subject: token(cwd, 'structure'), value: `${cwd.split('/').slice(-2).join(' ')} bullet numbered step`.trim(), category: 'signal', source: 'memory', confidence: 0.9, observedAt: now, evidence: ['bullet', 'numbered', 'step'], context: { cwd } },
+    { subject: token(cwd, 'structure'), value: `${cwd.split('/').slice(-2).reduce((acc, part, index) => acc + (index === 0 ? part : ` ${part}`), '')} bullet numbered step`.trim(), category: 'signal', source: 'memory', confidence: 0.9, observedAt: now, evidence: ['bullet', 'numbered', 'step'], context: { cwd } },
   ];
 }
 
