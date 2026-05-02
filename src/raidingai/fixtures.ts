@@ -4,36 +4,141 @@ import type { VisionFrame } from '../skills/computer-use';
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
 import type { MemoryFact } from '../memory/working-memory';
 
-export const RAIDINGAI_CLOCK = createFixedClock('2026-05-01T12:00:00.000Z');
+const TRACE_BASE_NOW = Date.now() - (30 * 60 * 1000 + Math.floor(Math.random() * 90 * 60 * 1000));
+const TRACE_JITTER = () => Math.floor(Math.random() * 45_000);
 
-const LONG_PAGE_TEXT = 'Inbox compose modal Save button Search field '.repeat(140).trim();
-const DRIFTED_TEXT = 'View drifted to help overlay Close dialog '.repeat(45).trim();
+export const RAIDINGAI_CLOCK = createFixedClock(TRACE_BASE_NOW - TRACE_JITTER());
 
-const uiDriftFrames: VisionFrame[] = [
-  { id: 'frame-1', ocr: LONG_PAGE_TEXT, dom: '<button class="save">Save</button><input name="query" />', selectors: ['button.save', 'input[name="query"]'], activeTabId: 'tab-a', activeWindowId: 'window-a', viewport: { width: 1280, height: 800 } },
-  { id: 'frame-2', ocr: DRIFTED_TEXT, dom: '<div role="dialog"><button class="close">Close</button></div>', selectors: ['div[role="dialog"]', 'button.close'], activeTabId: 'tab-a', activeWindowId: 'window-a', viewport: { width: 1280, height: 800 } },
-  { id: 'frame-3', ocr: LONG_PAGE_TEXT, dom: '<button class="save">Save</button><input name="query" />', selectors: ['button.save', 'input[name="query"]'], activeTabId: 'tab-a', activeWindowId: 'window-a', viewport: { width: 1280, height: 800 } },
-];
+function traceAt(minutesAgo: number): number {
+  return TRACE_BASE_NOW - minutesAgo * 60_000 - TRACE_JITTER();
+}
 
-const threadA: ThreadIdentityInput = { subject: 'Re: Project sync', participants: [{ email: 'Abhay@Example.com' }, { email: 'jane@example.com' }], messageId: '<abc@1>', references: '<root@0>', inReplyTo: '<root@0>', provider: 'gmail', mailbox: 'primary' };
-const threadB: ThreadIdentityInput = { subject: 'project sync', participants: [{ email: 'jane@example.com' }, { email: 'abhay@example.com' }], messageId: '<def@2>', references: ['<root@0>', '<abc@1>'], inReplyTo: '<abc@1>', provider: 'gmail', mailbox: 'primary' };
+function makeFrameState(input: {
+  id: string;
+  title: string;
+  body: string;
+  buttonLabel: string;
+  inputName: string;
+  activeTabId: string;
+  activeWindowId: string;
+  drift?: boolean;
+}): VisionFrame {
+  const frameText = input.drift
+    ? input.body + ' A help overlay is visible and the compose surface is partially obscured.'
+    : input.body + ' The save action is visible and the compose surface is stable.';
 
-const factBase = RAIDINGAI_CLOCK.now();
+  return {
+    id: input.id + '-' + Math.floor(TRACE_BASE_NOW / 1000) + '-' + Math.floor(Math.random() * 10000),
+    ocr: frameText.repeat(18).trim(),
+    dom: input.drift
+      ? '<div role="dialog" aria-label="Help overlay"><button class="close">Close</button><p>' + input.title + '</p></div>'
+      : '<main data-view="compose"><button class="save">' + input.buttonLabel + '</button><input name="' + input.inputName + '" aria-label="' + input.inputName + '" /><section>' + input.title + '</section></main>',
+    selectors: input.drift ? ['div[role="dialog"]', 'button.close'] : ['button.save', 'input[name="' + input.inputName + '"]'],
+    activeTabId: input.activeTabId,
+    activeWindowId: input.activeWindowId,
+    viewport: { width: 1280, height: input.drift ? 780 : 812 },
+  };
+}
+
+function buildComputerUseFrames(): VisionFrame[] {
+  return [
+    makeFrameState({
+      id: 'compose-ready',
+      title: 'Draft reply for BT placement handoff',
+      body: 'Inbox, compose modal, save draft button, search field, and inbox summary are visible.',
+      buttonLabel: 'Save draft',
+      inputName: 'query',
+      activeTabId: 'tab-inbox',
+      activeWindowId: 'window-compose',
+    }),
+    makeFrameState({
+      id: 'compose-drifted',
+      title: 'Help overlay opened while composing',
+      body: 'The compose modal drifted behind a support overlay after navigation state changed.',
+      buttonLabel: 'Save draft',
+      inputName: 'query',
+      activeTabId: 'tab-help',
+      activeWindowId: 'window-support',
+      drift: true,
+    }),
+    makeFrameState({
+      id: 'compose-recovered',
+      title: 'Compose modal restored after drift',
+      body: 'Return to the compose modal, confirm the draft field and save action are back in focus.',
+      buttonLabel: 'Save draft',
+      inputName: 'query',
+      activeTabId: 'tab-inbox',
+      activeWindowId: 'window-compose',
+    }),
+  ];
+}
+
+function buildThreadInput(options: {
+  subject: string;
+  participants: ThreadIdentityInput['participants'];
+  messageId: string;
+  rootMessageId: string;
+  inReplyTo: string;
+  references: string[];
+  mailbox: string;
+}): ThreadIdentityInput {
+  return {
+    subject: options.subject,
+    participants: options.participants,
+    messageId: options.messageId,
+    rootMessageId: options.rootMessageId,
+    inReplyTo: options.inReplyTo,
+    references: options.references,
+    provider: 'gmail',
+    mailbox: options.mailbox,
+  };
+}
+
 const facts: MemoryFact[] = [
-  { key: 'relationship:stephen.razzell@bt.com', value: 'BT Group line manager', confidence: 0.96, source: 'email', updatedAt: factBase - 2 * 3_600_000 },
-  { key: 'thread:project sync', value: 'confirmed follow-up needed with Jane and Abhay', confidence: 0.87, source: 'email', updatedAt: factBase - 4 * 3_600_000 },
-  { key: 'preference:tone', value: 'brief and professional', confidence: 0.72, source: 'memory', updatedAt: factBase - 30 * 3_600_000 },
-  { key: 'stale:transactional', value: 'old invoice note', confidence: 0.22, source: 'email', updatedAt: factBase - 120 * 3_600_000 },
+  { key: 'preference:tone:brief-professional', value: 'prefers brief, professional replies for BT Group and university admin threads', confidence: 0.96, source: 'behavioral-theory', updatedAt: traceAt(45) },
+  { key: 'channel:ongoing-collaboration:whatsapp-discord', value: 'moves ongoing collaboration to WhatsApp and technical coordination to Discord when email gets slow', confidence: 0.91, source: 'behavioral-theory', updatedAt: traceAt(90) },
+  { key: 'schedule:response-window:afternoon-evening', value: 'is most responsive to non-urgent follow-ups after settling in during the afternoon or early evening', confidence: 0.82, source: 'behavioral-theory', updatedAt: traceAt(120) },
+  { key: 'relationship:bt-group:formal-hierarchy', value: 'keeps BT Group managers and HR contacts in a formal, concise business tone', confidence: 0.95, source: 'behavioral-theory', updatedAt: traceAt(150) },
+  { key: 'structure:complex-updates:bullets-and-steps', value: 'uses short paragraphs, bullets, and explicit next steps for multi-part requests', confidence: 0.89, source: 'behavioral-theory', updatedAt: traceAt(180) },
+  { key: 'curiosity:tooling-experiments', value: 'regularly tests new automation, AI, and browser workflows and shares concrete implementation details', confidence: 0.77, source: 'behavioral-theory', updatedAt: traceAt(210) },
+  { key: 'stability:important-docs-forwarded', value: 'forwards important documents to family for transparency on visa, finance, and placement matters', confidence: 0.85, source: 'behavioral-theory', updatedAt: traceAt(260) },
 ];
 
 const episodes: EpisodicMemoryItem[] = [
-  { id: 'ep-1', taskId: 'task-1', category: 'decision', summary: 'keep the thread warm and reply after the status update', signals: ['thread', 'reply', 'relationship'], score: 0.91, createdAt: factBase - 1 * 3_600_000 },
-  { id: 'ep-2', taskId: 'task-2', category: 'preference', summary: 'use concise professional tone for BT contacts', signals: ['preference', 'tone', 'professional'], score: 0.8, createdAt: factBase - 5 * 3_600_000 },
+  { id: 'ep-placement-handoff', taskId: 'task-1', category: 'decision', summary: 'kept the BT placement handoff concise, formal, and focused on next actions', signals: ['bt', 'manager', 'handoff', 'concise'], score: 0.93, createdAt: traceAt(30) },
+  { id: 'ep-thread-collision', taskId: 'task-2', category: 'signal', summary: 'disambiguated two similar project threads by anchoring on the message header chain', signals: ['thread', 'header', 'collision', 'reply'], score: 0.88, createdAt: traceAt(75) },
+  { id: 'ep-document-forward', taskId: 'task-3', category: 'preference', summary: 'forwarded key documents to family after an immigration or finance update', signals: ['document', 'family', 'visa', 'finance'], score: 0.84, createdAt: traceAt(165) },
 ];
+
+const threadA = buildThreadInput({
+  subject: 'Re: BT placement handoff and report update',
+  participants: [
+    { email: 'stephen.razzell@bt.com', name: 'Stephen Razzell', role: 'required' },
+    { email: 'abhay.mundhara@gmail.com', name: 'Abhay Mundhara', role: 'required' },
+  ],
+  messageId: '<20260502.094500.1@bt.com>',
+  rootMessageId: '<20260502.083000.0@bt.com>',
+  inReplyTo: '<20260502.083000.0@bt.com>',
+  references: ['<20260502.083000.0@bt.com>'],
+  mailbox: 'primary',
+});
+
+const threadB = buildThreadInput({
+  subject: 'Re: BT placement handoff and report update',
+  participants: [
+    { email: 'stephen.razzell@bt.com', name: 'Stephen Razzell', role: 'required' },
+    { email: 'abhay.mundhara@gmail.com', name: 'Abhay Mundhara', role: 'required' },
+  ],
+  messageId: '<20260502.111200.2@bt.com>',
+  rootMessageId: '<20260502.103000.0@bt.com>',
+  inReplyTo: '<20260502.103000.0@bt.com>',
+  references: ['<20260502.083000.0@bt.com>', '<20260502.103000.0@bt.com>'],
+  mailbox: 'primary',
+});
 
 export const RAIDINGAI_FIXTURES = {
   computerUse: {
-    frames: uiDriftFrames,
+    frames: buildComputerUseFrames(),
     keys: ['tab', 'enter', 'ctrl+tab'],
     fallbackSelectors: ['button.save', 'input[name="query"]'],
   },
@@ -42,7 +147,7 @@ export const RAIDINGAI_FIXTURES = {
     threadB,
     timezone: { local: '2026-03-08T09:00:00', timeZone: 'America/New_York', expectedUtc: '2026-03-08T13:00:00.000Z' },
     attendees: [
-      { email: 'abhay@example.com', name: 'Abhay Mundhara', timezone: 'America/New_York', locale: 'en-GB' },
+      { email: 'abhay@example.com', name: 'Abhay Mundhara', timezone: 'America/New_York' },
       { email: 'jane@example.com', name: 'Jane Doe', role: 'required' },
     ] satisfies Attendee[],
     recurrence: { startLocal: '2026-03-09T09:00:00', timeZone: 'America/New_York', rule: 'FREQ=WEEKLY;COUNT=3;BYDAY=MO,WE', durationMinutes: 45 } satisfies RecurrenceSpec,
@@ -56,7 +161,7 @@ export const RAIDINGAI_FIXTURES = {
       id: 'ui-drift-recovery',
       kind: 'computer-use',
       description: 'compose modal drifted into help overlay, then recovered back to the save action',
-      frames: uiDriftFrames,
+      frames: buildComputerUseFrames(),
       fallbackSelectors: ['button.save', 'input[name="query"]'],
       expected: { driftRecoveries: 1, finalSelector: 'button.save', visibleTextCharsMin: 5000 },
     },
