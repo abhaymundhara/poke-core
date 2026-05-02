@@ -820,3 +820,4 @@ export function captureRaidingAiSignals(now = Date.now()): RaidingAiRuntimeSigna
 export function deriveRaidingAiTrace(now = Date.now()): RaidingAiTrace {
   return new SignalBridge().buildTrace(now);
 }
+
