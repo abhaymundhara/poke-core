@@ -1,4 +1,4 @@
-import { canonicalThreadIdentity, expandRecurrence, reconcileAttendees, normalizeWallTime, DEEP_PRIMITIVES_FIXTURES } from '../deep-primitives';
+import { canonicalThreadIdentity, expandRecurrence, reconcileAttendees, normalizeWallTime } from '../deep-primitives';
 import { runVisionLoop, type VisionFrame } from '../skills/computer-use';
 import { BehavioralLearningLayer } from '../memory/behavioral-learning';
 import { MemoryConsolidationJob } from '../memory/consolidation';
@@ -24,17 +24,17 @@ function runComputerUseCase(): RaidingAiCaseResult {
 }
 
 function runDeepPrimitivesCase(): RaidingAiCaseResult {
-  const fixtures = RAIDINGAI_FIXTURES.deepPrimitives;
-  const threadA = canonicalThreadIdentity(fixtures.threadA as any);
-  const threadB = canonicalThreadIdentity(fixtures.threadB as any);
-  const normalized = normalizeWallTime(fixtures.timezone.local, fixtures.timezone.timeZone);
-  const attendees = reconcileAttendees(fixtures.attendees as any, fixtures.timezone.timeZone, (fixtures.attendees[0] as any)?.locale ?? 'en-US');
-  const recurrence = expandRecurrence(fixtures.recurrence as any);
-  const expectedDays = String(fixtures.recurrence.rule).match(/BYDAY=([^;]+)/)?.[1].split(',').filter(Boolean) ?? [];
+  const fixtures = RAIDINGAI_FIXTURES;
+  const threadA = canonicalThreadIdentity(fixtures.deepPrimitives.threadA as any);
+  const threadB = canonicalThreadIdentity(fixtures.deepPrimitives.threadB as any);
+  const normalized = normalizeWallTime(fixtures.deepPrimitives.timezone.local, fixtures.deepPrimitives.timezone.timeZone);
+  const attendees = reconcileAttendees(fixtures.deepPrimitives.attendees as any, fixtures.deepPrimitives.timezone.timeZone, fixtures.signalBridge.localeHint);
+  const recurrence = expandRecurrence(fixtures.deepPrimitives.recurrence as any);
+  const expectedDays = String(fixtures.deepPrimitives.recurrence.rule).match(/BYDAY=([^;]+)/)?.[1].split(',').filter(Boolean) ?? [];
   const score = [
     scoreRatio(threadA.threadId === threadB.threadId, 0.35),
-    scoreRatio(assertNear(normalized.utc, fixtures.timezone.expectedUtc), 0.3),
-    scoreRatio(attendees.length === fixtures.attendees.length, 0.15),
+    scoreRatio(assertNear(normalized.utc, fixtures.deepPrimitives.timezone.expectedUtc), 0.3),
+    scoreRatio(attendees.length === fixtures.deepPrimitives.attendees.length, 0.15),
     scoreRatio(recurrence.length === 3 && (expectedDays[0] ? recurrence[0]?.weekday === expectedDays[0] : recurrence.length > 0), 0.2),
   ].reduce((sum, value) => sum + value, 0);
   return { name: 'deep-primitives', score, passed: score >= 0.9, notes: [threadA.threadId, threadB.threadId, normalized.utc, recurrence.map((instance) => instance.startUtc).join(',')], metrics: { threadId: threadA.threadId, normalizedUtc: normalized.utc, attendeeCount: attendees.length, recurrenceCount: recurrence.length } };

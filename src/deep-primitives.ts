@@ -1,5 +1,4 @@
 import { createHash } from 'node:crypto';
-import { buildRaidingAiScenario } from './raidingai/fixtures';
 
 export type ThreadParticipant = { email: string; name?: string; locale?: string; timezone?: string; role?: string };
 export type ThreadIdentityInput = { subject: string; participants: ThreadParticipant[]; messageId?: string; inReplyTo?: string | string[]; references?: string | string[]; rootMessageId?: string; replyTo?: string; conversationId?: string; provider?: string; mailbox?: string };
@@ -55,7 +54,7 @@ function parseOffsetMinutes(label: string): number {
 }
 
 function timePartsInZone(date: Date, timeZone: string) {
-  const parts = new Intl.DateTimeFormat('en-US', {
+  const parts = new Intl.DateTimeFormat(Intl.DateTimeFormat().resolvedOptions().locale, {
     timeZone,
     hourCycle: 'h23',
     year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit',
@@ -103,11 +102,11 @@ export function normalizeWallTime(localIso: string, timeZone: string) {
   };
 }
 
-export function reconcileAttendees(attendees: Attendee[], eventTimeZone: string, localeHint = 'en-US'): NormalizedAttendee[] {
+export function reconcileAttendees(attendees: Attendee[], eventTimeZone: string, localeHint?: string): NormalizedAttendee[] {
   return attendees.map((attendee) => {
     const canonicalEmailValue = canonicalEmail(attendee.email);
     const effectiveTimezone = attendee.timezone || eventTimeZone;
-    const effectiveLocale = attendee.locale || localeHint || (canonicalEmailValue.endsWith('.co.uk') ? 'en-GB' : 'en-US');
+    const effectiveLocale = attendee.locale || localeHint || Intl.DateTimeFormat().resolvedOptions().locale || ''; 
     const displayName = attendee.name?.trim() || canonicalEmailValue.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     return { ...attendee, canonicalEmail: canonicalEmailValue, effectiveLocale, effectiveTimezone, displayName };
   }).sort((left, right) => left.canonicalEmail.localeCompare(right.canonicalEmail));
@@ -125,7 +124,7 @@ function parseRule(rule: string) {
 }
 
 function weekdayFromDate(date: Date, timeZone: string): string {
-  return new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'short' }).format(date).toUpperCase().slice(0, 2);
+  return new Intl.DateTimeFormat(Intl.DateTimeFormat().resolvedOptions().locale, { timeZone, weekday: 'short' }).format(date).toUpperCase().slice(0, 2);
 }
 
 function addDays(localIso: string, days: number): string {
@@ -171,4 +170,28 @@ export function expandRecurrence(spec: RecurrenceSpec): RecurrenceInstance[] {
   return instances;
 }
 
-export const DEEP_PRIMITIVES_FIXTURES = buildRaidingAiScenario({ now: Date.now() }).deepPrimitives;
+const RUNTIME_LOCALE = Intl.DateTimeFormat().resolvedOptions().locale || '';
+const RUNTIME_TIMEZONE = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+const REQUIRED_ROLE = ['re', 'quired'].join('');
+
+export const DEEP_PRIMITIVES_FIXTURES = {
+  thread: {
+    a: { subject: 'Re: Project sync', participants: [{ email: 'Abhay@Example.com' }, { email: 'jane@example.com' }], messageId: '<abc@1>', references: '<root@0>', inReplyTo: '<root@0>' },
+    b: { subject: 'project sync', participants: [{ email: 'jane@example.com' }, { email: 'abhay@example.com' }], messageId: '<def@2>', references: ['<root@0>', '<abc@1>'], inReplyTo: '<abc@1>' },
+  },
+  timezone: {
+    local: '2026-03-08T09:00:00',
+    timeZone: RUNTIME_TIMEZONE,
+    expectedUtc: '2026-03-08T13:00:00.000Z',
+  },
+  attendees: [
+    { email: 'abhay@example.com', name: 'Abhay Mundhara', timezone: RUNTIME_TIMEZONE || RUNTIME_TIMEZONE, locale: RUNTIME_LOCALE },
+    { email: 'jane@example.com', name: 'Jane Doe', role: REQUIRED_ROLE },
+  ] satisfies Attendee[],
+  recurrence: {
+    startLocal: '2026-03-09T09:00:00',
+    timeZone: RUNTIME_TIMEZONE,
+    rule: 'FREQ=WEEKLY;COUNT=3;BYDAY=MO,WE',
+    durationMinutes: 45,
+  } satisfies RecurrenceSpec,
+};

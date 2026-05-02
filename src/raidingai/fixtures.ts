@@ -3,18 +3,9 @@ import type { Attendee, RecurrenceSpec, ThreadIdentityInput } from '../deep-prim
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
 import type { MemoryFact } from '../memory/working-memory';
 import type { UserBehaviorTheory } from '../memory/behavioral-theory';
-import { HydrationLayer, type RaidingAiTrace } from './hydration';
-import { RAIDINGAI_ONTOLOGY } from './ontology';
+import { HydrationLayer, type RaidingAiHydratedScenario } from './hydration';
 
-type VisionFrame = { id: string; screenshot?: string; ocr?: string; dom?: string; selectors?: string[]; activeTabId?: string; activeWindowId?: string; viewport?: { width: number; height: number } };
-
-export type RaidingAiScenario = {
-  seed: string;
-  now: number;
-  label: string;
-  taskHint: string;
-  theory: UserBehaviorTheory;
-  computerUse: { frames: VisionFrame[]; keys: string[]; fallbackSelectors: string[] };
+export type RaidingAiScenario = RaidingAiHydratedScenario & {
   deepPrimitives: {
     threadA: ThreadIdentityInput;
     threadB: ThreadIdentityInput;
@@ -27,23 +18,11 @@ export type RaidingAiScenario = {
     recurrence: RecurrenceSpec;
   };
   memory: { facts: MemoryFact[]; episodes: EpisodicMemoryItem[] };
-  traces: Array<{
-    id: string;
-    kind: string;
-    description: string;
-    frames?: VisionFrame[];
-    fallbackSelectors?: string[];
-    threadInputs?: ThreadIdentityInput[];
-    workingFacts?: MemoryFact[];
-    episodicItems?: EpisodicMemoryItem[];
-    objective?: string;
-    expected: Record<string, boolean | number | string>;
-  }>;
+  theory: UserBehaviorTheory;
 };
 
-function hydrateScenario(trace?: RaidingAiTrace | null): RaidingAiScenario {
-  void RAIDINGAI_ONTOLOGY.files.goldTrace;
-  return new HydrationLayer().hydrate(trace ?? undefined);
+function hydrateScenario(): RaidingAiScenario {
+  return new HydrationLayer().hydrate();
 }
 
 export const RAIDINGAI_CLOCK = createDriftingClock();
