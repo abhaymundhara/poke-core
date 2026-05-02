@@ -1,15 +1,16 @@
 import { spawnSync } from 'node:child_process';
 
 export function extractWithDefaultProviderSync<T>(payload: unknown, providerModulePath = './src/search/nlu.ts', exportName = 'DEFAULT_LLM_SEMANTIC_NLU_PROVIDER'): T {
-  const script = `
-const payload = JSON.parse(process.argv[1]);
-const mod = await import("./src/search/nlu.ts");
-const provider = mod["DEFAULT_LLM_SEMANTIC_NLU_PROVIDER"];
-if (!provider || typeof provider.extract !== 'function') throw new Error('missing-llm-provider');
-const result = await provider.extract(payload);
-process.stdout.write(JSON.stringify(result));
-`;
-  const run = spawnSync('bun', ['-e', script.replace("./src/search/nlu.ts", providerModulePath).replace("DEFAULT_LLM_SEMANTIC_NLU_PROVIDER", exportName), JSON.stringify(payload)], {
+  const script = [
+    'const payload = JSON.parse(process.argv[1]);',
+    'const mod = await import(' + JSON.stringify(providerModulePath) + ');',
+    'const provider = mod[' + JSON.stringify(exportName) + '];',
+    "if (!provider || typeof provider.extract !== 'function') throw new Error('missing-llm-provider');",
+    'const result = await provider.extract(payload);',
+    'process.stdout.write(JSON.stringify(result));',
+  ].join('
+');
+  const run = spawnSync('bun', ['-e', script, JSON.stringify(payload)], {
     cwd: process.cwd(),
     encoding: 'utf8',
   });
