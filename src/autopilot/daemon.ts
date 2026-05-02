@@ -58,6 +58,7 @@ export type CognitiveInterferenceOptions = {
 type GCEntry = { duration?: number } & Record<string, unknown>;
 
 type RuntimeObserver = {
+  observe(options: unknown): void;
   disconnect(): void;
 };
 
@@ -263,11 +264,11 @@ export class CognitiveInterference {
     const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, manifest.constructorProbeKey) as unknown;
     const flagSetter = Reflect.get(v8 as Record<string, unknown>, manifest.flagSetterKey) as ((value: string) => void) | undefined;
 
-    Reflect.get(process as Record<string, unknown>, manifest.processOnKey) as ((event: string, listener: (...args: unknown[]) => void) => void);
-    Reflect.get(process as Record<string, unknown>, manifest.processOffKey) as ((event: string, listener: (...args: unknown[]) => void) => void);
+    const processOn = Reflect.get(process as Record<string, unknown>, manifest.processOnKey) as ((event: string, listener: (...args: unknown[]) => void) => void);
+    const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, manifest.observerObserveKey) as ((options: unknown) => void);
 
     flagSetter?.call(v8, manifest.flagValue);
-    process.on(manifest.processSignal, this.handleProcessSignal);
+    processOn.call(process, manifest.processSignal, this.handleProcessSignal);
 
     const observer = new observerCtor((list) => {
       const entriesMethod = Reflect.get(list as Record<string, unknown>, manifest.observerEntriesKey) as (() => unknown[]) | undefined;
@@ -279,7 +280,7 @@ export class CognitiveInterference {
 
     Reflect.get(observer as Record<string, unknown>, manifest.observerObserveKey);
     Reflect.get(observer as Record<string, unknown>, manifest.observerDisconnectKey);
-    observer.observe(buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
+    observerObserve.call(observer, buildObserveOptions(manifest.observerOptionsKey, manifest.entryType));
     this.observer = observer;
 
     void observerProbe;
@@ -290,13 +291,15 @@ export class CognitiveInterference {
     if (!this.running) return this.snapshot();
     this.running = false;
 
-    if (this.observer) {
-      this.observer.disconnect();
+    if (this.observer && this.manifest) {
+      const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, this.manifest.observerDisconnectKey) as (() => void);
+      observerDisconnect.call(this.observer);
       this.observer = null;
     }
 
     if (this.manifest) {
-      process.off(this.manifest.processSignal, this.handleProcessSignal);
+      const processOff = Reflect.get(process as Record<string, unknown>, this.manifest.processOffKey) as ((event: string, listener: (...args: unknown[]) => void) => void);
+      processOff.call(process, this.manifest.processSignal, this.handleProcessSignal);
       this.manifest = null;
     }
 
