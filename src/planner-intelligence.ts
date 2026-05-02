@@ -140,62 +140,105 @@ export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
   }
 }
 
+
+const PLANNER_RUNTIME_STATE_SCHEMA = {
+  type: 'object',
+  required: ['strategy', 'provider', 'fallbackUsed', 'confidence', 'currentNodeId', 'completedNodeIds', 'blockedNodeIds', 'notes'],
+  properties: {
+    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
+    provider: { type: 'string' },
+    fallbackUsed: { type: 'boolean' },
+    confidence: { type: 'number' },
+    currentNodeId: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    completedNodeIds: { type: 'array', items: { type: 'string' } },
+    blockedNodeIds: { type: 'array', items: { type: 'string' } },
+    lastRecovery: {
+      type: 'object',
+      properties: {
+        stepId: { type: 'string' },
+        reason: { type: 'string' },
+        at: { type: 'number' },
+      },
+    },
+    notes: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+const PLANNER_INTENT_GRAPH_SCHEMA = {
+  type: 'object',
+  required: ['id', 'objective', 'normalizedObjective', 'semanticQuery', 'strategy', 'semanticProvider', 'confidence', 'nodes', 'edges', 'frontier', 'stepOrder', 'stateAnchorByStepId', 'toolAffordances', 'recoveryPolicy', 'warnings'],
+  properties: {
+    id: { type: 'string' },
+    objective: { type: 'string' },
+    normalizedObjective: { type: 'string' },
+    semanticQuery: { type: 'string' },
+    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
+    semanticProvider: { type: 'string' },
+    confidence: { type: 'number' },
+    nodes: { type: 'array' },
+    edges: { type: 'array' },
+    frontier: { type: 'array', items: { type: 'string' } },
+    stepOrder: { type: 'array', items: { type: 'string' } },
+    stateAnchorByStepId: { type: 'object' },
+    toolAffordances: { type: 'array' },
+    recoveryPolicy: { type: 'object' },
+    warnings: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+function runPlannerRuntimeExtraction<T>(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): T {
+  return extractWithDefaultProviderSync<T>({ objective, context, schema });
+}
+
 export function createPlannerRuntimeState(plan: TaskPlan): PlannerRuntimeState {
-  const planner = plan.planner;
-  return {
-    strategy: planner?.strategy ?? plan.intentGraph?.strategy ?? 'blend',
-    provider: planner?.provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name,
-    fallbackUsed: planner?.fallbackUsed ?? false,
-    confidence: planner?.confidence ?? plan.intentGraph?.confidence ?? 0,
-    currentNodeId: plan.intentGraph?.frontier?.[0] ?? plan.steps[0]?.id ?? null,
-    completedNodeIds: [],
-    blockedNodeIds: [],
-    notes: [...(planner?.warnings ?? []), ...(plan.intentGraph?.warnings ?? [])],
-  };
+  return runPlannerRuntimeExtraction<PlannerRuntimeState>(
+    'derive the initial planner runtime state for a task execution',
+    { plan },
+    PLANNER_RUNTIME_STATE_SCHEMA,
+  );
 }
 
-export function cloneIntentGraph(graph?: PlannerIntentGraph | null): PlannerIntentGraph | undefined {
-  return graph ? JSON.parse(JSON.stringify(graph)) as PlannerIntentGraph : undefined;
-}
-
-export function markPlannerStepOutcome(graph: PlannerIntentGraph | undefined, stepId: string, status: PlannerIntentGraph['nodes'][number]['status'], note?: string): PlannerIntentGraph | undefined {
+export function markPlannerStepOutcome(
+  graph: PlannerIntentGraph | undefined,
+  plan: TaskPlan,
+  stepId: string,
+  status: PlannerIntentGraph['nodes'][number]['status'],
+  note?: string,
+): PlannerIntentGraph | undefined {
   if (!graph) return graph;
-  const next = cloneIntentGraph(graph);
-  if (!next) return graph;
-  const node = next.nodes.find((entry) => entry.stepId === stepId || entry.id === stepId);
-  if (node) {
-    node.status = status;
-    if (note) {
-      node.metadata = { ...node.metadata, note };
-    }
-  }
-  if (note && !next.warnings.includes(note)) next.warnings = [...next.warnings, note];
-  return next;
+  return runPlannerRuntimeExtraction<PlannerIntentGraph>(
+    'update the planner intent graph after a step outcome',
+    { currentGraph: graph, plan, stepId, status, note: note ?? null },
+    PLANNER_INTENT_GRAPH_SCHEMA,
+  );
 }
 
-export function updatePlannerRuntimeState(state: PlannerRuntimeState | undefined, plan: TaskPlan, stepId: string, status: PlannerIntentGraph['nodes'][number]['status'], note?: string): PlannerRuntimeState {
-  const next = state ? { ...state, completedNodeIds: [...state.completedNodeIds], blockedNodeIds: [...state.blockedNodeIds], notes: [...state.notes] } : createPlannerRuntimeState(plan);
-  next.currentNodeId = stepId;
-  if (status === 'done' && !next.completedNodeIds.includes(stepId)) next.completedNodeIds.push(stepId);
-  if ((status === 'blocked' || status === 'failed') && !next.blockedNodeIds.includes(stepId)) next.blockedNodeIds.push(stepId);
-  if (note && !next.notes.includes(note)) next.notes.push(note);
-  return next;
+export function updatePlannerRuntimeState(
+  state: PlannerRuntimeState | undefined,
+  plan: TaskPlan,
+  stepId: string,
+  status: PlannerIntentGraph['nodes'][number]['status'],
+  note?: string,
+): PlannerRuntimeState {
+  return runPlannerRuntimeExtraction<PlannerRuntimeState>(
+    'update the planner runtime state after a step outcome',
+    { currentState: state ?? null, plan, stepId, status, note: note ?? null },
+    PLANNER_RUNTIME_STATE_SCHEMA,
+  );
 }
 
-export function notePlannerRecovery(state: PlannerRuntimeState | undefined, stepId: string, reason: string): PlannerRuntimeState {
-  const fallbackPlan: TaskPlan = { taskId: stepId, objective: reason, steps: [] };
-  const next = state ? { ...state, completedNodeIds: [...state.completedNodeIds], blockedNodeIds: [...state.blockedNodeIds], notes: [...state.notes] } : createPlannerRuntimeState(fallbackPlan);
-  next.blockedNodeIds = next.blockedNodeIds.includes(stepId) ? next.blockedNodeIds : [...next.blockedNodeIds, stepId];
-  next.lastRecovery = { stepId, reason, at: Date.now() };
-  next.notes = next.notes.includes(reason) ? next.notes : [...next.notes, reason];
-  return next;
+export function notePlannerRecovery(state: PlannerRuntimeState | undefined, plan: TaskPlan, stepId: string, reason: string): PlannerRuntimeState {
+  return runPlannerRuntimeExtraction<PlannerRuntimeState>(
+    'record planner recovery details in the planner runtime state',
+    { currentState: state ?? null, plan, stepId, reason },
+    PLANNER_RUNTIME_STATE_SCHEMA,
+  );
 }
 
 export function deriveExecutionProfile(plan: TaskPlan): ExecutionProfile {
-  const raw = extractWithDefaultProviderSync<ExecutionProfile>({
-    objective: 'derive the execution profile for a completed task plan',
-    context: { plan, semanticIntent: plan.semanticIntent ?? null, intentGraph: plan.intentGraph ?? null, planner: plan.planner ?? null },
-    schema: EXECUTION_PROFILE_SCHEMA,
-  });
-  return parseModelJson<ExecutionProfile>(raw);
+  return runPlannerRuntimeExtraction<ExecutionProfile>(
+    'derive the execution profile for a completed task plan',
+    { plan, semanticIntent: plan.semanticIntent ?? null, intentGraph: plan.intentGraph ?? null, planner: plan.planner ?? null },
+    EXECUTION_PROFILE_SCHEMA,
+  );
 }

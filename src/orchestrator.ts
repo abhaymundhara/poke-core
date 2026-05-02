@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER } from './search/nlu';
-import { buildPlan, cloneIntentGraph, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState } from './planner';
+import { buildPlan, createPlannerRuntimeState, deriveExecutionProfile, markPlannerStepOutcome, notePlannerRecovery, resolvePlannerIntent, updatePlannerRuntimeState } from './planner';
+import { parseModelJson } from './llm-bridge';
 import { buildPokeGraph, type PokeGraphState } from './graph';
 import { RagCorpus } from './rag/retriever';
 import { EpisodicMemory } from './memory/episodic-memory';
@@ -51,12 +52,8 @@ type AffordanceEvaluation = {
   rankedAdapters: Array<{ name: string; score: number; reason: string[]; invoke: boolean }>;
 };
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function toStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((entry) => String(entry)).filter((entry) => entry.length > 0) : [];
+function cloneIntentGraph(graph: TaskPlan['intentGraph'] | undefined): TaskPlan['intentGraph'] | undefined {
+  return graph ? JSON.parse(JSON.stringify(graph)) as TaskPlan['intentGraph'] : undefined;
 }
 
 export class PokeCoreOrchestrator {
@@ -123,23 +120,16 @@ export class PokeCoreOrchestrator {
       },
       schema: AFFORDANCE_EVALUATION_SCHEMA,
     });
-    if (!isRecord(raw)) throw new Error('invalid-affordance-evaluation:' + provider.name);
-    const ranked = Array.isArray((raw as Record<string, unknown>).rankedAdapters) ? (raw as Record<string, any>).rankedAdapters.map((entry: any) => ({
-      name: String(entry.name),
-      score: typeof entry.score === 'number' ? entry.score : 0,
-      reason: toStringArray(entry.reason),
-      invoke: Boolean(entry.invoke),
-    })) : [];
-    if (ranked.length === 0) throw new Error('invalid-affordance-evaluation:' + provider.name);
-    const selectedName = typeof (raw as Record<string, unknown>).selectedAdapterName === 'string' ? String((raw as Record<string, unknown>).selectedAdapterName) : ranked[0]!.name;
-    const selected = ranked.find((entry) => entry.name === selectedName && entry.invoke) ?? ranked.find((entry) => entry.invoke);
-    if (!selected) throw new Error('no-adapter-selected:' + provider.name);
-    return {
-      selectedAdapterName: selected.name,
-      confidence: typeof (raw as Record<string, unknown>).confidence === 'number' ? Number((raw as Record<string, unknown>).confidence) : selected.score,
-      rationale: toStringArray((raw as Record<string, unknown>).rationale),
-      rankedAdapters: ranked,
-    };
+    const evaluation = parseModelJson<AffordanceEvaluation>(raw);
+    if (!evaluation || typeof evaluation !== 'object' || !Array.isArray(evaluation.rankedAdapters) || evaluation.rankedAdapters.length === 0) {
+      throw new Error('invalid-affordance-evaluation:' + provider.name);
+    }
+    if (typeof evaluation.selectedAdapterName !== 'string' || typeof evaluation.confidence !== 'number' || !Array.isArray(evaluation.rationale)) {
+      throw new Error('invalid-affordance-evaluation:' + provider.name);
+    }
+    const selected = evaluation.rankedAdapters.find((entry) => entry.name === evaluation.selectedAdapterName);
+    if (!selected || !selected.invoke) throw new Error('no-adapter-selected:' + provider.name);
+    return evaluation;
   }
 
   private async resolveSkill(step: TaskPlan['steps'][number], plan: TaskPlan, state: RuntimeState): Promise<SkillAdapter> {
@@ -245,7 +235,7 @@ export class PokeCoreOrchestrator {
         state.outputs[step.id] = result.output;
         state.breadcrumbs.push({ stepId: step.id, kind: step.kind, skill: skill.descriptor.name, status: 'done' });
         state.artifacts[step.id] = { note: result.note ?? null, trace: result.trace ?? null };
-        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, step.id, 'done', result.note ?? ('completed ' + step.kind));
+        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, plan, step.id, 'done', result.note ?? ('completed ' + step.kind));
         state.planner = updatePlannerRuntimeState(state.planner, plan, step.id, 'done', result.note ?? ('completed ' + step.kind));
         this.store.recordSnapshot(task.taskId, 'routing', state);
         this.persistTransition(task.taskId, 'executing', 'routing', { stepId: step.id, stepIndex, validation, planner: state.planner?.strategy });
@@ -256,8 +246,8 @@ export class PokeCoreOrchestrator {
         attemptIndex += 1;
         state.attempts[step.id] = attemptIndex;
         state.recovery.push({ stepId: step.id, reason: lastError, at: Date.now() });
-        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, step.id, 'failed', lastError);
-        state.planner = notePlannerRecovery(state.planner, step.id, lastError);
+        state.intentGraph = markPlannerStepOutcome(state.intentGraph ?? plan.intentGraph, plan, step.id, 'failed', lastError);
+        state.planner = notePlannerRecovery(state.planner, plan, step.id, lastError);
         this.store.recordSnapshot(task.taskId, 'recovering', state);
         this.persistTransition(task.taskId, 'executing', 'recovering', { stepId: step.id, attemptIndex, error: lastError, planner: state.planner?.lastRecovery });
         if (attemptIndex >= step.retryPolicy.maxAttempts) break;
