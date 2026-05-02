@@ -242,6 +242,7 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
   const frameCount = Number.parseInt(token(scope, theory.summary, localeHint, 'frames').slice(0, 1), 16) % 3 + 2;
   const frameSeeds = recursiveSeedSeries(scope, 4, frameCount);
   return recursiveSeries(frameSeeds.length, (index) => {
+    const fragment = frameSeeds[index] ?? scope.slice(index * 4, index * 4 + 4);
     const frameSeed = token(scope, fragment, String(index));
     return {
       id: token(scope, frameSeed, String(index)),
@@ -263,6 +264,7 @@ function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone
   const attendeeCount = Number.parseInt(token(seed, theory.summary, 'attendees').slice(0, 1), 16) % 3 + 2;
   const attendeeSeeds = recursiveSeedSeries(seed, 4, attendeeCount);
   return recursiveSeries(attendeeSeeds.length, (index) => ({
+    const fragment = attendeeSeeds[index] ?? seed.slice(index * 4, index * 4 + 4);
     email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
     name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
     locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
