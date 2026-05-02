@@ -120,8 +120,14 @@ export function defaultPolicy(): SearchPolicyState {
       classPriors: { primary: 0.9, expert: 0.84, institutional: 0.76, community: 0.62, unknown: 0.5 },
       sourceMemory: {},
       domainMemory: {},
-      corroborationMatrix: {},
-      expertiseBasis: 0.65,
+      knowledgeClassRepresentations: {
+        primary: [1, 0, 0, 0],
+        expert: [0, 1, 0, 0],
+        institutional: [0, 0, 1, 0],
+        community: [0, 0, 0, 1],
+        unknown: [0.25, 0.25, 0.25, 0.25],
+      },
+      corroborationGraph: {},
     },
     latentIntentModel: {
       version: 2,

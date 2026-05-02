@@ -41,11 +41,9 @@ export type EpistemicTrustEntry = {
   lastObservedAt: number | null;
   notes: string[];
   epistemicClass: EpistemicClass;
-  embedding: number[];
-  corroboration: number;
-  contradiction: number;
-  domains: string[];
-  sourceIds: string[];
+  representation: number[];
+  corroboration: Record<string, number>;
+  classPosterior: Record<EpistemicClass, number>;
 };
 
 export type EpistemicTrustModel = {
@@ -54,8 +52,8 @@ export type EpistemicTrustModel = {
   classPriors: Record<EpistemicClass, number>;
   sourceMemory: Record<string, EpistemicTrustEntry>;
   domainMemory: Record<string, EpistemicTrustEntry>;
-  corroborationMatrix: Record<string, Record<string, number>>;
-  expertiseBasis: number;
+  knowledgeClassRepresentations: Record<EpistemicClass, number[]>;
+  corroborationGraph: Record<string, Record<string, number>>;
 };
 
 export type Proposition = {
@@ -101,6 +99,8 @@ export type LatentIntentModel = {
   archetypes: LatentIntentArchetype[];
   transitions: Record<string, number>;
   lastUpdatedAt: number;
+  statePrototypes?: Record<string, number[]>;
+  trajectoryMemory?: Record<string, number>;
 };
 
 export type ReasoningArchitecture = {

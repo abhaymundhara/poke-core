@@ -370,15 +370,22 @@ export function understandSearchIntent(objective: string, context: Record<string
   return buildIntentFromNlu(objective, semanticBootstrapNlu(objective, context), DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
 }
 
-export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider): Promise<SearchIntent> {
+export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
   const fallback = semanticBootstrapNlu(objective, context);
-  if (!provider) return buildIntentFromNlu(objective, fallback, DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
+  if (!provider) {
+    if (strict) throw new Error('strict-semantic-nlu-provider-missing');
+    return buildIntentFromNlu(objective, fallback, DEFAULT_SEMANTIC_NLU_PROVIDER.name, false);
+  }
   try {
     const extracted = asNluOutput(await provider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
-    if (!extracted) return buildIntentFromNlu(objective, { ...fallback, warnings: ['invalid-llm-structured-output'] }, provider.name, true);
+    if (!extracted) {
+      if (strict) throw new Error('strict-semantic-nlu-invalid-output');
+      return buildIntentFromNlu(objective, { ...fallback, warnings: ['invalid-llm-structured-output'] }, provider.name, true);
+    }
     const merged = { ...fallback, ...extracted, warnings: uniq([...(extracted.warnings ?? []), ...(extracted.confidence < 0.45 ? ['low-llm-confidence'] : [])]) };
     return buildIntentFromNlu(objective, merged, provider.name, false);
   } catch (error) {
+    if (strict) throw error;
     return buildIntentFromNlu(objective, { ...fallback, warnings: ['llm-nlu-error:' + (error instanceof Error ? error.message : 'unknown')] }, provider.name, true);
   }
 }

@@ -28,9 +28,10 @@ export class SearchSession {
   private readonly store: SearchPolicyStore;
   private state;
 
-  constructor(private options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider } = {}) {
+  constructor(private options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean } = {}) {
     this.store = new SearchPolicyStore(options.policyPath);
     this.options.nluProvider ??= DEFAULT_SEMANTIC_NLU_PROVIDER;
+    this.options.strictSemanticNlu ??= false;
     this.state = this.store.load();
   }
 
@@ -61,12 +62,12 @@ export class SearchSession {
   }
 
   async planSemantic(objective: string, context: Record<string, unknown> = {}): Promise<SearchPlan> {
-    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider), context);
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider, this.options.strictSemanticNlu), context);
   }
 
   async planAuto(objective: string, context: Record<string, unknown> = {}): Promise<SearchPlan> {
     this.state = this.store.load();
-    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_SEMANTIC_NLU_PROVIDER), context);
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_SEMANTIC_NLU_PROVIDER, this.options.strictSemanticNlu), context);
   }
 
   fuse(intent: ReturnType<typeof understandSearchIntent>, results: SearchResult[], strategy = chooseStrategy(intent, this.state)) {
@@ -97,17 +98,17 @@ export class SearchSession {
   }
 
   run(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): SearchPlan {
-    if (this.options.nluProvider) return this.buildPlan(understandSearchIntent(objective, { ...context, providerNluAvailable: true }), context, results, true);
+    if (this.options.strictSemanticNlu) return this.buildPlan(understandSearchIntent(objective, context), context, results, true);
     return this.buildPlan(understandSearchIntent(objective, context), context, results, true);
   }
 
   async runSemantic(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): Promise<SearchPlan> {
-    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider), context, results, true);
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_SEMANTIC_NLU_PROVIDER, this.options.strictSemanticNlu), context, results, true);
   }
 
   async runAuto(objective: string, context: Record<string, unknown> = {}, results: SearchResult[] = []): Promise<SearchPlan> {
     this.state = this.store.load();
-    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_SEMANTIC_NLU_PROVIDER), context, results, true);
+    return this.buildPlan(await understandSearchIntentWithNlu(objective, context, this.options.nluProvider ?? DEFAULT_SEMANTIC_NLU_PROVIDER, this.options.strictSemanticNlu), context, results, true);
   }
 
   rewritePolicyFromFeedback(feedback: Parameters<SearchPolicyStore['rewriteFromFeedback']>[0]) {
@@ -126,7 +127,7 @@ export class SearchSession {
   }
 }
 
-export function createSearchSession(options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider } = {}): SearchSession {
+export function createSearchSession(options: { policyPath?: string; behaviorSeed?: Record<string, unknown>; clock?: () => number; nluProvider?: SemanticNluProvider; strictSemanticNlu?: boolean } = {}): SearchSession {
   return new SearchSession(options);
 }
 
@@ -135,7 +136,7 @@ export function buildSearchIntent(objective: string, context: Record<string, unk
 }
 
 export async function buildSemanticSearchIntent(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider) {
-  return understandSearchIntentWithNlu(objective, context, provider);
+  return understandSearchIntentWithNlu(objective, context, provider, false);
 }
 
 export function formatSearchAudit(): string {

@@ -3,69 +3,78 @@ import { average, clamp, stableHash, words } from './utils.ts';
 import { scoreEvidenceTrust } from './trust.ts';
 import { addKnowledgeGraphNodes, canonicalizeEntities, chainOfExploration, detectEvidenceCommunities, synthesizeEvidence } from './knowledge-graph.ts';
 
-const VECTOR_DIM = 16;
+const VECTOR_DIMENSIONS = 18;
 
-function textVector(text: string): number[] {
-  const vec = Array.from({ length: VECTOR_DIM }, () => 0);
-  const normalized = text.toLowerCase();
-  for (let i = 0; i < normalized.length; i += 1) {
-    const code = normalized.charCodeAt(i);
-    const index = (code + i * 17) % VECTOR_DIM;
-    vec[index] += ((code % 31) - 15) / 15;
-  }
-  for (const token of words(normalized)) {
-    const hash = parseInt(stableHash(token), 16);
-    for (let i = 0; i < VECTOR_DIM; i += 1) {
-      vec[i] += (((hash >> ((i % 8) * 4)) & 0xf) / 15) * (i % 2 === 0 ? 1 : -1);
+function vectorize(text: string, dimensions = VECTOR_DIMENSIONS): number[] {
+  const vector = new Array(dimensions).fill(0);
+  const tokens = words(text.toLowerCase());
+  if (tokens.length === 0) return vector;
+  for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
+    const token = tokens[tokenIndex];
+    const seed = `${token}:${tokenIndex % 11}:${dimensions}`;
+    const hash = stableHash(seed);
+    for (let i = 0; i < hash.length; i += 2) {
+      const slice = hash.slice(i, i + 2);
+      if (!slice) continue;
+      const bucket = Number.parseInt(slice, 16) % dimensions;
+      const weight = ((tokenIndex % 5) + 1) / (tokens.length + 2);
+      vector[bucket] += weight;
     }
   }
-  const norm = Math.sqrt(vec.reduce((sum, value) => sum + value * value, 0)) || 1;
-  return vec.map((value) => value / norm);
+  const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
+  return vector.map((value) => value / magnitude);
 }
 
-function cosine(left: number[], right: number[]): number {
-  const dot = left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
-  const ln = Math.sqrt(left.reduce((sum, value) => sum + value * value, 0)) || 1;
-  const rn = Math.sqrt(right.reduce((sum, value) => sum + value * value, 0)) || 1;
-  return clamp((dot / (ln * rn) + 1) / 2);
+function cosineSimilarity(left: number[], right: number[]): number {
+  const denominator = (Math.sqrt(left.reduce((sum, value) => sum + value * value, 0)) || 1) * (Math.sqrt(right.reduce((sum, value) => sum + value * value, 0)) || 1);
+  if (denominator === 0) return 0;
+  const numerator = left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
+  return clamp((numerator / denominator + 1) / 2);
 }
 
-function propositionText(result: SearchResult): string[] {
+function claimTexts(result: SearchResult): string[] {
   if (result.claims?.length) return result.claims;
   return result.snippet.split(/[.!?]\s+/).map((part) => part.trim()).filter((part) => part.length > 18).slice(0, 3);
 }
 
-function polarity(text: string): 'affirmed' | 'negated' | 'conditional' {
+function fragments(text: string): string[] {
+  return text.split(/[.!?;:\n]+/g).map((part) => part.trim()).filter(Boolean);
+}
+
+function propositionVector(text: string): number[] {
+  return vectorize(text);
+}
+
+function semanticSlots(text: string): { subject: string; predicate: string; object: string } {
+  const tokens = words(text.replace(/[()\[\]{}]/g, ' '));
+  if (tokens.length === 0) return { subject: '', predicate: 'states', object: '' };
+  const subject = tokens.slice(0, Math.min(3, Math.max(1, Math.floor(tokens.length / 3)))).join(' ');
+  const predicate = tokens.slice(Math.min(tokens.length - 1, Math.max(1, Math.floor(tokens.length / 3))), Math.min(tokens.length, Math.max(2, Math.floor((tokens.length * 2) / 3)))).join(' ') || 'states';
+  const object = tokens.slice(Math.max(1, Math.floor((tokens.length * 2) / 3))).join(' ');
+  return { subject, predicate, object };
+}
+
+function clausePolarity(text: string): 'affirmed' | 'negated' | 'conditional' {
   const lower = text.toLowerCase();
-  if (/\b(if|when|unless|should|could|would|might|may)\b/.test(lower)) return 'conditional';
-  if (/\b(not|never|no longer|cannot|can't|won't|doesn't|does not|without)\b/.test(lower)) return 'negated';
+  if (lower.includes(' if ') || lower.includes(' when ') || lower.includes(' unless ') || lower.includes(' should ') || lower.includes(' could ') || lower.includes(' would ') || lower.includes(' might ')) return 'conditional';
+  if (lower.includes(' not ') || lower.includes("n't") || lower.includes(' no longer ') || lower.includes(' cannot ') || lower.includes("can't") || lower.includes("won't") || lower.includes(' without ')) return 'negated';
   return 'affirmed';
 }
 
-function splitProposition(text: string): { subject: string; predicate: string; object: string; vector: number[] } {
-  const normalized = text.trim();
-  const parts = normalized.split(/\s+/).filter(Boolean);
-  return {
-    subject: parts.slice(0, Math.max(1, Math.min(3, Math.floor(parts.length / 3)))).join(' '),
-    predicate: parts.slice(Math.max(1, Math.min(3, Math.floor(parts.length / 3))), Math.max(2, Math.min(6, Math.floor(parts.length / 2)))).join(' ') || 'relates-to',
-    object: parts.slice(Math.max(2, Math.min(6, Math.floor(parts.length / 2)))).join(' '),
-    vector: textVector(normalized),
-  };
-}
-
 function propositionSignature(text: string): string {
-  return stableHash(splitProposition(text).vector.map((value) => value.toFixed(3)).join('|'));
+  const { subject, predicate, object } = semanticSlots(text);
+  return stableHash(`${subject}|${predicate}|${object}`);
 }
 
 function parseProposition(text: string, sourceId: string, confidence: number): Proposition {
-  const parsed = splitProposition(text);
+  const { subject, predicate, object } = semanticSlots(text);
   return {
     id: `prop-${propositionSignature(text)}`,
     text,
-    subject: parsed.subject,
-    predicate: parsed.predicate,
-    object: parsed.object,
-    polarity: polarity(text),
+    subject,
+    predicate,
+    object,
+    polarity: clausePolarity(text),
     confidence: clamp(confidence),
     support: clamp(confidence),
     contradiction: 0,
@@ -74,56 +83,71 @@ function parseProposition(text: string, sourceId: string, confidence: number): P
 }
 
 function propositionSimilarity(left: Proposition, right: Proposition): number {
-  const leftVector = textVector(left.text);
-  const rightVector = textVector(right.text);
-  const structural = cosine(leftVector, rightVector);
-  const polarityPenalty = left.polarity !== right.polarity ? 0.16 : 0;
-  return clamp(structural - polarityPenalty);
+  const semantic = cosineSimilarity(propositionVector(`${left.text} ${left.subject} ${left.object}`), propositionVector(`${right.text} ${right.subject} ${right.object}`));
+  const structure = cosineSimilarity(propositionVector(`${left.subject}|${left.predicate}`), propositionVector(`${right.subject}|${right.predicate}`));
+  const polarityPenalty = left.polarity !== right.polarity ? 0.12 : 0;
+  return clamp(semantic * 0.68 + structure * 0.32 - polarityPenalty);
 }
 
-function graphConsistency(proposition: Proposition, graph: PropositionGraph | undefined): number {
-  if (!graph?.propositions?.length) return 0.5;
-  const vector = textVector(proposition.text);
-  const relevant = graph.propositions.slice(-12).map((candidate) => {
-    const similarity = cosine(vector, textVector(candidate.text));
-    const polarityPenalty = candidate.polarity !== proposition.polarity ? 0.18 : 0;
-    const edgePenalty = graph.edges.some((edge) => edge.relation === 'contradicts' && ((edge.from === candidate.id && edge.to === proposition.id) || (edge.to === candidate.id && edge.from === proposition.id))) ? 0.24 : 0;
-    return clamp(similarity - polarityPenalty - edgePenalty);
-  });
-  return average(relevant.length ? relevant : [0.5]);
+function propositionEntails(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
+  const similarity = propositionSimilarity(left, right);
+  const leftVector = propositionVector(left.text);
+  const rightVector = propositionVector(right.text);
+  const graphAffinity = graph.nodes.filter((node) => node.type === 'claim' || node.type === 'result').reduce((sum, node) => {
+    const nodeVector = propositionVector(`${node.label} ${JSON.stringify(node.metadata ?? {})}`);
+    return sum + cosineSimilarity(leftVector, nodeVector) * 0.5 + cosineSimilarity(rightVector, nodeVector) * 0.5;
+  }, 0) / Math.max(1, graph.nodes.length);
+  const supportBias = graph.edges.filter((edge) => edge.relation === 'supports' || edge.relation === 'entails' || edge.relation === 'claims').length / Math.max(1, graph.edges.length);
+  const refinement = left.object.length >= right.object.length ? 0.06 : 0;
+  const polarityPenalty = left.polarity === 'negated' && right.polarity === 'affirmed' ? 0.28 : left.polarity !== right.polarity ? 0.16 : 0;
+  return clamp(similarity * 0.42 + graphAffinity * 0.28 + supportBias * 0.22 + refinement - polarityPenalty);
 }
 
-function assessAgainstGraph(premise: Proposition, hypothesis: Proposition, graph?: PropositionGraph): ClaimAssessment {
-  const similarity = propositionSimilarity(premise, hypothesis);
-  const graphSupport = graphConsistency(hypothesis, graph);
-  const premiseSupport = graphConsistency(premise, graph);
-  const numericConflict = /\b\d+\b/.test(premise.text) && /\b\d+\b/.test(hypothesis.text) && premise.text !== hypothesis.text ? 0.18 : 0;
-  const entailment = clamp(similarity * 0.38 + graphSupport * 0.33 + premiseSupport * 0.18 + (hypothesis.text.length <= premise.text.length ? 0.05 : 0));
-  const contradiction = clamp((1 - similarity) * 0.16 + (1 - graphSupport) * 0.14 + numericConflict + (premise.polarity !== hypothesis.polarity ? 0.22 : 0));
-  if (contradiction > entailment && contradiction >= 0.5) {
+function propositionContradicts(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
+  const similarity = propositionSimilarity(left, right);
+  const leftVector = propositionVector(left.text);
+  const rightVector = propositionVector(right.text);
+  const tensionEdges = graph.edges.filter((edge) => edge.relation === 'contradicts' || edge.relation === 'rebuts');
+  const graphTension = tensionEdges.length === 0 ? 0 : tensionEdges.reduce((sum, edge) => {
+    const fromNode = graph.nodes.find((node) => node.id === edge.from);
+    const toNode = graph.nodes.find((node) => node.id === edge.to);
+    if (!fromNode || !toNode) return sum;
+    const fromVector = propositionVector(`${fromNode.label} ${JSON.stringify(fromNode.metadata ?? {})}`);
+    const toVector = propositionVector(`${toNode.label} ${JSON.stringify(toNode.metadata ?? {})}`);
+    return sum + Math.max(cosineSimilarity(leftVector, toVector), cosineSimilarity(rightVector, fromVector)) * edge.weight;
+  }, 0) / tensionEdges.length;
+  const numericalDivergence = /\d/.test(left.text) && /\d/.test(right.text) && left.text !== right.text ? 0.08 : 0;
+  const polarityConflict = left.polarity !== right.polarity ? 0.24 : 0;
+  return clamp(similarity * 0.34 + graphTension * 0.34 + numericalDivergence + polarityConflict);
+}
+
+function assessClaim(premise: Proposition, hypothesis: Proposition, graph: SearchEvidenceGraph): ClaimAssessment {
+  const contradiction = propositionContradicts(premise, hypothesis, graph);
+  if (contradiction >= 0.55) {
     return {
       premise: premise.text,
       hypothesis: hypothesis.text,
       relation: 'contradicts',
       confidence: clamp(0.42 + contradiction * 0.5),
-      rationale: 'semantic model places the claims in incompatible regions of the evidence graph',
+      rationale: 'semantic proximity is high, but the proposition model and graph context indicate incompatible assertions',
     };
   }
-  if (entailment >= 0.56) {
+  const entailment = propositionEntails(premise, hypothesis, graph);
+  if (entailment >= 0.55) {
     return {
       premise: premise.text,
       hypothesis: hypothesis.text,
       relation: 'entails',
-      confidence: clamp(0.38 + entailment * 0.56),
-      rationale: 'semantic model finds the hypothesis preserved by graph context and proposition structure',
+      confidence: clamp(0.38 + entailment * 0.54),
+      rationale: 'the proposition embedding and graph neighborhood preserve the hypothesis under stronger evidence',
     };
   }
   return {
     premise: premise.text,
     hypothesis: hypothesis.text,
     relation: 'unknown',
-    confidence: clamp(0.2 + similarity * 0.32 + graphSupport * 0.12),
-    rationale: 'graph-conditioned semantic similarity is insufficient to decide entailment or contradiction',
+    confidence: clamp(0.22 + propositionSimilarity(premise, hypothesis) * 0.34),
+    rationale: 'the proposition model places the claims in the same semantic neighborhood, but graph support is not decisive',
   };
 }
 
@@ -142,7 +166,7 @@ export function buildQueries(intent: SearchIntent, strategy: SearchStrategyProfi
 export function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProfile, results: SearchResult[]): string[] {
   const hopPlan = [intent.semanticQuery];
   for (const result of results.slice(0, Math.max(1, intent.hopBudget - 1))) {
-    const extracted = propositionText(result).join(' ').split(/\s+/).slice(0, 8).join(' ');
+    const extracted = claimTexts(result).join(' ').split(/\s+/).slice(0, 8).join(' ');
     const sourceHint = result.source === 'github' ? 'repository evidence' : result.source === 'scholar' ? 'citation trail' : result.source === 'realtime-web' ? 'fresh source' : 'supporting source';
     hopPlan.push(`${extracted} ${sourceHint}`.trim());
   }
@@ -167,9 +191,11 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
     nodes.push({ id: resultId, label: result.title, type: 'result', weight: result.trustScore, metadata: { url: result.url, source: result.source, snippet: result.snippet, trust: result.trustScore, breakdown: result.trustBreakdown } });
     for (const queryId of queryIds) edges.push({ from: queryId, to: resultId, relation: 'supports', weight: clamp(0.32 + strategy.semanticBias * 0.12 + result.trustScore * 0.2) });
     const sourceId = result.provenance.domain || String(result.source);
-    for (const text of propositionText(result)) {
+    for (const text of claimTexts(result)) {
       const proposition = parseProposition(text, sourceId, result.trustScore);
-      if (!nodes.some((node) => node.id === proposition.id)) nodes.push({ id: proposition.id, label: proposition.text, type: 'claim', weight: proposition.confidence, metadata: proposition });
+      if (!nodes.some((node) => node.id === proposition.id)) {
+        nodes.push({ id: proposition.id, label: proposition.text, type: 'claim', weight: proposition.confidence, metadata: proposition });
+      }
       edges.push({ from: resultId, to: proposition.id, relation: 'claims', weight: result.trustScore });
       const signature = propositionSignature(proposition.text);
       const entry = propositionMap.get(signature) ?? { proposition, support: [], contradiction: [], assessments: [] };
@@ -190,6 +216,7 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
   const claims: VerifiedClaim[] = [];
   const conflicts: EvidenceConflict[] = [];
   const propositionEdges: SearchEvidenceEdge[] = [];
+  const graphView: SearchEvidenceGraph = { nodes, edges, queries, entities: [], communities: [], exploration: [], claims: [], propositions, conflicts: [], synthesis: { answerable: false, stance: 'insufficient', confidence: 0, primaryClaims: [], rejectedClaims: [], reasoningTrace: [] }, summary: '', confidence: 0 };
 
   for (let i = 0; i < propositions.length; i += 1) {
     const left = propositions[i];
@@ -198,14 +225,14 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
     for (let j = 0; j < propositions.length; j += 1) {
       if (i === j) continue;
       const right = propositions[j];
-      const assessment = assessAgainstGraph(left, right, { propositions, edges: propositionEdges, summary: '', confidence: 0 });
+      const assessment = assessClaim(left, right, graphView);
       leftEntry.assessments.push(assessment);
       if (assessment.relation === 'contradicts') {
         leftEntry.contradiction.push(...(propositionMap.get(propositionSignature(right.text))?.support ?? []));
         propositionEdges.push({ from: left.id, to: right.id, relation: 'contradicts', weight: assessment.confidence });
       } else if (assessment.relation === 'entails') {
         propositionEdges.push({ from: left.id, to: right.id, relation: 'entails', weight: assessment.confidence });
-      } else if (propositionSimilarity(left, right) > 0.45) {
+      } else if (propositionSimilarity(left, right) > 0.42) {
         propositionEdges.push({ from: left.id, to: right.id, relation: 'refines', weight: assessment.confidence });
       }
     }
