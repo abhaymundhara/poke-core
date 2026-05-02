@@ -110,12 +110,13 @@ function summarizeHarnessState(harnessState: Record<string, unknown>) {
 }
 
 function buildTrigger(name: string, reason: string, cadenceMinutes: number, action: string, source?: AutopilotSignalSource, key?: string, wakeMode?: AutopilotSignal['wakeMode']): AutopilotTrigger {
+  const safeCadence = Number.isFinite(cadenceMinutes) && cadenceMinutes > 0 ? cadenceMinutes : 60;
   return {
-    id: `${name}-${cadenceMinutes}`,
+    id: `${name}-${safeCadence}`,
     name,
     reason,
-    cadenceMinutes,
-    nextRunAt: new Date(Date.now() + cadenceMinutes * 60_000).toISOString(),
+    cadenceMinutes: safeCadence,
+    nextRunAt: new Date(Date.now() + safeCadence * 60_000).toISOString(),
     action,
     source,
     key,
@@ -421,7 +422,7 @@ export class AutopilotEngine {
       triggers.push(buildTrigger(
         `${signal.topic}-forecast`,
         `semantic forecast ${index + 1} from ${signal.source} with posterior ${signal.confidence.toFixed(2)}`,
-        Math.max(15, Math.round(360 / Math.max(0.25, signal.priority + 0.25))),
+        Math.max(15, Math.round(360 / Math.max(0.25, Number(signal.priority) || 0.25))),
         `act on the forecasted need ${signal.topic} and preserve the evidence path`,
         signal.source as AutopilotSignalSource,
         signal.topic,
@@ -460,7 +461,7 @@ export class AutopilotEngine {
       const channel: AutopilotCheckIn['channel'] = signal.source === 'calendar' ? 'calendar' : signal.source === 'email' ? 'email' : signal.source === 'browser' ? 'browser' : 'in-app';
       checkIns.push(buildCheckIn(
         `${signal.topic}-check-in`,
-        Math.max(10, Math.round(180 / Math.max(0.25, signal.priority + 0.25))),
+        Math.max(10, Math.round(180 / Math.max(0.25, Number(signal.priority) || 0.25))),
         channel,
         `revisit the semantic forecast for ${signal.topic} and validate the next information need`,
         signal.source as AutopilotSignalSource,

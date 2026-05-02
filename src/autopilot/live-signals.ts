@@ -551,7 +551,7 @@ export class AutopilotLiveDaemon {
   private readonly session;
 
   constructor(private readonly deps: LiveDaemonDependencies, private intervalMs = 30_000) {
-    this.session = createSearchSession({ nluProvider: deps.nluProvider, behaviorSeed: deps.context ?? { query: deps.query } });
+    this.session = createSearchSession({ nluProvider: deps.nluProvider, behaviorSeed: deps.context ?? { query: deps.query }, strictSemanticNlu: true });
   }
 
   start(intervalMs = this.intervalMs): void {
