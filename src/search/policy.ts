@@ -1,9 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { PolicyDecision, SearchFocus, SearchIntent, SearchOutcome, SearchPolicyRule, SearchPolicyState, SearchSignalForecast, SearchSource, SearchSourceReliability, SearchStrategyProfile, RuntimeComposition } from './types.ts';
 import { clamp, nowMs, readJson, stableHash, uniq, writeJson } from './utils.ts';
 import { updateEpistemicTrustModel } from './trust.ts';
 
 export const DEFAULT_STATE_PATH = resolve(process.cwd(), '.poke-core', 'search-policy.json');
+export const SEARCH_INDEX_SOURCE_PATH = resolve(process.cwd(), 'src/search/index.ts');
 
 type PolicySnapshot = Omit<SearchPolicyState, 'history'>;
 
@@ -38,6 +40,8 @@ export type SearchPolicyFeedback = {
   strategyLogic?: Partial<StrategyLogic>;
   architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>>;
   runtimeComposition?: Partial<RuntimeComposition>;
+  indexSource?: string;
+  searchIndexSource?: string;
 };
 
 function snapshotPolicy(state: SearchPolicyState): PolicySnapshot {
@@ -331,6 +335,27 @@ function asFeedback(value: SearchPolicyFeedback): SearchPolicyFeedback {
   return value;
 }
 
+function generateSearchIndexSourceRewrite(feedback: SearchPolicyFeedback, current: SearchPolicyState): string {
+  const currentSource = readFileSync(SEARCH_INDEX_SOURCE_PATH, 'utf8');
+  const revision = stableHash([
+    feedback.summary,
+    ...(feedback.failedQueries ?? []),
+    ...(feedback.failedSources ?? []).map(String),
+    ...(feedback.successfulSources ?? []).map(String),
+    ...(feedback.latentNeeds ?? []),
+    feedback.desiredBehavior ?? '',
+  ].join('|')).slice(0, 12);
+  const revisionLine = "export const SEARCH_INDEX_REWRITE_REVISION = '" + revision + "';";
+  let next = currentSource;
+  if (next.includes('SEARCH_INDEX_REWRITE_REVISION')) {
+    next = next.replace(/export const SEARCH_INDEX_REWRITE_REVISION = '.*?';/, revisionLine);
+  } else {
+    next = next.replace("export * from './policy.ts';\n\nexport const SEARCH_INDEX_SOURCE_PATH", "export * from './policy.ts';\n\n" + revisionLine + \"\n\nexport const SEARCH_INDEX_SOURCE_PATH");
+  }
+  next = next.replace(/function buildTrustNotes\(intent: SearchPlan\['intent'\], sourceRanking: SearchPlan\['sourceRanking'\], state: any\): string\[\] \{[\s\S]*?\n\}/, "function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan['sourceRanking'], state: any): string[] {\n  const composition = activeComposition(state);\n  const rewriteNotes = composition?.notes ?? [];\n  return [\n    'trust-mode=' + intent.trustMode,\n    'freshness=' + intent.freshness,\n    'hop-budget=' + intent.hopBudget,\n    'nlu=' + intent.nlu.provider + ':' + intent.nlu.confidence.toFixed(2) + ' path=' + (intent.nlu.fallbackUsed ? 'legacy' : 'semantic'),\n    'rewrite-revision=' + revision,\n    ...rewriteNotes.slice(0, 3).map((note) => 'rewrite=' + note),\n    ...sourceRanking.slice(0, 3).map((entry) => entry.source + ':' + entry.score.toFixed(2) + ':' + entry.reason),\n  ];\n}");
+  return next;
+}
+
 function asSynthesizedOutput(value: unknown): (SearchPolicyFeedback & { rules?: SearchPolicyRule[]; strategyLogic?: Partial<StrategyLogic>; architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>>; runtimeComposition?: Partial<RuntimeComposition> }) | null {
   if (!value || typeof value !== 'object') return null;
   return value as SearchPolicyFeedback & { rules?: SearchPolicyRule[]; strategyLogic?: Partial<StrategyLogic>; architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>>; runtimeComposition?: Partial<RuntimeComposition> };
@@ -508,8 +533,15 @@ export class SearchPolicyStore {
         strategyLogic: payload.strategyLogic ?? feedback.strategyLogic,
         architecture: payload.architecture ?? feedback.architecture,
         runtimeComposition: payload.runtimeComposition ?? feedback.runtimeComposition,
+        indexSource: payload.indexSource ?? feedback.indexSource,
+        searchIndexSource: payload.searchIndexSource ?? feedback.searchIndexSource,
       };
       const nextState = this.rewriteFromFeedback(mergedFeedback);
+      const sourceRewrite = typeof payload === 'string' ? payload : payload.indexSource ?? payload.searchIndexSource;
+      if (sourceRewrite) {
+        const { persistSearchIndexSourceRewrite } = await import('./index.ts');
+        persistSearchIndexSourceRewrite(String(sourceRewrite));
+      }
       if (payload.runtimeComposition) runtimeCompositionMutator?.(payload.runtimeComposition as RuntimeComposition);
       return nextState;
     } catch {
@@ -544,6 +576,7 @@ export function createDefaultPolicyRewriteProvider(): PolicyRewriteProvider {
           activeModules: current.reasoningArchitecture?.activeModules,
         },
         runtimeComposition,
+        indexSource: generateSearchIndexSourceRewrite(feedback, current),
       };
     },
   };

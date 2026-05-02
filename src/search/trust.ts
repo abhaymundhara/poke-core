@@ -241,17 +241,7 @@ export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[]
     const reliabilityShape = reliabilityDistribution(result, { ...breakdownBase, uncertainty: 0 }, reliability, policy);
     const breakdown: TrustScoreBreakdown = { ...breakdownBase, uncertainty: reliabilityShape.variance };
     const learned = learnedPrior(policy, result, breakdown);
-    const trustScore = clamp(
-      learned * 0.34 +
-      breakdown.evidenceQuality * 0.18 +
-      breakdown.provenance * 0.14 +
-      breakdown.corroboration * 0.14 +
-      breakdown.domainReliability * 0.08 +
-      breakdown.expertise * 0.08 +
-      breakdown.independence * 0.04 +
-      breakdown.recency * 0.02 -
-      breakdown.uncertainty * 0.06,
-    );
+    const trustScore = clamp(learned * (1 - reliabilityShape.variance * 0.15));
     const model = policy?.epistemicModel;
     const sourceEntry = model?.sourceMemory[sourceKey(result.source)];
     const domainEntry = model?.domainMemory[domain];

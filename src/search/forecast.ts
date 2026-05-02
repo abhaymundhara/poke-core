@@ -102,6 +102,7 @@ function trajectoryFeatures(intent: SearchIntent, observations: BehaviorTrajecto
   const topicDrift = uniqueLabels.size > 2 ? 1 : 0;
   const cadence = recent.length > 1 ? average(recent.slice(1).map((event, index) => Math.max(0, Number(event.at ?? 0) - Number(recent[index].at ?? 0)))) : 0;
   const graphPressure = evidenceGraph ? clamp(evidenceGraph.confidence * 0.2 + (evidenceGraph.synthesis.stance === 'contested' ? 0.08 : 0) + Math.min(0.12, evidenceGraph.conflicts.length * 0.03)) : 0;
+  const trajectoryFingerprint = encodeTrajectory(recent.map((event) => trajectoryText(event)).join(' | '));
   return {
     labels,
     sources,
@@ -116,6 +117,7 @@ function trajectoryFeatures(intent: SearchIntent, observations: BehaviorTrajecto
     graphPressure,
     intentVector: encodeTrajectory([intent.objective, intent.semanticQuery, ...intent.topics, ...intent.entities].join(' ')),
     latestVector: latest ? encodeTrajectory(trajectoryText(latest)) : encodeTrajectory(intent.semanticQuery),
+    trajectoryFingerprint,
   };
 }
 
@@ -178,6 +180,8 @@ function generativeNeedScore(intent: SearchIntent, model: NonNullable<SearchPoli
   const memoryStrength = model.trajectoryMemory?.[label] ?? 0.25;
   const semanticFit = cosineSimilarity(features.intentVector, prototype);
   const recentFit = cosineSimilarity(features.latestVector, prototype);
+  const trajectoryFit = cosineSimilarity(features.latestVector, features.trajectoryFingerprint);
+  const intentTrajectoryFit = cosineSimilarity(features.intentVector, features.trajectoryFingerprint);
   const window = observations.slice(-4);
   const recentTransitions = window.length > 1 ? average(window.slice(1).map((event, index) => transitionLikelihood(model, labelFromEvent(window[index]), labelFromEvent(event)))) : 0.12;
   const recency = Math.exp(-features.lastGapHours / 48);
@@ -187,7 +191,7 @@ function generativeNeedScore(intent: SearchIntent, model: NonNullable<SearchPoli
   const graphPressure = features.graphPressure;
   const cadenceLift = features.cadence > 0 ? clamp(features.cadence / 10_000, 0, 0.08) : 0;
   const intentPull = intent.freshness === 'live' ? 0.06 : intent.trustMode === 'official-first' ? 0.03 : 0.02;
-  return memoryStrength * 0.16 + semanticFit * 0.18 + recentFit * 0.16 + recentTransitions * 0.14 + recency * 0.08 + sourceVariety * 0.03 + novelty * 0.02 + graphPressure * 0.12 + cadenceLift + intentPull - failurePressure * 0.08 - features.ignored * 0.01;
+  return memoryStrength * 0.16 + semanticFit * 0.14 + recentFit * 0.12 + trajectoryFit * 0.1 + intentTrajectoryFit * 0.08 + recentTransitions * 0.14 + recency * 0.08 + sourceVariety * 0.03 + novelty * 0.02 + graphPressure * 0.12 + cadenceLift + intentPull - failurePressure * 0.08 - features.ignored * 0.01;
 }
 
 function generateIntentTrajectory(intent: SearchIntent, model: NonNullable<SearchPolicyState['latentIntentModel']>, observations: BehaviorTrajectoryEvent[], labels: string[]) {

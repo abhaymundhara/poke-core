@@ -124,6 +124,15 @@ export type ReasoningArchitecture = {
   revisionLog?: Array<{ at: number; source: string; focus: 'search' | 'trust' | 'conflict' | 'strategy'; change: string }>;
 };
 
+export type RuntimeComposition = {
+  version: number;
+  generatedAt: number;
+  producer: string;
+  strategySelectorSource: string;
+  pipelineSource: string;
+  notes: string[];
+};
+
 export type SearchIntent = {
   objective: string;
   normalizedObjective: string;

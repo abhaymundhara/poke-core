@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { SearchOutcome, SearchPlan, SearchResult, SearchStrategyProfile, RuntimeComposition } from './types.ts';
 import { buildSourceRanking, scoreEvidenceTrust } from './trust.ts';
 import { buildEvidenceGraph, buildQueries, deriveHopPlan } from './reasoning.ts';
@@ -13,6 +15,14 @@ export * from './reasoning.ts';
 export * from './knowledge-graph.ts';
 export * from './forecast.ts';
 export * from './policy.ts';
+
+export const SEARCH_INDEX_SOURCE_PATH = resolve(process.cwd(), 'src/search/index.ts');
+
+export function persistSearchIndexSourceRewrite(nextSource: string): string {
+  const currentSource = existsSync(SEARCH_INDEX_SOURCE_PATH) ? readFileSync(SEARCH_INDEX_SOURCE_PATH, 'utf8') : '';
+  if (currentSource !== nextSource) writeFileSync(SEARCH_INDEX_SOURCE_PATH, nextSource);
+  return SEARCH_INDEX_SOURCE_PATH;
+}
 
 let activeRuntimeComposition: RuntimeComposition | null = null;
 
@@ -32,13 +42,17 @@ function activeComposition(state: any): RuntimeComposition | null {
   return activeRuntimeComposition ?? runtimeCompositionFromState(state);
 }
 
-function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan['sourceRanking']): string[] {
+function buildTrustNotes(intent: SearchPlan['intent'], sourceRanking: SearchPlan['sourceRanking'], state: any): string[] {
+  const composition = activeComposition(state);
+  const rewriteNotes = composition?.notes ?? [];
   return [
-    `trust-mode=${intent.trustMode}`,
-    `freshness=${intent.freshness}`,
-    `hop-budget=${intent.hopBudget}`,
-    `nlu=${intent.nlu.provider}:${intent.nlu.confidence.toFixed(2)} path=${intent.nlu.fallbackUsed ? 'legacy' : 'semantic'}`,
-    ...sourceRanking.slice(0, 3).map((entry) => `${entry.source}:${entry.score.toFixed(2)}:${entry.reason}`),
+    'trust-mode=' + intent.trustMode,
+    'freshness=' + intent.freshness,
+    'hop-budget=' + intent.hopBudget,
+    'nlu=' + intent.nlu.provider + ':' + intent.nlu.confidence.toFixed(2) + ' path=' + (intent.nlu.fallbackUsed ? 'legacy' : 'semantic'),
+    'rewrite-revision=' + String(composition?.version ?? 0),
+    ...rewriteNotes.slice(0, 3).map((note) => 'rewrite=' + note),
+    ...sourceRanking.slice(0, 3).map((entry) => entry.source + ':' + entry.score.toFixed(2) + ':' + entry.reason),
   ];
 }
 
@@ -88,7 +102,7 @@ export class SearchSession {
     const strategy = resolveRuntimeStrategy(effectiveIntent, this.state);
     const queries = buildQueries(effectiveIntent, strategy);
     const sourceRanking = buildSourceRanking(effectiveIntent, this.state.sourceReliability, this.state.rules, policyDecision);
-    const trustNotes = buildTrustNotes(intent, sourceRanking);
+    const trustNotes = buildTrustNotes(intent, sourceRanking, this.state);
     const trustedResults = scoreEvidenceTrust(intent, results, this.state.sourceReliability, policyDecision, this.state);
     const evidenceGraph = buildEvidenceGraph(effectiveIntent, queries, trustedResults, strategy, this.state.sourceReliability, policyDecision, this.state);
     const predictedSignals = forecastNextSignals(effectiveIntent, this.state, { ...(this.options.behaviorSeed ?? context), evidenceGraph });

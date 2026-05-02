@@ -188,30 +188,29 @@ function graphNeighborhoodSupport(graph: SearchEvidenceGraph, proposition: Propo
   return clamp(0.5 + support / Math.max(3, edges.length * 2));
 }
 
-function propositionEntails(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
+function propositionEntails(left: Proposition, right: Proposition, _graph?: SearchEvidenceGraph): number {
   const leftShape = propositionShape(left.text);
   const rightShape = propositionShape(right.text);
   const semanticFit = neuralEntailment(leftShape, rightShape);
-  const supportBias = graphNeighborhoodSupport(graph, left) * 0.34 + graphNeighborhoodSupport(graph, right) * 0.26;
-  const qualifierBias = rightShape.qualifiers.every((qualifier) => leftShape.qualifiers.includes(qualifier) || left.text.toLowerCase().includes(qualifier)) ? 0.12 : 0.05;
-  const coverage = rightShape.entities.every((entity) => leftShape.entities.some((candidate) => headMatch(candidate, entity))) ? 0.14 : 0.06;
-  const numericAgreement = numericContradiction(leftShape, rightShape) > 0 ? -0.12 : 0.08;
-  return clamp(semanticFit * 0.44 + supportBias * 0.2 + qualifierBias + coverage + numericAgreement);
+  const qualifierFit = rightShape.qualifiers.every((qualifier) => leftShape.qualifiers.includes(qualifier) || left.text.toLowerCase().includes(qualifier)) ? 0.12 : 0.04;
+  const modalityFit = leftShape.modality === rightShape.modality ? 0.16 : leftShape.modality === 'asserted' ? 0.1 : 0.05;
+  const numericAgreement = numericContradiction(leftShape, rightShape) > 0 ? -0.18 : 0.08;
+  return clamp(semanticFit * 0.62 + qualifierFit + modalityFit + numericAgreement);
 }
 
-function propositionContradicts(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
+function propositionContradicts(left: Proposition, right: Proposition, _graph?: SearchEvidenceGraph): number {
   const leftShape = propositionShape(left.text);
   const rightShape = propositionShape(right.text);
   const semanticConflict = neuralContradiction(leftShape, rightShape);
-  const supportGap = Math.abs(graphNeighborhoodSupport(graph, left) - graphNeighborhoodSupport(graph, right)) * 0.14;
-  const sharedEntityPressure = leftShape.entities.some((entity) => rightShape.entities.some((candidate) => headMatch(entity, candidate))) ? 0.08 : 0;
-  const graphTension = [...(graph.propositionGraph?.edges ?? []), ...graph.edges].filter((edge) => edge.relation === 'contradicts' || edge.relation === 'rebuts').length > 0 ? 0.06 : 0;
-  return clamp(semanticConflict * 0.58 + supportGap + sharedEntityPressure + graphTension);
+  const polarityPressure = leftShape.polarity !== rightShape.polarity ? 0.24 : 0.04;
+  const modalityPressure = leftShape.modality === 'required' && rightShape.modality !== 'required' || rightShape.modality === 'required' && leftShape.modality !== 'required' ? 0.16 : 0.05;
+  const numericConflict = numericContradiction(leftShape, rightShape);
+  return clamp(semanticConflict * 0.72 + polarityPressure + modalityPressure + numericConflict);
 }
 
-function assessClaim(premise: Proposition, hypothesis: Proposition, graph: SearchEvidenceGraph): ClaimAssessment {
-  const contradiction = propositionContradicts(premise, hypothesis, graph);
-  const entailment = propositionEntails(premise, hypothesis, graph);
+function assessClaim(premise: Proposition, hypothesis: Proposition, _graph?: SearchEvidenceGraph): ClaimAssessment {
+  const contradiction = propositionContradicts(premise, hypothesis);
+  const entailment = propositionEntails(premise, hypothesis);
   const consistency = clamp(1 - contradiction * 0.72 + entailment * 0.18);
   if (contradiction >= Math.max(0.5, entailment + 0.06)) {
     return {
