@@ -117,6 +117,10 @@ function recursiveSeedSeries(source: string, width: number, count: number, index
   return recursiveSeedSeries(source, width, count, index + 1, acc);
 }
 
+function emergentCount(seed: string, span: number): number {
+  return Math.max(1, Number.parseInt(seed.slice(0, 2), 16) % Math.max(1, span) + 1);
+}
+
 export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
   const pool = [...theoryWords(theory), token(seed, scope, String(index))];
   const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
@@ -178,7 +182,8 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
   const entropy = [localeHint, timeZone, cwd, argv, env, String(process.pid), String(process.ppid)];
   const categorySeed = token(localeHint, timeZone, String(now), '0');
   const sourceSeed = token(localeHint, timeZone, String(now), '1');
-  const observationCount = Number.parseInt(token(localeHint, timeZone, String(now), 'observations').slice(0, 2), 16) % Math.max(1, entropy.length) || entropy.length;
+  const observationSeed = token(localeHint, timeZone, cwd, argv, env, String(now), 'observations');
+  const observationCount = emergentCount(observationSeed, entropy.length);
   return recursiveSeries(observationCount, (index) => {
     const categoryBand = token(categorySeed, localeHint).length || entropy.length;
     const category = token(categorySeed, String(index % categoryBand));
@@ -209,7 +214,9 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
 
 function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): MemoryFact[] {
   const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
-  return recursiveSeries(Math.max(5, pools.length || 0), (index) => {
+  const factSeed = token(theory.summary, localeHint, timeZone, String(now), String(pools.length));
+  const factCount = emergentCount(factSeed, Math.max(1, pools.length || 1));
+  return recursiveSeries(factCount, (index) => {
     const base = pools[index % (pools.length || 1)] ?? theory.summary;
     return {
       key: token(base, localeHint, timeZone, String(index)),
@@ -223,7 +230,9 @@ function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: s
 
 function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string): EpisodicMemoryItem[] {
   const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
-  return recursiveSeries(4, (index) => {
+  const episodeSeed = token(theory.summary, localeHint, String(now), String(pools.length));
+  const episodeCount = emergentCount(episodeSeed, Math.max(1, pools.length || 1));
+  return recursiveSeries(episodeCount, (index) => {
     const base = pools[index % (pools.length || 1)] ?? theory.summary;
     return {
       id: token(base, localeHint, String(index)),
@@ -239,10 +248,12 @@ function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: stri
 
 function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string): VisionFrame[] {
   const scope = token(theory.summary, localeHint, String(now));
-  const frameCount = Number.parseInt(token(scope, theory.summary, localeHint, 'frames').slice(0, 1), 16) % 3 + 2;
-  const frameSeeds = recursiveSeedSeries(scope, 4, frameCount);
+  const frameSeed = token(scope, theory.summary, localeHint, String(now), 'frames');
+  const frameCount = emergentCount(frameSeed, Math.max(1, scope.length));
+  const frameWidth = emergentCount(token(frameSeed, 'width'), Math.max(1, scope.length));
+  const frameSeeds = recursiveSeedSeries(scope, frameWidth, frameCount);
   return recursiveSeries(frameSeeds.length, (index) => {
-    const fragment = frameSeeds[index] ?? scope.slice(index * 4, index * 4 + 4);
+    const fragment = frameSeeds[index] ?? scope.slice(index * frameWidth, index * frameWidth + frameWidth);
     const frameSeed = token(scope, fragment, String(index));
     return {
       id: token(scope, frameSeed, String(index)),
@@ -261,10 +272,12 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
 }
 function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Attendee[] {
   const seed = `${localeHint}|${timeZone}|${roleName}`;
-  const attendeeCount = Number.parseInt(token(seed, theory.summary, 'attendees').slice(0, 1), 16) % 3 + 2;
-  const attendeeSeeds = recursiveSeedSeries(seed, 4, attendeeCount);
+  const attendeeSeed = token(seed, theory.summary, localeHint, timeZone, roleName, 'attendees');
+  const attendeeCount = emergentCount(attendeeSeed, Math.max(1, seed.length));
+  const attendeeWidth = emergentCount(token(attendeeSeed, localeHint, timeZone, 'width'), Math.max(1, seed.length));
+  const attendeeSeeds = recursiveSeedSeries(seed, attendeeWidth, attendeeCount);
   return recursiveSeries(attendeeSeeds.length, (index) => {
-    const fragment = attendeeSeeds[index] ?? seed.slice(index * 4, index * 4 + 4);
+    const fragment = attendeeSeeds[index] ?? seed.slice(index * attendeeWidth, index * attendeeWidth + attendeeWidth);
     return {
       email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
       name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
@@ -294,15 +307,16 @@ function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, tim
 
 function buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): RecurrenceSpec {
   const base = phraseFromTheory(theory, localeHint, timeZone, Number.parseInt(token(theory.summary, localeHint, String(now)).slice(0, 2), 16));
-  const basis = token(base, theory.summary, localeHint, String(now));
+  const basis = token(base, theory.summary, localeHint, String(now), timeZone);
   const localDate = new Date(now);
-  const daySeed = Number.parseInt(token(basis, timeZone, 'day').slice(0, 2), 16);
-  localDate.setUTCDate(localDate.getUTCDate() + (daySeed % (base.length || timeZone.length)));
-  const hour = String(Number.parseInt(token(basis, timeZone, 'hour').slice(0, 2), 16) % 24).padStart(2, '0');
-  const minute = String(Number.parseInt(token(basis, timeZone, 'minute').slice(0, 2), 16) % 60).padStart(2, '0');
-  const second = String(Number.parseInt(token(basis, timeZone, 'second').slice(0, 2), 16) % 60).padStart(2, '0');
+  const daySeed = Number.parseInt(token(basis, timeZone, localeHint, 'day').slice(0, 2), 16);
+  localDate.setUTCDate(localDate.getUTCDate() + (daySeed % Math.max(1, base.length || timeZone.length)));
+  const clockSeed = recursiveSegments(token(basis, timeZone, localeHint, 'clock'), emergentCount(token(basis, timeZone, localeHint, 'clock-width'), 4));
+  const hour = String(Number.parseInt(clockSeed[0] ?? token(basis, timeZone, 'hour').slice(0, 2), 16) % 24).padStart(2, '0');
+  const minute = String(Number.parseInt(clockSeed[1] ?? token(basis, timeZone, 'minute').slice(0, 2), 16) % 60).padStart(2, '0');
+  const second = String(Number.parseInt(clockSeed[2] ?? token(basis, timeZone, 'second').slice(0, 2), 16) % 60).padStart(2, '0');
   const local = `${localDate.getUTCFullYear()}-${String(localDate.getUTCMonth() + 1).padStart(2, '0')}-${String(localDate.getUTCDate()).padStart(2, '0')}T${hour}:${minute}:${second}`;
-  const rule = phraseFromTheory(theory, basis, timeZone, Number.parseInt(token(basis, timeZone, 'rule').slice(0, 2), 16)).replace(/\s+/g, '-');
+  const rule = phraseFromTheory(theory, basis, timeZone, Number.parseInt(clockSeed[3] ?? token(basis, timeZone, 'rule').slice(0, 2), 16)).replace(/\s+/g, '-');
   const durationMinutes = Number.parseInt(token(rule, basis, String(now)).slice(0, 2), 16) || Number.parseInt(token(basis, rule, String(now)).slice(0, 2), 16) || base.length;
   return { startLocal: local, timeZone, rule, durationMinutes };
 }
@@ -323,6 +337,14 @@ export class SignalBridge {
     const rootMessageId = token(subjectScope, threadAnchor, localeHint);
     const timezoneLocal = wallClockString(new Date(now), timeZone);
     const timezoneExpectedUtc = normalizeWallTime(timezoneLocal, timeZone).utc;
+    const keySeed = token(threadAnchor, localeHint, timeZone, roleName, String(now), 'keys');
+    const keyCount = emergentCount(keySeed, Math.max(1, threadAnchor.length));
+    const keyWidth = emergentCount(token(keySeed, localeHint, timeZone, 'width'), Math.max(1, threadAnchor.length));
+    const keySeeds = recursiveSeedSeries(threadAnchor, keyWidth, keyCount);
+    const selectorSeed = token(threadAnchor, localeHint, timeZone, roleName, String(now), 'selectors');
+    const selectorCount = emergentCount(selectorSeed, Math.max(1, localeHint.length + timeZone.length));
+    const selectorWidth = emergentCount(token(selectorSeed, localeHint, timeZone, 'width'), Math.max(1, threadAnchor.length));
+    const selectorSeeds = recursiveSeedSeries(threadAnchor, selectorWidth, selectorCount);
     return {
       now,
       capturedAt: new Date(now).toISOString(),
@@ -336,8 +358,8 @@ export class SignalBridge {
       roleName,
       threadAnchor,
       frames: buildUiFrames(theory, now, localeHint),
-      keys: [threadAnchor.slice(0, 4), threadAnchor.slice(4, 8), threadAnchor.slice(8, 12)].map((fragment, index) => token(threadAnchor, fragment, String(index))),
-      fallbackSelectors: [token(threadAnchor, localeHint, String(now)), token(threadAnchor, timeZone, String(now))],
+      keys: recursiveSeries(keySeeds.length, (index) => token(threadAnchor, keySeeds[index] ?? threadAnchor, String(index))),
+      fallbackSelectors: recursiveSeries(selectorSeeds.length, (index) => token(threadAnchor, selectorSeeds[index] ?? threadAnchor, String(index))),
       theory: learned.theory,
       observations,
       facts: learned.promotedFacts,
