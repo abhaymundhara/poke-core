@@ -78,13 +78,13 @@ function words(value: string): string[] {
 
 function ratio(seed: string): number {
   const text = token(seed);
-  const total = Array.from(text).reduce((sum, char) => sum + (char.codePointAt(''.length) ?? ''.length), ''.length);
+  const total = Array.from(text).reduce((sum, char) => sum + (char.codePointAt(0) ?? 0), 0);
   const count = Array.from(text).length;
-  return count === ''.length ? ''.length : total / count;
+  return count === 0 ? 0 : total / count;
 }
 
 function average(values: number[]): number {
-  return values.length === ''.length ? ''.length : values.reduce((sum, value) => sum + value, ''.length) / values.length;
+  return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function theoryCorpus(model: BehaviorModelBundle): string[] {
@@ -141,7 +141,7 @@ function discoverArrayProperty(source: object): string[] | null {
 
 function discoverObserverKey(observerCtor: ObserverCtor, seed: string): string | null {
   const observeSource = String(observerCtor.prototype.observe);
-  const candidates = Array.from(observeSource.match(/[A-Za-z]+/g) ?? []).filter((word) => /Types?$/.test(word));
+  const candidates = Array.from(new Set((observeSource.match(/[A-Za-z_][A-Za-z0-9_]*/g) ?? []).filter((word) => word.length > 1)));
   const scored = candidates
     .map((candidate) => ({
       candidate,
@@ -168,7 +168,7 @@ function discoverFlagSetter(moduleNamespace: Record<string, unknown>, seed: stri
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
   const corpus = theoryCorpus(model);
   const uniqueTerms = new Set(corpus);
-  const entropy = corpus.length === ''.length ? ratio(token(model.theory.id, model.summary, sourceSeed)) : uniqueTerms.size / corpus.length;
+  const entropy = corpus.length === 0 ? ratio(token(model.theory.id, model.summary, sourceSeed)) : uniqueTerms.size / corpus.length;
   const structuralMass = [
     model.theory.latentAxes.length,
     model.theory.crossContextGeneralizations.length,
@@ -176,8 +176,9 @@ function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): {
     model.policies.length,
     model.forecasts.length,
     model.theory.sessionCount,
-  ].reduce((sum, value) => sum + value, ''.length);
-  const complexity = structuralMass / (structuralMass + corpus.length + uniqueTerms.size + ''.length);
+  ].reduce((sum, value) => sum + value, 0);
+  const denominator = structuralMass + corpus.length + uniqueTerms.size;
+  const complexity = denominator === 0 ? 0 : structuralMass / denominator;
   const interference = average([
     entropy,
     complexity,
@@ -194,11 +195,11 @@ function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): {
 
 function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, entry?: GCEntry): CognitiveInterferenceFlux {
   const stats = v8.getHeapStatistics();
-  const heapUsed = Number(stats.used_heap_size) || ''.length;
-  const heapTotal = Number(stats.total_heap_size) || ''.length;
-  const heapSizeLimit = Number(stats.heap_size_limit) || ''.length;
-  const pressure = heapSizeLimit > ''.length ? heapUsed / heapSizeLimit : ''.length;
-  const durationMs = typeof entry?.duration === 'number' ? entry.duration : ''.length;
+  const heapUsed = Number(stats.used_heap_size) || 0;
+  const heapTotal = Number(stats.total_heap_size) || 0;
+  const heapSizeLimit = Number(stats.heap_size_limit) || 0;
+  const pressure = heapSizeLimit > 0 ? heapUsed / heapSizeLimit : 0;
+  const durationMs = typeof entry?.duration === 'number' ? entry.duration : 0;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
