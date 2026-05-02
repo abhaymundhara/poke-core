@@ -1,6 +1,7 @@
 export * from './planner-intelligence';
 import { buildPlan as buildPlannerPlan } from './planner-intelligence';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from './search/nlu';
+import { parseModelJson } from './llm-bridge';
 import type { PlannerIntentGraph, SearchIntent, TaskInput, TaskPlan } from './types';
 
 type TrajectorySession = {
@@ -24,7 +25,7 @@ const sessions = new Map<string, TrajectorySession>();
 function ensureSession(key: string): TrajectorySession {
   const existing = sessions.get(key);
   if (existing) return existing;
-  const created: TrajectorySession = { key, history: [], lastUpdated: Date.now() };
+  const created = { key, history: [], lastUpdated: Date.now() };
   sessions.set(key, created);
   return created;
 }
@@ -41,16 +42,25 @@ function snapshotProbe(input: PlannerTrajectoryProbe): Record<string, unknown> {
   };
 }
 
-function appendHistory(session: TrajectorySession, entry: Record<string, unknown>): void {
-  session.history.push(JSON.stringify(entry));
+function appendHistory(session: TrajectorySession, event: Record<string, unknown>): void {
+  session.history.push(JSON.stringify(event));
   session.lastUpdated = Date.now();
 }
 
-function parseLatentGoals(value: unknown): string[] {
-  if (!value || typeof value !== 'object') return [];
-  const record = value as Record<string, unknown>;
-  const raw = Array.isArray(record.latentGoals) ? record.latentGoals : Array.isArray(record.goals) ? record.goals : [];
-  return raw.map((entry) => String(entry)).filter((entry) => entry.length > 0);
+const LATENT_GOAL_SCHEMA = {
+  type: 'object',
+  required: ['latentGoals'],
+  properties: {
+    latentGoals: { type: 'array', items: { type: 'string' } },
+    goals: { type: 'array', items: { type: 'string' } },
+    trajectorySummary: { type: 'string' },
+    confidence: { type: 'number' },
+    rationale: { type: 'array', items: { type: 'string' } },
+  },
+};
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map((entry) => String(entry)).filter((entry) => entry.length > 0) : [];
 }
 
 export class LatentGoalTracker {
@@ -58,13 +68,13 @@ export class LatentGoalTracker {
 
   observe(input: PlannerTrajectoryProbe): void {
     const session = ensureSession(input.sessionKey);
-    appendHistory(session, { type: 'observation', observedAt: Date.now(), ...snapshotProbe(input) });
+    appendHistory(session, { type: 'observation', at: Date.now(), probe: snapshotProbe(input) });
   }
 
   async infer(input: PlannerTrajectoryProbe): Promise<string[]> {
     const session = ensureSession(input.sessionKey);
     const raw = await this.provider.extract({
-      objective: 'infer latent goals from accumulated session history',
+      objective: 'infer latent goals from the session history',
       context: {
         sessionKey: input.sessionKey,
         objective: input.objective,
@@ -72,19 +82,10 @@ export class LatentGoalTracker {
         history: session.history,
         latest: snapshotProbe(input),
       },
-      schema: {
-        type: 'object',
-        required: ['latentGoals'],
-        properties: {
-          latentGoals: { type: 'array', items: { type: 'string' } },
-          goals: { type: 'array', items: { type: 'string' } },
-          trajectorySummary: { type: 'string' },
-          confidence: { type: 'number' },
-          rationale: { type: 'array', items: { type: 'string' } },
-        },
-      },
+      schema: LATENT_GOAL_SCHEMA,
     });
-    return parseLatentGoals(raw);
+    const draft = parseModelJson<{ latentGoals?: unknown; goals?: unknown }>(raw);
+    return asStringArray(draft.latentGoals ?? draft.goals);
   }
 }
 

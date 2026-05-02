@@ -13,6 +13,7 @@ import type {
 } from './types';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from './search/nlu';
 import type { SearchIntent } from './search/types';
+import { parseModelJson } from './llm-bridge';
 
 export type PlannerResolveContext = Record<string, unknown> & {
   semanticIntent?: SearchIntent;
@@ -51,6 +52,32 @@ export class RecoveryRequired extends Error {
   }
 }
 
+const PLANNER_INTENT_SCHEMA = {
+  type: 'object',
+  required: ['objective', 'normalizedObjective', 'semanticQuery', 'entities', 'topics', 'constraints', 'sourceHints', 'sourcePriors', 'freshness', 'focus', 'hopBudget', 'trustMode', 'querySeeds', 'evidenceTerms', 'sessionKey', 'semanticFrames', 'decomposedQuestions', 'ambiguities', 'nlu'],
+  properties: {
+    objective: { type: 'string' },
+    normalizedObjective: { type: 'string' },
+    semanticQuery: { type: 'string' },
+    entities: { type: 'array', items: { type: 'string' } },
+    topics: { type: 'array', items: { type: 'string' } },
+    constraints: { type: 'array' },
+    sourceHints: { type: 'array' },
+    sourcePriors: { type: 'array' },
+    freshness: { enum: ['historical', 'recent', 'live'] },
+    focus: { enum: ['semantic', 'trust', 'multi-hop', 'factual', 'diagnostic', 'exploratory'] },
+    hopBudget: { type: 'integer' },
+    trustMode: { enum: ['official-first', 'diverse', 'broad'] },
+    querySeeds: { type: 'array', items: { type: 'string' } },
+    evidenceTerms: { type: 'array', items: { type: 'string' } },
+    sessionKey: { type: 'string' },
+    semanticFrames: { type: 'array' },
+    decomposedQuestions: { type: 'array', items: { type: 'string' } },
+    ambiguities: { type: 'array' },
+    nlu: { type: 'object' },
+  },
+};
+
 const PLANNER_SYNTHESIS_SCHEMA = {
   type: 'object',
   required: ['strategy', 'toolAffordances', 'steps', 'recoveryPolicy', 'planner', 'intentGraph'],
@@ -61,110 +88,51 @@ const PLANNER_SYNTHESIS_SCHEMA = {
     recoveryPolicy: { type: 'object' },
     planner: { type: 'object' },
     intentGraph: { type: 'object' },
-    warnings: { type: 'array' },
+    warnings: { type: 'array', items: { type: 'string' } },
   },
-} as const;
+};
 
-const PLANNER_INTENT_SCHEMA = {
+const EXECUTION_PROFILE_SCHEMA = {
   type: 'object',
-  required: ['objective', 'normalizedObjective', 'semanticQuery', 'entities', 'topics', 'constraints', 'sourceHints', 'sourcePriors', 'freshness', 'focus', 'hopBudget', 'trustMode', 'querySeeds', 'evidenceTerms', 'sessionKey', 'semanticFrames', 'decomposedQuestions', 'ambiguities', 'nlu'],
+  required: ['primarySource', 'secondarySources', 'parallelizable', 'rationale'],
   properties: {
-    objective: { type: 'string' },
-    normalizedObjective: { type: 'string' },
-    semanticQuery: { type: 'string' },
-    entities: { type: 'array' },
-    topics: { type: 'array' },
-    constraints: { type: 'array' },
-    sourceHints: { type: 'array' },
-    sourcePriors: { type: 'array' },
-    freshness: { enum: ['historical', 'recent', 'live'] },
-    focus: { enum: ['semantic', 'trust', 'multi-hop', 'factual', 'diagnostic', 'exploratory'] },
-    hopBudget: { type: 'number' },
-    trustMode: { enum: ['official-first', 'diverse', 'broad'] },
-    querySeeds: { type: 'array' },
-    evidenceTerms: { type: 'array' },
-    sessionKey: { type: 'string' },
-    semanticFrames: { type: 'array' },
-    decomposedQuestions: { type: 'array' },
-    ambiguities: { type: 'array' },
-    nlu: { type: 'object' },
+    primarySource: { type: 'string' },
+    secondarySources: { type: 'array', items: { type: 'string' } },
+    parallelizable: { type: 'boolean' },
+    rationale: { type: 'array', items: { type: 'string' } },
+    strategy: { enum: ['semantic-first', 'trust-first', 'multi-hop', 'freshness-first', 'blend'] },
+    affordanceSignals: { type: 'array' },
   },
-} as const;
+};
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function parsePlannerDraft(value: unknown, provider: string): PlannerSynthesisDraft {
-  if (!isRecord(value)) throw new Error('invalid-planner-draft:' + provider);
-  if (typeof value.strategy !== 'string' || !Array.isArray(value.toolAffordances) || !Array.isArray(value.steps) || !isRecord(value.recoveryPolicy) || !isRecord(value.planner) || !isRecord(value.intentGraph)) {
-    throw new Error('invalid-planner-draft:' + provider);
-  }
-  return value as PlannerSynthesisDraft;
-}
-
-function parseIntent(value: unknown, provider: string): SearchIntent {
-  if (!isRecord(value)) throw new Error('invalid-planner-intent:' + provider);
-  if (!isRecord(value.nlu)) throw new Error('invalid-planner-intent:' + provider);
-  return value as SearchIntent;
+async function runPlannerExtraction<T>(provider: SemanticNluProvider, objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): Promise<T> {
+  const raw = await provider.extract({ objective, context, schema });
+  return parseModelJson<T>(raw);
 }
 
 export async function resolvePlannerIntent(objective: string, context: PlannerResolveContext = {}): Promise<SearchIntent> {
   const provider = context.plannerProvider ?? context.semanticProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   try {
-    const raw = await provider.extract({
-      objective: 'resolve the objective into a structured planner intent',
-      context: {
-        objective,
-        plannerContext: context,
-      },
-      schema: PLANNER_INTENT_SCHEMA,
-    });
-    return parseIntent(raw, provider.name);
+    return await runPlannerExtraction<SearchIntent>(provider, 'resolve the task objective into a planner intent', { objective, plannerContext: context }, PLANNER_INTENT_SCHEMA);
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
     throw new RecoveryRequired({ phase: 'intent', provider: provider.name, objective, reason, at: Date.now() });
   }
 }
 
-function combineWarnings(a?: string[], b?: string[]): string[] {
-  return [...new Set([...(a ?? []), ...(b ?? [])])];
-}
-
 export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
   const context = (input.context ?? {}) as PlannerResolveContext;
-  const semanticIntent = await resolvePlannerIntent(input.objective, context);
   const provider = context.plannerProvider ?? context.semanticProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   try {
-    const raw = await provider.extract({
-      objective: 'synthesize an execution plan and intent graph',
-      context: {
-        objective: input.objective,
-        taskId: input.id,
-        semanticIntent,
-        skillCatalog: context.skillCatalog ?? [],
-        currentGraph: context.currentGraph ?? null,
-        currentState: context.currentState ?? null,
-        plannerContext: context,
-      },
-      schema: PLANNER_SYNTHESIS_SCHEMA,
-    });
-    const draft = parsePlannerDraft(raw, provider.name);
+    const semanticIntent = context.semanticIntent ?? await resolvePlannerIntent(input.objective, context);
+    const draft = await runPlannerExtraction<PlannerSynthesisDraft>(provider, 'synthesize a task plan from the resolved intent and session context', { input, semanticIntent, currentGraph: context.currentGraph ?? null, currentState: context.currentState ?? null, skillCatalog: context.skillCatalog ?? [] }, PLANNER_SYNTHESIS_SCHEMA);
     return {
       taskId: input.id,
       objective: input.objective,
       steps: draft.steps,
       semanticIntent,
       intentGraph: draft.intentGraph,
-      planner: {
-        provider: draft.planner.provider,
-        fallbackUsed: false,
-        strategy: draft.planner.strategy,
-        confidence: draft.planner.confidence,
-        warnings: combineWarnings(draft.warnings, semanticIntent.nlu.warnings),
-        semanticQuery: draft.planner.semanticQuery,
-        decompositionCount: draft.planner.decompositionCount,
-      },
+      planner: draft.planner,
     };
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
@@ -173,88 +141,57 @@ export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
 }
 
 export function createPlannerRuntimeState(plan: TaskPlan): PlannerRuntimeState {
+  const planner = plan.planner;
   return {
-    strategy: plan.planner?.strategy ?? 'blend',
-    provider: plan.planner?.provider ?? plan.semanticIntent?.nlu.provider ?? 'llm-semantic-inference',
-    fallbackUsed: plan.planner?.fallbackUsed ?? false,
-    confidence: plan.planner?.confidence ?? plan.semanticIntent?.nlu.confidence ?? 0.5,
-    currentNodeId: plan.steps[0]?.id ?? null,
+    strategy: planner?.strategy ?? plan.intentGraph?.strategy ?? 'blend',
+    provider: planner?.provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name,
+    fallbackUsed: planner?.fallbackUsed ?? false,
+    confidence: planner?.confidence ?? plan.intentGraph?.confidence ?? 0,
+    currentNodeId: plan.intentGraph?.frontier?.[0] ?? plan.steps[0]?.id ?? null,
     completedNodeIds: [],
     blockedNodeIds: [],
-    notes: combineWarnings(plan.planner?.warnings, plan.intentGraph?.warnings),
+    notes: [...(planner?.warnings ?? []), ...(plan.intentGraph?.warnings ?? [])],
   };
 }
 
 export function cloneIntentGraph(graph?: PlannerIntentGraph | null): PlannerIntentGraph | undefined {
-  return graph ? (JSON.parse(JSON.stringify(graph)) as PlannerIntentGraph) : undefined;
+  return graph ? JSON.parse(JSON.stringify(graph)) as PlannerIntentGraph : undefined;
 }
 
 export function markPlannerStepOutcome(graph: PlannerIntentGraph | undefined, stepId: string, status: PlannerIntentGraph['nodes'][number]['status'], note?: string): PlannerIntentGraph | undefined {
   if (!graph) return graph;
-  const next = cloneIntentGraph(graph)!;
-  const node = next.nodes.find((candidate) => candidate.id === stepId);
+  const next = cloneIntentGraph(graph);
+  if (!next) return graph;
+  const node = next.nodes.find((entry) => entry.stepId === stepId || entry.id === stepId);
   if (node) {
     node.status = status;
-    if (note) node.metadata = { ...node.metadata, note };
-  }
-  const anchorId = next.stateAnchorByStepId[stepId];
-  if (anchorId) {
-    const anchor = next.nodes.find((candidate) => candidate.id === anchorId);
-    if (anchor) {
-      anchor.status = status === 'failed' ? 'blocked' : 'done';
-      if (note) anchor.metadata = { ...anchor.metadata, note };
+    if (note) {
+      node.metadata = { ...node.metadata, note };
     }
   }
-  const completed = new Set(next.nodes.filter((candidate) => candidate.status === 'done').map((candidate) => candidate.id));
-  next.frontier = next.stepOrder.filter((candidate) => !completed.has(candidate));
+  if (note && !next.warnings.includes(note)) next.warnings = [...next.warnings, note];
   return next;
 }
 
 export function updatePlannerRuntimeState(state: PlannerRuntimeState | undefined, plan: TaskPlan, stepId: string, status: PlannerIntentGraph['nodes'][number]['status'], note?: string): PlannerRuntimeState {
-  const next: PlannerRuntimeState = state ? (JSON.parse(JSON.stringify(state)) as PlannerRuntimeState) : createPlannerRuntimeState(plan);
+  const next = state ? { ...state, completedNodeIds: [...state.completedNodeIds], blockedNodeIds: [...state.blockedNodeIds], notes: [...state.notes] } : createPlannerRuntimeState(plan);
   next.currentNodeId = stepId;
-  if (status === 'done') {
-    if (!next.completedNodeIds.includes(stepId)) next.completedNodeIds.push(stepId);
-  } else if (status === 'failed') {
-    if (!next.blockedNodeIds.includes(stepId)) next.blockedNodeIds.push(stepId);
-  }
-  if (note) next.notes = combineWarnings(next.notes, [note]);
+  if (status === 'done' && !next.completedNodeIds.includes(stepId)) next.completedNodeIds.push(stepId);
+  if ((status === 'blocked' || status === 'failed') && !next.blockedNodeIds.includes(stepId)) next.blockedNodeIds.push(stepId);
+  if (note && !next.notes.includes(note)) next.notes.push(note);
   return next;
 }
 
 export function notePlannerRecovery(state: PlannerRuntimeState | undefined, stepId: string, reason: string): PlannerRuntimeState {
-  const next: PlannerRuntimeState = state ? (JSON.parse(JSON.stringify(state)) as PlannerRuntimeState) : {
-    strategy: 'blend',
-    provider: 'llm-semantic-inference',
-    fallbackUsed: true,
-    confidence: 0.5,
-    currentNodeId: stepId,
-    completedNodeIds: [],
-    blockedNodeIds: [],
-    notes: [],
-  };
-  next.currentNodeId = stepId;
-  if (!next.blockedNodeIds.includes(stepId)) next.blockedNodeIds.push(stepId);
+  const fallbackPlan: TaskPlan = { taskId: stepId, objective: reason, steps: [] };
+  const next = state ? { ...state, completedNodeIds: [...state.completedNodeIds], blockedNodeIds: [...state.blockedNodeIds], notes: [...state.notes] } : createPlannerRuntimeState(fallbackPlan);
+  next.blockedNodeIds = next.blockedNodeIds.includes(stepId) ? next.blockedNodeIds : [...next.blockedNodeIds, stepId];
   next.lastRecovery = { stepId, reason, at: Date.now() };
-  next.notes = combineWarnings(next.notes, ['recovery:' + reason]);
+  next.notes = next.notes.includes(reason) ? next.notes : [...next.notes, reason];
   return next;
 }
 
-export function deriveExecutionProfile(plan: TaskPlan): ExecutionProfile {
-  const affordances = plan.intentGraph?.toolAffordances ?? [];
-  const primarySource = plan.planner?.provider ?? plan.semanticIntent?.sourceHints[0] ?? affordances[0]?.skill ?? 'integration';
-  const secondarySources = [...new Set([...(plan.semanticIntent?.sourceHints ?? []), ...affordances.slice(1).map((affordance) => affordance.skill)])].filter((source) => source !== primarySource);
-  return {
-    primarySource,
-    secondarySources,
-    parallelizable: affordances.length > 1 || plan.steps.length > 1,
-    rationale: combineWarnings(plan.planner?.warnings, plan.intentGraph?.warnings).concat('model-synthesized'),
-    strategy: plan.planner?.strategy,
-    affordanceSignals: affordances.slice(0, 5).map((affordance) => ({
-      skill: affordance.skill,
-      score: affordance.score,
-      bucket: affordance.domain,
-      kind: affordance.selectedKind,
-    })),
-  };
+export async function deriveExecutionProfile(plan: TaskPlan): Promise<ExecutionProfile> {
+  const raw = await DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.extract({ objective: 'derive the execution profile for a completed task plan', context: { plan, semanticIntent: plan.semanticIntent ?? null, intentGraph: plan.intentGraph ?? null, planner: plan.planner ?? null }, schema: EXECUTION_PROFILE_SCHEMA });
+  return parseModelJson<ExecutionProfile>(raw);
 }

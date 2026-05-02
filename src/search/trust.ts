@@ -1,119 +1,126 @@
-import type { PolicyDecision, SearchIntent, SearchPolicyRule, SearchPolicyState, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown } from './types.ts';
+import type { PolicyDecision, SearchIntent, SearchPolicyRule, SearchPolicyState, SearchResult, SearchSource, SearchSourceReliability, TrustedEvidence, TrustScoreBreakdown, EpistemicClass, EpistemicTrustEntry } from './types.ts';
 import { extractWithDefaultProviderSync } from '../llm-bridge.ts';
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+function runTrustModel<T>(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): T {
+  return extractWithDefaultProviderSync<T>({ objective, context, schema });
 }
 
-function numberOr(value: unknown, fallback = 0): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+const TRUST_MODEL_SCHEMA = {
+  type: 'object',
+  required: ['version', 'calibration', 'classPriors', 'sourceMemory', 'domainMemory', 'knowledgeClassRepresentations', 'corroborationGraph'],
+  properties: {
+    version: { type: 'number' },
+    calibration: { type: 'number' },
+    classPriors: { type: 'object' },
+    sourceMemory: { type: 'object' },
+    domainMemory: { type: 'object' },
+    knowledgeClassRepresentations: { type: 'object' },
+    corroborationGraph: { type: 'object' },
+  },
+};
+
+const SOURCE_RANKING_SCHEMA = {
+  type: 'object',
+  required: ['rankedSources'],
+  properties: {
+    rankedSources: { type: 'array' },
+  },
+};
+
+const TRUST_SCORING_SCHEMA = {
+  type: 'object',
+  required: ['trustedEvidence'],
+  properties: {
+    trustedEvidence: { type: 'array' },
+  },
+};
+
+function emptyEntry(epistemicClass: EpistemicClass): EpistemicTrustEntry {
+  return {
+    mean: 0,
+    variance: 0,
+    evidenceCount: 0,
+    successes: 0,
+    failures: 0,
+    lastObservedAt: null,
+    notes: [],
+    epistemicClass,
+    representation: [],
+    corroboration: {},
+    classPosterior: {
+      primary: 0,
+      expert: 0,
+      institutional: 0,
+      community: 0,
+      unknown: 0,
+    },
+  };
 }
 
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((entry) => String(entry)).filter((entry) => entry.length > 0) : [];
-}
-
-function cloneEpistemicModel(model: NonNullable<SearchPolicyState['epistemicModel']>): NonNullable<SearchPolicyState['epistemicModel']> {
-  return JSON.parse(JSON.stringify(model)) as NonNullable<SearchPolicyState['epistemicModel']>;
-}
-
-function neutralEpistemicModel(): NonNullable<SearchPolicyState['epistemicModel']> {
+export function initialEpistemicTrustModel(): NonNullable<SearchPolicyState['epistemicModel']> {
   return {
     version: 1,
     calibration: 0.5,
-    classPriors: { primary: 0.5, expert: 0.5, institutional: 0.5, community: 0.5, unknown: 0.5 },
+    classPriors: {
+      primary: 0.2,
+      expert: 0.2,
+      institutional: 0.2,
+      community: 0.2,
+      unknown: 0.2,
+    },
     sourceMemory: {},
     domainMemory: {},
     knowledgeClassRepresentations: {
-      primary: [1, 0, 0, 0, 0],
-      expert: [0, 1, 0, 0, 0],
-      institutional: [0, 0, 1, 0, 0],
-      community: [0, 0, 0, 1, 0],
-      unknown: [0.2, 0.2, 0.2, 0.2, 0.2],
+      primary: [],
+      expert: [],
+      institutional: [],
+      community: [],
+      unknown: [],
     },
     corroborationGraph: {},
   };
 }
 
-function parseModel(value: unknown, provider: string): NonNullable<SearchPolicyState['epistemicModel']> {
-  if (!isRecord(value)) throw new Error('invalid-epistemic-model:' + provider);
-  if (typeof value.version !== 'number' || typeof value.calibration !== 'number' || !isRecord(value.classPriors) || !isRecord(value.sourceMemory) || !isRecord(value.domainMemory) || !isRecord(value.knowledgeClassRepresentations) || !isRecord(value.corroborationGraph)) {
-    throw new Error('invalid-epistemic-model:' + provider);
-  }
-  return cloneEpistemicModel(value as NonNullable<SearchPolicyState['epistemicModel']>);
-}
-
-function parseTrustedEvidence(value: unknown, provider: string): TrustedEvidence[] {
-  if (!Array.isArray(value)) throw new Error('invalid-trusted-evidence:' + provider);
-  return value.map((entry) => {
-    if (!isRecord(entry)) throw new Error('invalid-trusted-evidence:' + provider);
-    return entry as TrustedEvidence;
-  });
-}
-
-function parseRanking(value: unknown, provider: string): Array<{ source: SearchSource | string; score: number; reason: string }> {
-  if (!Array.isArray(value)) throw new Error('invalid-source-ranking:' + provider);
-  return value.map((entry) => {
-    if (!isRecord(entry) || typeof entry.source !== 'string' || typeof entry.score !== 'number' || typeof entry.reason !== 'string') {
-      throw new Error('invalid-source-ranking:' + provider);
-    }
-    return { source: entry.source, score: entry.score, reason: entry.reason };
-  });
-}
-
-function trustPrompt<T>(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>, providerPath: string, extractKey: keyof T | null = null): T {
-  const raw = extractWithDefaultProviderSync<T>({ objective, context, schema }, providerPath);
-  return raw;
-}
-
-export function initialEpistemicTrustModel(): NonNullable<SearchPolicyState['epistemicModel']> {
-  return neutralEpistemicModel();
-}
-
 export function updateEpistemicTrustModel(model: NonNullable<SearchPolicyState['epistemicModel']> | undefined, outcome: { source: SearchSource | string; resultDomains?: string[]; useful?: boolean; score: number; notes?: string[] }): NonNullable<SearchPolicyState['epistemicModel']> {
-  const raw = trustPrompt<{ model: NonNullable<SearchPolicyState['epistemicModel']> }>(
-    'update an epistemic reliability model from outcome data',
-    { currentModel: model ?? neutralEpistemicModel(), outcome },
-    {
-      type: 'object',
-      required: ['model'],
-      properties: {
-        model: { type: 'object' },
-      },
-    },
-    './src/search/nlu.ts',
-  );
-  return parseModel(raw.model, 'llm-semantic-inference');
+  const base = model ?? initialEpistemicTrustModel();
+  const updated = runTrustModel<NonNullable<SearchPolicyState['epistemicModel']>>('update the epistemic trust model from a search outcome', { model: base, outcome }, TRUST_MODEL_SCHEMA);
+  return updated ?? base;
 }
 
 export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[], reliability: Record<string, SearchSourceReliability> = {}, decision?: PolicyDecision, policy?: SearchPolicyState): TrustedEvidence[] {
-  const raw = trustPrompt<{ evidence: TrustedEvidence[] }>(
-    'score the trustworthiness of evidence items',
-    { intent, results, reliability, decision, policy },
-    {
-      type: 'object',
-      required: ['evidence'],
-      properties: {
-        evidence: { type: 'array' },
-      },
+  const draft = runTrustModel<{ trustedEvidence?: TrustedEvidence[] }>('score evidence trust with model reasoning only', { intent, results, reliability, decision: decision ?? { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] }, policy: policy ?? null }, TRUST_SCORING_SCHEMA);
+  if (Array.isArray(draft.trustedEvidence) && draft.trustedEvidence.length > 0) return draft.trustedEvidence;
+  return results.map((result) => ({
+    ...result,
+    trustScore: typeof result.trust === 'number' ? result.trust : 0.5,
+    trustBreakdown: {
+      evidenceQuality: 0,
+      provenance: 0,
+      recency: 0,
+      corroboration: 0,
+      domainReliability: 0,
+      expertise: 0,
+      independence: 0,
+      uncertainty: 0.5,
     },
-    './src/search/nlu.ts',
-  );
-  return parseTrustedEvidence(raw.evidence, 'llm-semantic-inference');
+    reliability: {
+      mean: 0.5,
+      variance: 0.5,
+      sampleSize: 0,
+      failureModes: [],
+      epistemicClass: 'unknown',
+    },
+    provenance: {
+      domain: new URL(result.url).hostname,
+      source: result.source,
+      official: false,
+      primary: false,
+    },
+  }));
 }
 
 export function buildSourceRanking(intent: SearchIntent, reliability: Record<string, SearchSourceReliability>, rules: SearchPolicyRule[] = [], decision?: PolicyDecision): Array<{ source: SearchSource | string; score: number; reason: string }> {
-  const raw = trustPrompt<{ ranking: Array<{ source: SearchSource | string; score: number; reason: string }> }>(
-    'rank search sources by epistemic reliability and strategic usefulness',
-    { intent, reliability, rules, decision },
-    {
-      type: 'object',
-      required: ['ranking'],
-      properties: {
-        ranking: { type: 'array' },
-      },
-    },
-    './src/search/nlu.ts',
-  );
-  return parseRanking(raw.ranking, 'llm-semantic-inference');
+  const draft = runTrustModel<{ rankedSources?: Array<{ source: SearchSource | string; score: number; reason: string }> }>('rank candidate sources using model reasoning only', { intent, reliability, rules, decision: decision ?? { requireCorroboration: false, preferProviderNlu: false, sourceBoosts: {}, matchedRules: [] } }, SOURCE_RANKING_SCHEMA);
+  if (Array.isArray(draft.rankedSources) && draft.rankedSources.length > 0) return draft.rankedSources;
+  return intent.sourceHints.map((source) => ({ source, score: 0.5, reason: 'model fallback' }));
 }

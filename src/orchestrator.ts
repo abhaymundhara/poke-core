@@ -124,24 +124,21 @@ export class PokeCoreOrchestrator {
       schema: AFFORDANCE_EVALUATION_SCHEMA,
     });
     if (!isRecord(raw)) throw new Error('invalid-affordance-evaluation:' + provider.name);
-    const ranked = toStringArray(raw.rationale); // touch early for validation below
-    void ranked;
-    const entries = Array.isArray(raw.rankedAdapters) ? raw.rankedAdapters : null;
-    if (!entries || entries.length === 0) throw new Error('invalid-affordance-evaluation:' + provider.name);
-    const normalized = entries.map((entry) => {
-      if (!isRecord(entry) || typeof entry.name !== 'string' || typeof entry.score !== 'number' || !Array.isArray(entry.reason) || typeof entry.invoke !== 'boolean') {
-        throw new Error('invalid-affordance-evaluation:' + provider.name);
-      }
-      return { name: entry.name, score: entry.score, reason: toStringArray(entry.reason), invoke: entry.invoke };
-    }).sort((left, right) => right.score - left.score);
-    const selectedName = typeof raw.selectedAdapterName === 'string' ? raw.selectedAdapterName : normalized[0]!.name;
-    const selected = normalized.find((entry) => entry.name === selectedName && entry.invoke);
+    const ranked = Array.isArray((raw as Record<string, unknown>).rankedAdapters) ? (raw as Record<string, any>).rankedAdapters.map((entry: any) => ({
+      name: String(entry.name),
+      score: typeof entry.score === 'number' ? entry.score : 0,
+      reason: toStringArray(entry.reason),
+      invoke: Boolean(entry.invoke),
+    })) : [];
+    if (ranked.length === 0) throw new Error('invalid-affordance-evaluation:' + provider.name);
+    const selectedName = typeof (raw as Record<string, unknown>).selectedAdapterName === 'string' ? String((raw as Record<string, unknown>).selectedAdapterName) : ranked[0]!.name;
+    const selected = ranked.find((entry) => entry.name === selectedName && entry.invoke) ?? ranked.find((entry) => entry.invoke);
     if (!selected) throw new Error('no-adapter-selected:' + provider.name);
     return {
       selectedAdapterName: selected.name,
-      confidence: typeof raw.confidence === 'number' ? raw.confidence : selected.score,
-      rationale: toStringArray(raw.rationale),
-      rankedAdapters: normalized,
+      confidence: typeof (raw as Record<string, unknown>).confidence === 'number' ? Number((raw as Record<string, unknown>).confidence) : selected.score,
+      rationale: toStringArray((raw as Record<string, unknown>).rationale),
+      rankedAdapters: ranked,
     };
   }
 
