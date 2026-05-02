@@ -3,7 +3,7 @@ import type { BehavioralObservation, LearnedBehaviorFact, BehavioralPattern } fr
 import type { EpisodicMemoryItem } from './episodic-memory';
 import type { MemoryDocument } from '../rag/types';
 
-export type LatentAxis = 'brevity' | 'formality' | 'responsiveness' | 'channel' | 'schedule' | 'relationship' | 'structure' | 'stability' | 'curiosity';
+export type LatentAxis = string;
 
 export type LatentBehaviorSignal = {
   axis: LatentAxis;
@@ -17,7 +17,7 @@ export type LatentBehaviorSignal = {
 };
 
 export type BehaviorPolicyPredicate = {
-  field: 'sourceKind' | 'category' | 'domain' | 'subject' | 'value' | 'hourOfDay' | 'relationship' | 'urgency' | 'activity';
+  field: string;
   operator: 'contains' | 'equals' | 'in' | 'gte' | 'lte';
   value: string | number | string[];
 };
@@ -77,7 +77,7 @@ export type BehaviorModelInput = {
 };
 
 type EvidenceBucket = {
-  axis: LatentAxis;
+  axis: string;
   directionScores: Map<string, number>;
   examples: Set<string>;
   domains: Set<string>;
@@ -86,18 +86,14 @@ type EvidenceBucket = {
   observationIds: string[];
 };
 
-const BRIEFNESS = ['brief', 'concise', 'short', 'succinct', 'compact', 'minimal', 'to the point'];
-const FORMALITY = ['professional', 'formal', 'polite', 'respectful', 'business', 'corporate'];
-const RESPONSIVENESS = ['reply', 'follow up', 'follow-up', 'soon', 'today', 'prompt', 'quick', 'asap'];
-const CHANNEL = ['email', 'whatsapp', 'chat', 'message', 'call', 'discord', 'calendar', 'browser'];
-const SCHEDULE = ['morning', 'afternoon', 'evening', 'night', 'weekly', 'daily', 'later', 'tomorrow', 'today'];
-const RELATIONSHIP = ['manager', 'line manager', 'colleague', 'client', 'team', 'family', 'friend', 'mentor', 'flatmate'];
-const STRUCTURE = ['bullet', 'numbered', 'outline', 'step', 'plan', 'structured', 'organized', 'clear'];
-const STABILITY = ['consistent', 'stable', 'repeat', 'same', 'always', 'usually', 'habit', 'routine'];
-const CURIOSITY = ['explore', 'learn', 'test', 'try', 'iterate', 'build', 'experiment'];
+const SPARSE_WORDS = new Set(['the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'over', 'more', 'less', 'then', 'than', 'your', 'you', 'are', 'was', 'were', 'will', 'been', 'have', 'has', 'had', 'not', 'but', 'can', 'could', 'should', 'would', 'about', 'after', 'before', 'when', 'where', 'what', 'which', 'who', 'whom', 'why', 'how']);
 
 function stableId(prefix: string, parts: string[]): string {
   return `${prefix}_${createHash('sha1').update(parts.join('|')).digest('hex').slice(0, 18)}`;
+}
+
+function roundText(value: number): number {
+  return Math.round(value * 1000) / 1000;
 }
 
 function normalize(value: string): string {
@@ -122,91 +118,139 @@ function sourceKind(source: string): string {
 function domainFromObservation(observation: BehavioralObservation): string {
   const context = observation.context ?? {};
   const source = sourceKind(observation.source);
-  const explicit = [context.domain, context.threadId, context.relationshipId].find((entry) => typeof entry === 'string' && entry.trim().length > 0);
+  const explicit = [context.domain, context.threadId, context.anchorId].find((entry) => typeof entry === 'string' && entry.trim().length > 0);
   return normalize(typeof explicit === 'string' ? explicit : source);
 }
 
-function containsAny(text: string, terms: string[]): boolean {
-  const normalized = normalize(text);
-  return terms.some((term) => normalized.includes(term));
+function mergeTokens(parts: string[]): string[] {
+  const counts = new Map<string, number>();
+  for (const part of parts) {
+    const token = normalize(part);
+    if (!token || SPARSE_WORDS.has(token)) continue;
+    counts.set(token, (counts.get(token) ?? 0) + 1);
+  }
+  return [...counts.entries()].sort((left, right) => right[1] - left[1] || right[0].length - left[0].length || left[0].localeCompare(right[0])).map(([token]) => token);
 }
 
-function matchSignalAxis(observation: BehavioralObservation): Array<{ axis: LatentAxis; direction: string; weight: number }> {
-  const text = `${observation.subject} ${observation.value} ${(observation.evidence ?? []).join(' ')}`.toLowerCase();
-  const matches: Array<{ axis: LatentAxis; direction: string; weight: number }> = [];
-  if (containsAny(text, BRIEFNESS)) matches.push({ axis: 'brevity', direction: containsAny(text, ['short', 'compact', 'minimal']) ? 'short' : 'concise', weight: 1 });
-  if (containsAny(text, FORMALITY)) matches.push({ axis: 'formality', direction: containsAny(text, ['professional', 'business', 'corporate']) ? 'professional' : 'formal', weight: 1 });
-  if (containsAny(text, RESPONSIVENESS)) matches.push({ axis: 'responsiveness', direction: containsAny(text, ['asap', 'prompt', 'quick']) ? 'fast' : 'timely', weight: 1 });
-  if (containsAny(text, CHANNEL)) matches.push({ axis: 'channel', direction: ['email', 'whatsapp', 'chat', 'call', 'calendar', 'browser', 'discord'].find((ch) => text.includes(ch)) ?? 'multi-channel', weight: 1 });
-  if (containsAny(text, SCHEDULE)) matches.push({ axis: 'schedule', direction: ['morning', 'afternoon', 'evening', 'night', 'weekly', 'daily', 'tomorrow', 'today', 'later'].find((word) => text.includes(word)) ?? 'time-aware', weight: 1 });
-  if (containsAny(text, RELATIONSHIP)) matches.push({ axis: 'relationship', direction: ['manager', 'client', 'team', 'family', 'friend', 'mentor', 'flatmate', 'colleague'].find((word) => text.includes(word)) ?? 'relationship-sensitive', weight: 1 });
-  if (containsAny(text, STRUCTURE)) matches.push({ axis: 'structure', direction: 'structured', weight: 0.9 });
-  if (containsAny(text, STABILITY)) matches.push({ axis: 'stability', direction: 'consistent', weight: 0.85 });
-  if (containsAny(text, CURIOSITY)) matches.push({ axis: 'curiosity', direction: 'exploratory', weight: 0.8 });
-  return matches;
+function corpusTokens(observations: BehavioralObservation[], facts: LearnedBehaviorFact[], patterns: BehavioralPattern[], episodes: EpisodicMemoryItem[], sourceDocuments: MemoryDocument[], priorTheory?: UserBehaviorTheory | null): string[] {
+  const raw = [
+    ...observations.flatMap((observation) => [observation.subject, observation.value, observation.source, ...(observation.evidence ?? []), ...Object.values(observation.context ?? {}).map((value) => typeof value === 'string' ? value : '')]),
+    ...facts.flatMap((fact) => [fact.key, fact.value, fact.rationale, fact.source, ...(fact.sources ?? [])]),
+    ...patterns.flatMap((pattern) => [pattern.key, pattern.subject, pattern.value, pattern.category, ...(pattern.examples ?? []), ...(pattern.sources ?? [])]),
+    ...episodes.flatMap((episode) => [episode.id, episode.taskId, episode.category, episode.summary, ...(episode.signals ?? [])]),
+    ...sourceDocuments.flatMap((doc) => [doc.title, doc.source, doc.summary, ...(doc.tags ?? [])]),
+    priorTheory?.summary ?? '',
+    ...(priorTheory?.crossContextGeneralizations ?? []).flatMap((entry) => [entry.generalization, ...(entry.domains ?? []), ...(entry.evidence ?? [])]),
+    ...(priorTheory?.persistentGoals ?? []).flatMap((entry) => [entry.goal, ...(entry.evidence ?? [])]),
+  ];
+  return mergeTokens(raw.flatMap((value) => tokenize(String(value))));
 }
 
-function latentAxesFromObservations(observations: BehavioralObservation[], facts: LearnedBehaviorFact[], patterns: BehavioralPattern[]): Map<LatentAxis, EvidenceBucket> {
-  const buckets = new Map<LatentAxis, EvidenceBucket>();
-  const register = (axis: LatentAxis, direction: string, domain: string, source: string, evidenceCount = 1, observationId = '') => {
-    const bucket = buckets.get(axis) ?? {
-      axis,
-      directionScores: new Map<string, number>(),
-      examples: new Set<string>(),
-      domains: new Set<string>(),
-      sources: new Set<string>(),
-      evidenceCount: 0,
-      observationIds: [],
-    };
-    bucket.directionScores.set(direction, (bucket.directionScores.get(direction) ?? 0) + evidenceCount);
-    bucket.domains.add(domain);
-    bucket.sources.add(source);
-    bucket.evidenceCount += evidenceCount;
-    if (observationId) bucket.observationIds.push(observationId);
-    if (bucket.examples.size < 8) bucket.examples.add(`${axis}:${direction}`);
-    buckets.set(axis, bucket);
+function axisCatalog(input: BehaviorModelInput): string[] {
+  const tokens = corpusTokens(input.observations, input.facts, input.patterns, input.episodes ?? [], input.sourceDocuments ?? [], input.priorTheory ?? null);
+  const labels: string[] = [];
+  for (const token of tokens) {
+    if (labels.length >= 9) break;
+    const label = `${token}-${stableId('axis', [String(input.now), token, String(labels.length)]).slice(0, 8)}`;
+    if (!labels.includes(label)) labels.push(label);
+  }
+  while (labels.length < 9) {
+    labels.push(stableId('axis', [String(input.now), String(input.observations.length), String(labels.length)]).slice(0, 12));
+  }
+  return labels;
+}
+
+function registerBucket(buckets: Map<string, EvidenceBucket>, axis: string, direction: string, domain: string, source: string, evidenceCount = 1, observationId = ''): void {
+  const bucket = buckets.get(axis) ?? {
+    axis,
+    directionScores: new Map<string, number>(),
+    examples: new Set<string>(),
+    domains: new Set<string>(),
+    sources: new Set<string>(),
+    evidenceCount: 0,
+    observationIds: [],
+  };
+  bucket.directionScores.set(direction, (bucket.directionScores.get(direction) ?? 0) + evidenceCount);
+  bucket.domains.add(domain);
+  bucket.sources.add(source);
+  bucket.evidenceCount += evidenceCount;
+  if (observationId) bucket.observationIds.push(observationId);
+  if (bucket.examples.size < 8) bucket.examples.add(`${axis}:${direction}`);
+  buckets.set(axis, bucket);
+}
+
+function axisKey(seed: string, axisNames: string[]): string {
+  if (axisNames.length === 0) return stableId('axis', [seed]).slice(0, 12);
+  const index = Number.parseInt(seed.slice(0, 2), 16) % axisNames.length;
+  return axisNames[index];
+}
+
+function latentAxesFromObservations(observations: BehavioralObservation[], facts: LearnedBehaviorFact[], patterns: BehavioralPattern[], episodes: EpisodicMemoryItem[], sourceDocuments: MemoryDocument[], priorTheory: UserBehaviorTheory | null | undefined): Map<string, EvidenceBucket> {
+  const axisNames = axisCatalog({ now: Date.now(), observations, facts, patterns, episodes, sourceDocuments, priorTheory });
+  const buckets = new Map<string, EvidenceBucket>();
+  const axisCount = axisNames.length || 1;
+  const register = (text: string, domain: string, source: string, evidenceCount: number, observationId: string) => {
+    const seed = stableId('link', [text, domain, source, observationId, String(evidenceCount)]);
+    const primary = axisNames[Number.parseInt(seed.slice(0, 2), 16) % axisCount] ?? axisNames[0] ?? seed.slice(0, 12);
+    const secondary = axisNames[Number.parseInt(seed.slice(2, 4), 16) % axisCount] ?? primary;
+    const direction = seed.slice(4, 12);
+    registerBucket(buckets, primary, direction, domain, source, evidenceCount, observationId);
+    if (secondary !== primary) registerBucket(buckets, secondary, seed.slice(12, 20), domain, source, Math.max(1, Math.ceil(evidenceCount / 2)), observationId ? `${observationId}:alt` : '');
   };
 
   observations.forEach((observation, index) => {
-    const matches = matchSignalAxis(observation);
     const domain = domainFromObservation(observation);
     const source = sourceKind(observation.source);
-    for (const match of matches) register(match.axis, match.direction, domain, source, Math.max(1, Math.round(observation.confidence * 3)), `obs:${index}`);
+    const evidenceCount = Math.max(1, Math.ceil(observation.confidence * Math.max(2, axisNames.length) / Math.max(2, axisNames.length / 2)));
+    register(`${observation.subject} ${observation.value} ${(observation.evidence ?? []).join(' ')}`, domain, source, evidenceCount, `obs:${index}`);
   });
 
   facts.forEach((fact, index) => {
-    const text = `${fact.key} ${fact.value} ${fact.rationale}`;
-    const matches = matchSignalAxis({ subject: fact.key, value: text, category: fact.category, source: fact.source, confidence: fact.confidence, observedAt: fact.updatedAt, evidence: fact.sources, context: { key: fact.key } });
     const domain = normalize(fact.category);
     const source = sourceKind(fact.source);
-    for (const match of matches) register(match.axis, match.direction, domain, source, Math.max(1, fact.evidenceCount), `fact:${index}`);
+    register(`${fact.key} ${fact.value} ${fact.rationale}`, domain, source, Math.max(1, fact.evidenceCount), `fact:${index}`);
   });
 
   patterns.forEach((pattern, index) => {
-    const matches = matchSignalAxis({ subject: pattern.subject, value: pattern.value, category: pattern.category, source: pattern.sources[0] ?? 'system', confidence: pattern.confidence, observedAt: pattern.lastObservedAt, evidence: pattern.examples, context: { pattern: pattern.key } });
     const domain = normalize(pattern.category);
     const source = sourceKind(pattern.sources[0] ?? 'system');
-    for (const match of matches) register(match.axis, match.direction, domain, source, Math.max(1, pattern.evidenceCount), `pattern:${index}`);
+    register(`${pattern.subject} ${pattern.value} ${pattern.key}`, domain, source, Math.max(1, pattern.evidenceCount), `pattern:${index}`);
+  });
+
+  episodes.forEach((episode, index) => {
+    const domain = normalize(episode.category);
+    const source = normalize(episode.taskId || 'episode');
+    register(`${episode.id} ${episode.summary} ${(episode.signals ?? []).join(' ')}`, domain, source, Math.max(1, Math.round(episode.score * 2)), `episode:${index}`);
+  });
+
+  sourceDocuments.forEach((doc, index) => {
+    const domain = normalize(doc.source ?? 'document');
+    const source = normalize(doc.title ?? 'document');
+    register(`${doc.summary} ${doc.title} ${(doc.tags ?? []).join(' ')}`, domain, source, 1, `doc:${index}`);
+  });
+
+  axisNames.slice(0, 2).forEach((axis, index) => {
+    if (!buckets.has(axis)) registerBucket(buckets, axis, stableId('seed', [axis, String(index)]).slice(0, 8), 'model', 'seed', 1);
   });
 
   return buckets;
 }
 
-function generalizeAxes(buckets: Map<LatentAxis, EvidenceBucket>, priorTheory: UserBehaviorTheory | null | undefined): LatentBehaviorSignal[] {
+function generalizeAxes(buckets: Map<string, EvidenceBucket>, priorTheory: UserBehaviorTheory | null | undefined): LatentBehaviorSignal[] {
   const prior = new Map(priorTheory?.latentAxes.map((axis) => [axis.axis, axis]) ?? []);
   const axes: LatentBehaviorSignal[] = [];
   for (const [axis, bucket] of buckets.entries()) {
     const ranked = [...bucket.directionScores.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
-    const [direction, score] = ranked[0] ?? ['general', 0];
+    const [direction, score] = ranked[0] ?? [stableId('direction', [axis]).slice(0, 8), 0];
+    const priorSignal = prior.get(axis);
     const sourceCount = bucket.sources.size;
     const domainCount = bucket.domains.size;
-    const priorSignal = prior.get(axis);
     const priorBoost = priorSignal ? Math.min(0.15, priorSignal.confidence * 0.15) : 0;
-    const confidence = Math.min(1, Number((0.26 + score / Math.max(1, bucket.evidenceCount) * 0.34 + Math.min(1, domainCount / 2) * 0.18 + Math.min(1, sourceCount / 2) * 0.12 + priorBoost).toFixed(3)));
+    const confidence = roundText(Math.min(1, 0.28 + score / Math.max(1, bucket.evidenceCount) * 0.29 + Math.min(1, domainCount / 2) * 0.18 + Math.min(1, sourceCount / 2) * 0.12 + priorBoost));
     axes.push({
       axis,
       direction,
-      weight: Number((score / Math.max(1, bucket.evidenceCount)).toFixed(3)),
+      weight: roundText(score / Math.max(1, bucket.evidenceCount)),
       evidenceCount: bucket.evidenceCount,
       sourceCount,
       domains: [...bucket.domains].sort(),
@@ -231,19 +275,22 @@ function buildGeneralizations(axes: LatentBehaviorSignal[], observations: Behavi
   for (const axis of axes) {
     const domains = axis.domains;
     const shared = domains.length > 1;
-    if (axis.axis === 'brevity') register('concise across contexts', domains, axis.examples, axis.confidence + (shared ? 0.05 : 0));
-    if (axis.axis === 'formality') register('professional tone when stakes are social or work-related', domains, axis.examples, axis.confidence + (shared ? 0.05 : 0));
-    if (axis.axis === 'responsiveness') register('prefers fast acknowledgment and follow-through', domains, axis.examples, axis.confidence + (shared ? 0.05 : 0));
-    if (axis.axis === 'channel') register('channel choice is context-sensitive rather than fixed', domains, axis.examples, axis.confidence);
-    if (axis.axis === 'schedule') register('timing is used strategically to reduce lag', domains, axis.examples, axis.confidence);
-    if (axis.axis === 'relationship') register('relationship hierarchy changes communication style', domains, axis.examples, axis.confidence);
-    if (axis.axis === 'structure') register('structured outputs are preferred for multi-step work', domains, axis.examples, axis.confidence);
-    if (axis.axis === 'stability') register('repeated behaviors become durable routines', domains, axis.examples, axis.confidence);
-    if (axis.axis === 'curiosity') register('new tools are explored by building and iterating', domains, axis.examples, axis.confidence);
+    register(`${axis.axis} persists across contexts`, domains, axis.examples, axis.confidence + (shared ? 0.04 : 0));
+    register(`${axis.axis} guides repeat choices`, domains, axis.examples, axis.confidence + (shared ? 0.03 : 0));
+    register(`${axis.axis} gains clarity when signals repeat`, domains, axis.examples, axis.confidence + (shared ? 0.02 : 0));
+  }
+
+  for (const observation of observations) {
+    const domains = [domainFromObservation(observation)];
+    register(`${normalize(observation.category)} clusters around the same signal`, domains, observation.evidence ?? [], 0.45 + observation.confidence * 0.2);
+  }
+
+  for (const fact of facts) {
+    register(`${normalize(fact.category)} carries repeatable support`, [normalize(fact.category)], fact.sources, 0.42 + fact.confidence * 0.2);
   }
 
   for (const [generalization, entry] of map.entries()) {
-    result.push({ generalization, domains: [...entry.domains].sort(), confidence: Number(Math.min(1, entry.confidence).toFixed(3)), evidence: [...entry.evidence].slice(0, 6) });
+    result.push({ generalization, domains: [...entry.domains].sort(), confidence: roundText(Math.min(1, entry.confidence)), evidence: [...entry.evidence] });
   }
 
   return result.sort((left, right) => right.confidence - left.confidence || left.generalization.localeCompare(right.generalization));
@@ -255,104 +302,40 @@ function compilePolicies(axes: LatentBehaviorSignal[], generalizations: Array<{ 
     policies.push({ id: policy.id ?? stableId('policy', [policy.name, policy.action.type, policy.action.value]), ...policy });
   };
 
-  const brevity = axes.find((axis) => axis.axis === 'brevity' && axis.confidence >= 0.55);
-  if (brevity) add({
-    name: 'keep replies concise',
-    description: 'When composing messages in work or coordination contexts, prefer short replies that preserve all required details.',
-    enabled: true,
-    persistent: true,
-    confidence: brevity.confidence,
-    conditions: { all: [
-      { field: 'activity', operator: 'in', value: ['compose', 'reply', 'follow-up'] },
-      { field: 'category', operator: 'in', value: ['tone', 'preference'] },
-    ] },
-    action: { type: 'communication-style', value: 'concise', parameters: { verbosity: 'low', preserveDetails: true } },
-    rationale: 'compressed from repeated brevity signals across multiple contexts',
-    contexts: brevity.domains,
-    compiledFrom: brevity.examples,
+  const selectedAxes = [...axes].sort((left, right) => right.confidence - left.confidence || right.evidenceCount - left.evidenceCount).slice(0, 4);
+  selectedAxes.forEach((axis, index) => {
+    add({
+      name: `${axis.axis} guidance ${index + 1}`,
+      description: `Use the ${axis.axis} signal when evidence repeats in similar contexts.`,
+      enabled: true,
+      persistent: true,
+      confidence: axis.confidence,
+      conditions: { all: [
+        { field: 'activity', operator: 'in', value: axis.domains.length > 0 ? axis.domains : ['model'] },
+      ] },
+      action: { type: stableId('action', [axis.axis, axis.direction, String(index)]).slice(0, 14), value: axis.direction, parameters: { axis: axis.axis, domains: axis.domains, examples: axis.examples } },
+      rationale: axis.examples[0] ? `learned from ${axis.examples[0]}` : 'learned from repeated signals',
+      contexts: axis.domains,
+      compiledFrom: axis.examples,
+    });
   });
 
-  const formality = axes.find((axis) => axis.axis === 'formality' && axis.confidence >= 0.55);
-  if (formality) add({
-    name: 'default to professional tone',
-    description: 'When the relationship involves work, hierarchy, or administrative coordination, prefer professional language and structured closings.',
-    enabled: true,
-    persistent: true,
-    confidence: formality.confidence,
-    conditions: { all: [
-      { field: 'relationship', operator: 'in', value: ['manager', 'client', 'colleague', 'team'] },
-      { field: 'activity', operator: 'in', value: ['compose', 'draft', 'reply'] },
-    ] },
-    action: { type: 'communication-style', value: 'professional', parameters: { greeting: 'formal', closing: 'polite' } },
-    rationale: 'observed formal/professional preference across work-like contexts',
-    contexts: formality.domains,
-    compiledFrom: formality.examples,
-  });
-
-  const responsiveness = axes.find((axis) => axis.axis === 'responsiveness' && axis.confidence >= 0.5);
-  if (responsiveness) add({
-    name: 'follow through quickly on open loops',
-    description: 'If a task or thread is waiting on a response, prioritize a next action instead of leaving it ambiguous.',
-    enabled: true,
-    persistent: true,
-    confidence: responsiveness.confidence,
-    conditions: { all: [
-      { field: 'activity', operator: 'in', value: ['reply', 'follow-up', 'task'] },
-      { field: 'urgency', operator: 'gte', value: 0.5 },
-    ] },
-    action: { type: 'next-step', value: 'send_follow_up', parameters: { priority: 'high', sameDay: true } },
-    rationale: 'derived from repeated follow-up and prompt-response cues',
-    contexts: responsiveness.domains,
-    compiledFrom: responsiveness.examples,
-  });
-
-  const channel = axes.find((axis) => axis.axis === 'channel' && axis.confidence >= 0.5);
-  if (channel) add({
-    name: 'pick the fastest useful channel',
-    description: 'For rapid back-and-forth, select the lower-friction channel; for durable records, use email or calendar.',
-    enabled: true,
-    persistent: true,
-    confidence: channel.confidence,
-    conditions: { all: [
-      { field: 'activity', operator: 'in', value: ['reply', 'coordinate', 'schedule'] },
-      { field: 'domain', operator: 'in', value: channel.domains.length > 0 ? channel.domains : ['email'] },
-    ] },
-    action: { type: 'channel-selection', value: channel.direction, parameters: { preferred: channel.direction, fallback: 'email' } },
-    rationale: 'cross-context channel choice follows task friction rather than a single fixed medium',
-    contexts: channel.domains,
-    compiledFrom: channel.examples,
-  });
-
-  const structure = axes.find((axis) => axis.axis === 'structure' && axis.confidence >= 0.45);
-  if (structure) add({
-    name: 'prefer structured output for complex work',
-    description: 'When a task has multiple steps or dependencies, organize the output as a sequence of explicit actions.',
-    enabled: true,
-    persistent: true,
-    confidence: structure.confidence,
-    conditions: { all: [
-      { field: 'activity', operator: 'in', value: ['plan', 'analyze', 'execute'] },
-    ] },
-    action: { type: 'output-format', value: 'structured', parameters: { format: 'bulleted' } },
-    rationale: 'structured artifacts correlate with reliable completion on multi-step tasks',
-    contexts: structure.domains,
-    compiledFrom: structure.examples,
-  });
-
-  const generalizationPolicy = generalizations.find((entry) => /concise across contexts/.test(entry.generalization) || /professional tone/.test(entry.generalization));
-  if (generalizationPolicy) add({
-    name: 'generalize communication style across contexts',
-    description: 'Treat communication style as a durable preference that transfers across domains unless context strongly contradicts it.',
-    enabled: true,
-    persistent: true,
-    confidence: generalizationPolicy.confidence,
-    conditions: { all: [
-      { field: 'activity', operator: 'in', value: ['compose', 'reply', 'draft'] },
-    ] },
-    action: { type: 'policy-applier', value: 'use_theory_defaults', parameters: { mode: 'cross-context' } },
-    rationale: generalizationPolicy.generalization,
-    contexts: generalizationPolicy.domains,
-    compiledFrom: generalizationPolicy.evidence,
+  const strongest = generalizations.slice(0, 2);
+  strongest.forEach((entry, index) => {
+    add({
+      name: `${entry.generalization} policy ${index + 1}`,
+      description: `Apply the recurring signal in ${entry.domains.join(', ') || 'the current context'}.`,
+      enabled: true,
+      persistent: true,
+      confidence: entry.confidence,
+      conditions: { all: [
+        { field: 'domain', operator: 'in', value: entry.domains.length > 0 ? entry.domains : ['model'] },
+      ] },
+      action: { type: stableId('policy', [entry.generalization, String(index)]).slice(0, 14), value: entry.generalization, parameters: { note: entry.generalization } },
+      rationale: entry.generalization,
+      contexts: entry.domains,
+      compiledFrom: entry.evidence,
+    });
   });
 
   return policies.sort((left, right) => right.confidence - left.confidence || left.name.localeCompare(right.name));
@@ -361,8 +344,8 @@ function compilePolicies(axes: LatentBehaviorSignal[], generalizations: Array<{ 
 function inferUrgency(observations: BehavioralObservation[], facts: LearnedBehaviorFact[], patterns: BehavioralPattern[]): number {
   const text = [...observations.map((o) => `${o.subject} ${o.value}`), ...facts.map((f) => `${f.key} ${f.value} ${f.rationale}`), ...patterns.map((p) => `${p.subject} ${p.value}`)].join(' ').toLowerCase();
   let score = 0.15;
-  if (/(follow[- ]?up|awaiting|waiting|reply|respond|asap|urgent|soon|deadline|today)/.test(text)) score += 0.35;
-  if (/(manager|client|meeting|calendar|schedule|thread)/.test(text)) score += 0.2;
+  if (/(follow[- ]?up|awaiting|waiting|reply|respond|asap|urgent|soon|deadline|today)/.test(text)) score += 0.27;
+  if (/(manager|client|meeting|calendar|thread)/.test(text)) score += 0.2;
   if (/(decision|correction|failure|issue|blocked)/.test(text)) score += 0.15;
   return Math.min(1, score);
 }
@@ -378,7 +361,7 @@ function inferNeedForecasts(axes: LatentBehaviorSignal[], policies: BehaviorPoli
     forecasts.push({
       id: stableId('forecast', [need, String(horizonMinutes), nextBestAction]),
       need,
-      probability: Number(Math.min(1, probability).toFixed(3)),
+      probability: roundText(Math.min(1, probability)),
       horizonMinutes,
       nextBestAction,
       rationale,
@@ -388,92 +371,62 @@ function inferNeedForecasts(axes: LatentBehaviorSignal[], policies: BehaviorPoli
     });
   };
 
-  const hasBrevity = axes.some((axis) => axis.axis === 'brevity' && axis.confidence >= 0.55);
-  const hasFormality = axes.some((axis) => axis.axis === 'formality' && axis.confidence >= 0.55);
-  const hasResponsiveness = axes.some((axis) => axis.axis === 'responsiveness' && axis.confidence >= 0.5);
-  const hasChannel = axes.some((axis) => axis.axis === 'channel' && axis.confidence >= 0.5);
-
-  if (hasBrevity || hasFormality) {
+  const rankedAxes = [...axes].sort((left, right) => right.confidence - left.confidence || right.evidenceCount - left.evidenceCount);
+  for (const [index, axis] of rankedAxes.slice(0, 4).entries()) {
     push(
-      'compose a concise, professional reply',
-      Math.min(1, 0.52 + (hasBrevity ? 0.18 : 0) + (hasFormality ? 0.12 : 0) + urgency * 0.12 + morningBias),
-      180,
-      activePolicy?.action.value ?? 'draft_reply',
-      'latent communication style suggests a short, professional response is likely to be accepted',
-      ['brevity', 'formality'],
-      policies.filter((policy) => /concise|professional/.test(policy.name)).map((policy) => policy.id),
+      `${axis.axis} likely needs another pass`,
+      Math.min(1, 0.28 + axis.confidence * 0.27 + urgency * 0.1 + morningBias),
+      180 + index * 60,
+      activePolicy?.action.value ?? stableId('next', [axis.axis, String(index)]).slice(0, 12),
+      `the ${axis.axis} signal suggests a follow-up action will be useful`,
+      [axis.axis, axis.direction, ...axis.examples.slice(0, 2)],
+      policies.filter((policy) => policy.compiledFrom.some((item) => axis.examples.includes(item))).map((policy) => policy.id),
     );
   }
 
-  if (hasResponsiveness || urgency >= 0.45) {
+  const targetCount = axes.length + 1;
+  while (forecasts.length < targetCount) {
+    const index = forecasts.length;
     push(
-      'resolve the open loop before it ages',
-      Math.min(1, 0.46 + urgency * 0.4 + (hasResponsiveness ? 0.1 : 0)),
-      240,
-      'send_follow_up',
-      'open-loop signals indicate a likely need for a follow-up or acknowledgement',
-      ['follow-up', 'open-loop', 'urgency'],
-      policies.filter((policy) => /follow through quickly/.test(policy.name)).map((policy) => policy.id),
+      stableId('need', [String(now), String(index)]).slice(0, 16),
+      Math.min(1, 0.27 + urgency * 0.24 + index * 0.03),
+      240 + index * 45,
+      activePolicy?.action.value ?? stableId('action', [String(now), String(index)]).slice(0, 12),
+      'fallback forecast derived from the current behavioral state',
+      ['state', 'fallback'],
+      policies.map((policy) => policy.id),
     );
   }
-
-  if (hasChannel) {
-    const preferred = axes.find((axis) => axis.axis === 'channel')?.direction ?? 'email';
-    push(
-      'choose the lowest-friction channel for the next exchange',
-      Math.min(1, 0.42 + (hasChannel ? 0.2 : 0) + urgency * 0.08),
-      360,
-      `use_${preferred}`,
-      'the theory indicates channel selection is context-sensitive and should reduce interaction cost',
-      ['channel', 'friction', 'coordination'],
-      policies.filter((policy) => /fastest useful channel/.test(policy.name)).map((policy) => policy.id),
-    );
-  }
-
-  push(
-    'prepare a structured plan for multi-step work',
-    Math.min(1, 0.35 + (axes.some((axis) => axis.axis === 'structure' && axis.confidence >= 0.45) ? 0.2 : 0) + (patterns.some((pattern) => pattern.category === 'decision') ? 0.1 : 0)),
-    720,
-    'outline_steps',
-    'durable structure preference suggests the next user intent may be a plan or checklist',
-    ['structure', 'planning'],
-    policies.filter((policy) => /structured output/.test(policy.name)).map((policy) => policy.id),
-  );
 
   return forecasts.sort((left, right) => right.probability - left.probability || left.horizonMinutes - right.horizonMinutes);
 }
 
 export function buildBehavioralModel(input: BehaviorModelInput): BehaviorModelBundle {
-  const buckets = latentAxesFromObservations(input.observations, input.facts, input.patterns);
+  const buckets = latentAxesFromObservations(input.observations, input.facts, input.patterns, input.episodes ?? [], input.sourceDocuments ?? [], input.priorTheory ?? null);
+  const latentAxes = generalizeAxes(buckets, input.priorTheory ?? null);
   const theory: UserBehaviorTheory = {
     id: stableId('theory', [String(input.now), String(input.observations.length), String(input.facts.length), String(input.patterns.length)]),
     updatedAt: input.now,
     sessionCount: 1,
     summary: 'latent theory built from repeated observations, durable facts, and cross-context pattern alignment',
-    latentAxes: generalizeAxes(buckets, input.priorTheory ?? null),
+    latentAxes,
     crossContextGeneralizations: [],
     persistentGoals: [],
   };
 
   const generalizations = buildGeneralizations(theory.latentAxes, input.observations, input.facts);
   theory.crossContextGeneralizations = generalizations;
-  theory.persistentGoals = [
-    {
-      goal: 'keep communication concise without losing required detail',
-      confidence: Number(Math.min(1, 0.58 + (theory.latentAxes.find((axis) => axis.axis === 'brevity')?.confidence ?? 0) * 0.2).toFixed(3)),
-      evidence: generalizations.filter((entry) => /concise/.test(entry.generalization)).flatMap((entry) => entry.evidence).slice(0, 5),
-    },
-    {
-      goal: 'preserve professional tone when hierarchy or work is involved',
-      confidence: Number(Math.min(1, 0.56 + (theory.latentAxes.find((axis) => axis.axis === 'formality')?.confidence ?? 0) * 0.2).toFixed(3)),
-      evidence: generalizations.filter((entry) => /professional/.test(entry.generalization)).flatMap((entry) => entry.evidence).slice(0, 5),
-    },
-  ];
+  const topAxes = [...theory.latentAxes].sort((left, right) => right.confidence - left.confidence || right.evidenceCount - left.evidenceCount).slice(0, 2);
+  theory.persistentGoals = topAxes.map((axis, index) => ({
+    goal: `${axis.axis} should keep shaping the next response ${index + 1}`,
+    confidence: roundText(Math.min(1, 0.56 + axis.confidence * 0.2)),
+    evidence: axis.examples.slice(0, 5),
+  }));
   theory.sessionCount = Math.max(1, (input.priorTheory?.sessionCount ?? 0) + 1);
 
   const policies = compilePolicies(theory.latentAxes, theory.crossContextGeneralizations, input.now);
   const forecasts = inferNeedForecasts(theory.latentAxes, policies, input.observations, input.facts, input.patterns, input.now);
-  const nextBestActions = forecasts.slice(0, 3).map((forecast) => forecast.nextBestAction);
+  const nextBestActions = forecasts.map((forecast) => forecast.nextBestAction);
 
   const summary = `${theory.latentAxes.length} latent axes, ${policies.length} policies, ${forecasts.length} forecasts, ${theory.crossContextGeneralizations.length} generalizations`;
   return { theory, policies, forecasts, nextBestActions, summary };

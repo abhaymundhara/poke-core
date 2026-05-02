@@ -165,7 +165,8 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
   const entropy = [localeHint, timeZone, cwd, argv, env, String(process.pid), String(process.ppid)];
   const categorySeed = token(localeHint, timeZone, String(now), '0');
   const sourceSeed = token(localeHint, timeZone, String(now), '1');
-  return Array.from({ length: 6 }, (_, index) => {
+  const observationCount = Number.parseInt(token(localeHint, timeZone, String(now), 'observations').slice(0, 2), 16) % Math.max(1, entropy.length) || entropy.length;
+  return Array.from({ length: observationCount }, (_, index) => {
     const categoryBand = token(categorySeed, localeHint).length || entropy.length;
     const category = token(categorySeed, String(index % categoryBand));
     const sourceBand = token(sourceSeed, timeZone).length || entropy.length;
@@ -245,9 +246,10 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
 }
 function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Attendee[] {
   const seed = `${localeHint}|${timeZone}|${roleName}`;
-  return [0, 1, 2].map((index) => ({
-    email: `${token(seed, String(index), localeHint)}@${token(seed, localeHint, String(index))}.local`,
-    name: phraseFromTheory(theory, seed, token(seed, localeHint, String(index)), index),
+  const attendeeSeeds = [seed.slice(0, 4), seed.slice(4, 8), seed.slice(8, 12)];
+  return attendeeSeeds.map((fragment, index) => ({
+    email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
+    name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
     locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
     timezone: timeZone,
   }));
