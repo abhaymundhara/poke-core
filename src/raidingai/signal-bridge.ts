@@ -418,7 +418,7 @@ function* buildRuntimeObservations(now: number, localeHint: string, timeZone: st
     const valueWords = words(valueSeed);
     const fragmentWords = words(fragment);
     const lineageWords = words(lineage);
-    yield {
+    const observation = {
       subject: cleanText(`${fragmentWords[0] ?? fragment} ${lineageWords[0] ?? subjectSeed}`),
       value: cleanText([fragmentWords.slice(1).join(' '), lineageWords.slice(1).join(' '), subjectWords[0] ?? subjectSeed, valueWords[0] ?? valueSeed].filter(Boolean).join(' ')),
       category: token(localeHint, timeZone, fragment, lineage) as BehavioralObservation['category'],
@@ -431,6 +431,7 @@ function* buildRuntimeObservations(now: number, localeHint: string, timeZone: st
         [token(fragment, lineage, 'value')]: cleanText(`${lineage} ${process.cwd()}`),
       },
     };
+    yield* emitSingleton(observation);
   }
   yield* buildRuntimeObservations(now, localeHint, timeZone, index + 1);
 }
@@ -439,6 +440,11 @@ function collect<T>(iterable: Iterable<T>): T[] {
   const values: T[] = [];
   for (const value of iterable) values.push(value);
   return values;
+}
+
+
+function* emitSingleton<T>(value: T): Generator<T, void, void> {
+  yield value;
 }
 
 function nodeSeed(fragment: string, lineage: string): string {
@@ -451,13 +457,14 @@ function* buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: 
   const fragment = cleanText(source);
   if (fragment) {
     const lineage = token(theory.summary, localeHint, timeZone, fragment, String(index));
-    yield {
+    const memoryFact = {
       key: token(fragment, lineage, theory.summary),
       value: phraseFromTheory(theory, localeHint, fragment, index),
       confidence: hashFraction(fragment, lineage, theory.summary, localeHint, timeZone),
       source: token(localeHint, timeZone, lineage, fragment),
       updatedAt: now - hashMagnitude(fragment, lineage, theory.summary),
     };
+    yield* emitSingleton(memoryFact);
   }
   yield* buildMemoryFacts(theory, now, localeHint, timeZone, index + 1);
 }
@@ -468,7 +475,7 @@ function* buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: str
   const fragment = cleanText(source);
   if (fragment) {
     const lineage = token(theory.summary, localeHint, String(now), fragment, String(index));
-    yield {
+    const episode = {
       id: token(fragment, lineage, theory.summary),
       taskId: token(localeHint, fragment, lineage, String(index)),
       category: token(fragment, localeHint, lineage),
@@ -477,6 +484,7 @@ function* buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: str
       score: hashFraction(fragment, lineage, theory.summary, localeHint),
       createdAt: now - hashMagnitude(fragment, lineage, localeHint),
     };
+    yield* emitSingleton(episode);
   }
   yield* buildEpisodes(theory, now, localeHint, index + 1);
 }
@@ -509,7 +517,7 @@ function* buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: str
   if (fragment) {
     const lineage = token(theory.summary, localeHint, String(now), fragment, String(index));
     const frameSeed = token(theory.summary, localeHint, fragment, lineage);
-    yield {
+    const uiFrame = {
       id: token(frameSeed, lineage, fragment),
       ocr: phraseFromTheory(theory, frameSeed, localeHint, index),
       dom: JSON.stringify({
@@ -525,6 +533,7 @@ function* buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: str
         height: hashMagnitude(lineage, frameSeed, fragment),
       },
     };
+    yield* emitSingleton(uiFrame);
   }
   yield* buildUiFrames(theory, now, localeHint, index + 1);
 }
@@ -536,13 +545,14 @@ function* buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZon
   if (fragment) {
     const seed = `${localeHint}|${timeZone}|${roleName}`;
     const lineage = token(seed, theory.summary, fragment, String(index));
-    yield {
+    const attendee = {
       email: `${token(seed, fragment, lineage)}@${token(localeHint, lineage, fragment)}.local`,
       name: phraseFromTheory(theory, seed, fragment, index),
       locale: splitLocale(localeHint)[0] ?? localeHint,
       timezone: timeZone,
       role: cleanText(`${words(fragment)[0] ?? roleName} ${words(lineage)[0] ?? ''}`) || roleName,
     };
+    yield* emitSingleton(attendee);
   }
   yield* buildAttendees(theory, localeHint, timeZone, roleName, index + 1);
 }
