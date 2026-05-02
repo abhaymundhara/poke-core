@@ -149,10 +149,8 @@ export class PokeCoreOrchestrator {
     const candidates = this.skills.filter((candidate) => candidate.canHandle(step));
     if (candidates.length === 0) throw new Error('no skill adapter can handle step ' + step.id + ' (' + step.kind + ')');
     const evaluation = await this.evaluateSkillAdapterAffordance(candidates, step, plan, state);
-    const selected = candidates.find((candidate) => candidate.descriptor.name === evaluation.selectedAdapterName)
-      ?? candidates.find((candidate) => evaluation.rankedAdapters[0] && candidate.descriptor.name === evaluation.rankedAdapters[0].name)
-      ?? candidates[0];
-    if (!selected) throw new Error('no skill adapter selected for step ' + step.id);
+    const selected = candidates.find((candidate) => candidate.descriptor.name === evaluation.selectedAdapterName);
+    if (!selected) throw new Error('invalid-affordance-evaluation:' + provider.name);
     return selected;
   }
 

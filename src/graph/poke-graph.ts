@@ -148,7 +148,7 @@ export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; e
           ...state,
           eventJournal: normalizeJournal(state),
           recoveryPolicy: synthesis.recoveryPolicy,
-          recoverySignals: synthesis.recoverySignals.length > 0 ? synthesis.recoverySignals : synthesis.recoveryPolicy.recoveryNotes,
+          recoverySignals: synthesis.recoverySignals,
           latentGoals: synthesis.latentGoals,
           executionProfile: synthesis.executionProfile,
           artifacts: {

@@ -265,7 +265,8 @@ function buildPlannerDraft(input: TaskInput, intent: SearchIntent, context: Plan
   const request = { objective: input.objective, context: promptContext, schema: PLANNER_SYNTHESIS_SCHEMA };
   return provider.extract(request).then((raw) => {
     if (!isRecord(raw)) throw new Error('invalid-planner-draft:' + provider.name);
-    const strategy = typeof raw.strategy === 'string' ? raw.strategy as PlannerStrategy : intent.focus === 'trust' ? 'trust-first' : 'blend';
+    if (typeof raw.strategy !== 'string') throw new Error('invalid-planner-draft:' + provider.name);
+    const strategy = raw.strategy as PlannerStrategy;
     const toolAffordances = Array.isArray(raw.toolAffordances) ? raw.toolAffordances.map((entry) => normalizeAffordance(entry, provider.name)) : null;
     const recoveryPolicy = raw.recoveryPolicy ? normalizeRecoveryPolicy(raw.recoveryPolicy, provider.name) : null;
     const planner = raw.planner ? normalizePlannerMetadata(raw.planner, provider.name, intent) : null;
