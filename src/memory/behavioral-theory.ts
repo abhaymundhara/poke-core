@@ -148,16 +148,7 @@ function corpusTokens(observations: BehavioralObservation[], facts: LearnedBehav
 
 function axisCatalog(input: BehaviorModelInput): string[] {
   const tokens = corpusTokens(input.observations, input.facts, input.patterns, input.episodes ?? [], input.sourceDocuments ?? [], input.priorTheory ?? null);
-  const labels: string[] = [];
-  for (const token of tokens) {
-    if (labels.length >= 9) break;
-    const label = `${token}-${stableId('axis', [String(input.now), token, String(labels.length)]).slice(0, 8)}`;
-    if (!labels.includes(label)) labels.push(label);
-  }
-  while (labels.length < 9) {
-    labels.push(stableId('axis', [String(input.now), String(input.observations.length), String(labels.length)]).slice(0, 12));
-  }
-  return labels;
+  return tokens.map((token, index) => token + '-' + stableId('axis', [String(input.now), token, String(index)]).slice(0, 8));
 }
 
 function registerBucket(buckets: Map<string, EvidenceBucket>, axis: string, direction: string, domain: string, source: string, evidenceCount = 1, observationId = ''): void {
@@ -188,14 +179,14 @@ function axisKey(seed: string, axisNames: string[]): string {
 function latentAxesFromObservations(observations: BehavioralObservation[], facts: LearnedBehaviorFact[], patterns: BehavioralPattern[], episodes: EpisodicMemoryItem[], sourceDocuments: MemoryDocument[], priorTheory: UserBehaviorTheory | null | undefined): Map<string, EvidenceBucket> {
   const axisNames = axisCatalog({ now: Date.now(), observations, facts, patterns, episodes, sourceDocuments, priorTheory });
   const buckets = new Map<string, EvidenceBucket>();
-  const axisCount = axisNames.length || 1;
+  const axisCount = axisNames.length;
   const register = (text: string, domain: string, source: string, evidenceCount: number, observationId: string) => {
     const seed = stableId('link', [text, domain, source, observationId, String(evidenceCount)]);
-    const primary = axisNames[Number.parseInt(seed.slice(0, 2), 16) % axisCount] ?? axisNames[0] ?? seed.slice(0, 12);
-    const secondary = axisNames[Number.parseInt(seed.slice(2, 4), 16) % axisCount] ?? primary;
+    const primary = axisNames[Number.parseInt(seed.slice(0, 2), 16) % axisCount];
+    const secondary = axisNames[Number.parseInt(seed.slice(2, 4), 16) % axisCount];
     const direction = seed.slice(4, 12);
     registerBucket(buckets, primary, direction, domain, source, evidenceCount, observationId);
-    if (secondary !== primary) registerBucket(buckets, secondary, seed.slice(12, 20), domain, source, Math.max(1, Math.ceil(evidenceCount / 2)), observationId ? `${observationId}:alt` : '');
+    registerBucket(buckets, secondary, seed.slice(12, 20), domain, source, Math.max(1, Math.ceil(evidenceCount / 2)), observationId + ':alt');
   };
 
   observations.forEach((observation, index) => {
@@ -230,7 +221,7 @@ function latentAxesFromObservations(observations: BehavioralObservation[], facts
   });
 
   axisNames.slice(0, 2).forEach((axis, index) => {
-    if (!buckets.has(axis)) registerBucket(buckets, axis, stableId('seed', [axis, String(index)]).slice(0, 8), 'model', 'seed', 1);
+    registerBucket(buckets, axis, stableId('seed', [axis, String(index)]).slice(0, 8), 'model', 'seed', 1);
   });
 
   return buckets;
@@ -241,7 +232,7 @@ function generalizeAxes(buckets: Map<string, EvidenceBucket>, priorTheory: UserB
   const axes: LatentBehaviorSignal[] = [];
   for (const [axis, bucket] of buckets.entries()) {
     const ranked = [...bucket.directionScores.entries()].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]));
-    const [direction, score] = ranked[0] ?? [stableId('direction', [axis]).slice(0, 8), 0];
+    const [direction, score] = ranked[0];
     const priorSignal = prior.get(axis);
     const sourceCount = bucket.sources.size;
     const domainCount = bucket.domains.size;
