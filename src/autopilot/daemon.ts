@@ -64,7 +64,6 @@ type RuntimeObserver = {
 
 type RuntimeObserverCtor = new (callback: (list: { getEntries(): unknown[] }) => void) => RuntimeObserver;
 
-type RuntimeManifest = Record<string, string>;
 
 function* manifestFlux(model: BehaviorModelBundle): Generator<string> {
   const fluxSeed = token(model.theory.summary, model.summary, String(model.theory.sessionCount), String(model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length + model.theory.persistentGoals.length));
