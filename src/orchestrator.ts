@@ -9,17 +9,9 @@ import type { PokeCoreStore } from './store';
 import type { SkillAdapter } from './skills/types';
 
 export type TaskExecutionResult = {
-  ok: boolean;
-  taskId: string;
-  status: TaskStatus;
-  plan: TaskPlan;
-  state: RuntimeState;
-  error?: string;
-};
-
-type OrchestrationDirective = {
   ok?: boolean;
   status?: TaskStatus;
+  taskId: string;
   plan?: TaskPlan;
   state?: RuntimeState;
   error?: string | null;
@@ -27,6 +19,8 @@ type OrchestrationDirective = {
   rationale?: string[];
   executionProfile?: ExecutionProfile;
 };
+
+type OrchestrationDirective = TaskExecutionResult;
 
 const ORCHESTRATION_SCHEMA = {
   type: 'object',
@@ -95,24 +89,10 @@ export class PokeCoreOrchestrator {
   }
 
   async execute(input: TaskInput): Promise<TaskExecutionResult> {
-    const directive = await delegateOrchestration({
+    return await delegateOrchestration({
       taskInput: input,
       skills: this.skills,
       skillPlaybooks: this.skillPlaybooks,
     });
-
-    if (!directive.plan || !directive.state) {
-      throw new Error('orchestration-model-missing-plan-or-state');
-    }
-
-    const status = directive.status ?? (directive.ok === false ? 'failed' : 'completed');
-    return {
-      ok: directive.ok ?? status === 'completed',
-      taskId: input.id,
-      status,
-      plan: directive.plan,
-      state: directive.state,
-      error: directive.error ?? undefined,
-    };
   }
 }
