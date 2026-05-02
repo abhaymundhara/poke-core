@@ -1,5 +1,5 @@
 import type { IntentAmbiguity, SearchConstraint, SearchFocus, SearchFreshness, SearchIntent, SearchSource, SemanticFrame, SourcePrior, TrustMode } from './types.ts';
-import { normalize, stableHash, uniq, words, clamp } from './utils.ts';
+import { clamp, normalize, stableHash, uniq, words } from './utils.ts';
 
 export type SemanticNluOutput = {
   semanticQuery: string;
@@ -43,218 +43,199 @@ export const SEMANTIC_NLU_SCHEMA = {
   },
 };
 
+function bundle(objective: string, context: Record<string, unknown>): string {
+  const contextText = Object.entries(context)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`)
+    .join('\n');
+  return [objective.trim(), contextText].filter(Boolean).join('\n');
+}
+
+function tokensFrom(objective: string, context: Record<string, unknown>): string[] {
+  return uniq([...words(objective), ...words(bundle('', context))]);
+}
+
 function extractEntities(text: string): string[] {
   const matches = text.match(/(?:[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+|[A-Z]{2,}(?:-[A-Z0-9]+)?|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|https?:\/\/\S+|\b[a-z0-9_.-]+\/[a-z0-9_.-]+\b)/gi) ?? [];
-  return uniq(matches.map((value) => value.replace(/[),.;]+$/g, ''))).slice(0, 12);
+  return uniq(matches.map((value) => value.replace(/[),.;]+$/g, ''))).slice(0, 16);
+}
+
+function extractTopics(text: string, entities: string[]): string[] {
+  const patterns = text.match(/\b(?:trust model|semantic decomposition|proposition reasoning|contradiction resolution|entailment|source reliability|freshness|budget|policy rewrite|forecast|intent|evidence|corroboration)\b/gi) ?? [];
+  const lexical = words(text).filter((word) => !entities.some((entity) => normalize(entity).includes(word)) && !/^(the|and|for|with|from|that|this|into|about|need|want|help|find|search|please|what|who|when|where|how|why)$/i.test(word));
+  return uniq([...patterns.map((value) => value.toLowerCase()), ...lexical]).slice(0, 16);
 }
 
 function detectFreshness(text: string): SearchFreshness {
-  if (/(live|latest|current|today|now|breaking|fresh|new|real[- ]?time)/i.test(text)) return 'live';
-  if (/(recent|update|trend|this week|this month|last \d+ days)/i.test(text)) return 'recent';
+  if (/(live|latest|current|today|now|breaking|fresh|new|real[- ]?time|as of|at present)/i.test(text)) return 'live';
+  if (/(recent|update|trend|this week|this month|last \d+ days|latest release|newly|recently)/i.test(text)) return 'recent';
   return 'historical';
 }
 
 function detectFocus(text: string): SearchFocus {
-  if (/(why|cause|root|diagnos|trace|debug|fix|failure|issue)/i.test(text)) return 'diagnostic';
-  if (/(trust|verify|reliable|official|source|citation|evidence|provenance)/i.test(text)) return 'trust';
-  if (/(multi-hop|chain|deep|fuse|combine|correlat|synthesize|contradict|conflict)/i.test(text)) return 'multi-hop';
-  if (/(discover|explore|brainstorm|survey)/i.test(text)) return 'exploratory';
-  if (/(what|who|where|when|how|definition|explain)/i.test(text)) return 'semantic';
+  if (/(why|cause|root|diagnos|debug|fix|failure|issue|bug|contradict|conflict|inconsisten)/i.test(text)) return 'diagnostic';
+  if (/(trust|verify|reliable|official|source|citation|evidence|provenance|corroborat|authentic)/i.test(text)) return 'trust';
+  if (/(multi-hop|chain|deep|fuse|combine|correlat|synthesize|entail|proof|proposition|logic)/i.test(text)) return 'multi-hop';
+  if (/(discover|explore|brainstorm|survey|map the space|scan the landscape)/i.test(text)) return 'exploratory';
+  if (/(what|who|where|when|how|definition|explain|summarize|compare)/i.test(text)) return 'semantic';
   return 'factual';
 }
 
-function detectSourceHints(text: string): SearchSource[] {
+function inferSourceHints(text: string): SearchSource[] {
   const lower = text.toLowerCase();
   const hints: SearchSource[] = [];
-  if (/(live|latest|current|breaking|now|today|real[- ]?time)/.test(lower)) hints.push('realtime-web');
-  if (/(github|repo|issue|pr|pull request|commit|code)/.test(lower)) hints.push('github');
-  if (/(paper|study|journal|citation|scholar|arxiv|doi)/.test(lower)) hints.push('scholar');
-  if (/(email|thread|inbox|message|reply)/.test(lower)) hints.push('email');
-  if (/(calendar|meeting|schedule|availability)/.test(lower)) hints.push('calendar');
-  if (/(file|filesystem|folder|directory|path|diff)/.test(lower)) hints.push('filesystem');
-  if (/(integration|notion|linear|todoist|slack|vercel)/.test(lower)) hints.push('integration');
-  if (/(memory|profile|preference|behavior|style)/.test(lower)) hints.push('memory');
+  if (/(live|latest|current|breaking|now|today|real[- ]?time|fresh)/.test(lower)) hints.push('realtime-web');
+  if (/(github|repo|issue|pr|pull request|commit|code|diff|branch)/.test(lower)) hints.push('github');
+  if (/(paper|study|journal|citation|scholar|arxiv|doi|research|experiment)/.test(lower)) hints.push('scholar');
+  if (/(email|thread|inbox|message|reply|conversation|cc|bcc)/.test(lower)) hints.push('email');
+  if (/(calendar|meeting|schedule|availability|event|slot)/.test(lower)) hints.push('calendar');
+  if (/(file|filesystem|folder|directory|path|diff|local)/.test(lower)) hints.push('filesystem');
+  if (/(integration|notion|linear|todoist|slack|vercel|api|webhook)/.test(lower)) hints.push('integration');
+  if (/(memory|profile|preference|behavior|style|history|session|trajectory)/.test(lower)) hints.push('memory');
   return uniq(hints.length ? hints : ['web']);
 }
 
-function detectConstraints(text: string): SearchConstraint[] {
+function buildConstraints(text: string): SearchConstraint[] {
   const constraints: SearchConstraint[] = [];
-  if (/(official|primary source|first[- ]party)/i.test(text)) constraints.push({ field: 'quality', operator: 'must', value: 'primary-or-official-source', confidence: 0.86 });
-  if (/(exclude|without|not from|avoid)/i.test(text)) constraints.push({ field: 'exclusion', operator: 'must-not', value: 'excluded-source-or-topic-mentioned', confidence: 0.62 });
-  if (/(today|latest|current|live|this week|last \d+ days)/i.test(text)) constraints.push({ field: 'time', operator: 'must', value: detectFreshness(text), confidence: 0.8 });
-  const domains = [...text.matchAll(/\bsite:([a-z0-9.-]+\.[a-z]{2,})/gi)].map((match) => match[1]);
-  for (const domain of domains) constraints.push({ field: 'domain', operator: 'must', value: domain, confidence: 0.9 });
+  if (/(official|primary source|first[- ]party|authoritative|original)/i.test(text)) constraints.push({ field: 'quality', operator: 'must', value: 'primary-or-official-source', confidence: 0.92 });
+  if (/(exclude|without|not from|avoid|do not use|no source)/i.test(text)) constraints.push({ field: 'exclusion', operator: 'must-not', value: 'explicitly-excluded-sources-or-topics', confidence: 0.74 });
+  if (/(today|latest|current|live|this week|last \d+ days|recent|now)/i.test(text)) constraints.push({ field: 'time', operator: 'must', value: detectFreshness(text), confidence: 0.9 });
+  if (/(private|confidential|internal|sensitive|personal data|pii)/i.test(text)) constraints.push({ field: 'privacy', operator: 'must', value: 'privacy-sensitive-search', confidence: 0.86 });
+  if (/(pdf|table|csv|json|api|documentation|docs|code|source)/i.test(text)) constraints.push({ field: 'format', operator: 'should', value: 'preferred-format-inferred-from-objective', confidence: 0.66 });
+  for (const domain of [...text.matchAll(/\bsite:([a-z0-9.-]+\.[a-z]{2,})/gi)].map((match) => match[1])) {
+    constraints.push({ field: 'domain', operator: 'must', value: domain, confidence: 0.97 });
+  }
   return constraints;
 }
 
-function buildSemanticQuery(text: string, entities: string[]): string {
-  const stop = /^(the|and|for|with|from|that|this|into|about|need|want|please|help|find|search)$/i;
-  const tokens = words(text).filter((value) => !stop.test(value));
-  return uniq([...entities.slice(0, 4), ...tokens.slice(0, 10)]).join(' ').trim() || text.trim();
+function inferHopBudget(objective: string, context: Record<string, unknown>, focus: SearchFocus): number {
+  const text = `${objective} ${JSON.stringify(context)}`;
+  const connectiveCount = Math.max(0, text.split(/\b(and|or|with|via|through|between|from|to|versus|vs|after|before)\b/i).length - 1);
+  const structureCount = Object.keys(context).length + (Array.isArray(context.sources) ? (context.sources as unknown[]).length : 0);
+  const focusBoost = focus === 'multi-hop' || focus === 'diagnostic' || focus === 'trust' ? 1 : 0;
+  return Math.max(1, Math.min(6, 1 + Math.min(4, Math.ceil(connectiveCount / 2) + Math.floor(structureCount / 4)) + focusBoost));
 }
 
-function hopBudgetFor(text: string, focus: SearchFocus): number {
-  const connectors = Math.max(0, text.split(/\b(and|or|with|via|through|between|from|to|versus|vs)\b/i).length - 1);
-  const base = 1 + Math.min(3, connectors);
-  if (focus === 'multi-hop' || focus === 'diagnostic' || focus === 'trust') return Math.max(base, 3);
-  return Math.min(4, base);
+function inferTrustMode(text: string): TrustMode {
+  if (/(official|verify|reliable|trust|citation|source|provenance|audit|proof)/i.test(text)) return 'official-first';
+  if (/(compare|mix|blend|diverse|cross-source|corroborat|independent)/i.test(text)) return 'diverse';
+  return 'broad';
 }
 
-function sourcePriorsFor(hints: SearchSource[], freshness: SearchFreshness, focus: SearchFocus): SourcePrior[] {
-  return uniq([...hints, 'web', 'scholar', 'github'] as SearchSource[]).map((source) => {
-    const weight = clamp(0.55 + (hints.includes(source) ? 0.25 : 0) + (source === 'realtime-web' && freshness === 'live' ? 0.18 : 0) + (source === 'scholar' && focus === 'trust' ? 0.14 : 0));
-    return { source, weight, reason: hints.includes(source) ? 'explicit-or-inferred-source-prior' : 'coverage-backstop' };
-  }).sort((left, right) => right.weight - left.weight);
+function inferSemanticQuery(objective: string, entities: string[], topics: string[]): string {
+  const terms = uniq([...entities.slice(0, 4), ...topics.slice(0, 6), ...tokensFrom(objective, {})]).filter((token) => token.length > 1);
+  return terms.join(' ').trim() || objective.trim();
 }
 
-function semanticFramesFor(objective: string, entities: string[], topics: string[], focus: SearchFocus): SemanticFrame[] {
-  const objectiveWords = words(objective);
-  const slots: Record<string, string[]> = {
-    entities: entities.slice(0, 8),
-    topics: topics.slice(0, 8),
-    actions: objectiveWords.filter((word) => /^(verify|compare|find|explain|diagnose|monitor|forecast|rewrite|prove|trace)$/.test(word)).slice(0, 6),
-  };
-  const primary = focus === 'diagnostic' ? 'causal-diagnosis' : focus === 'trust' ? 'evidence-verification' : focus === 'multi-hop' ? 'compositional-research' : 'information-seeking';
-  return [{ name: primary, description: `Semantic frame inferred for ${focus} search objective`, confidence: 0.58, slots }];
-}
-
-function decomposedQuestionsFor(objective: string, entities: string[], topics: string[], focus: SearchFocus): string[] {
+function inferQuestions(objective: string, entities: string[], topics: string[], focus: SearchFocus): string[] {
   const subject = entities[0] ?? topics[0] ?? objective;
   const questions = [`What evidence directly answers: ${objective}?`];
   if (focus === 'trust' || focus === 'multi-hop') questions.push(`Which independent sources corroborate ${subject}?`);
-  if (focus === 'diagnostic' || focus === 'multi-hop') questions.push(`What claims about ${subject} conflict or require reconciliation?`);
-  return questions.slice(0, 4);
+  if (focus === 'diagnostic' || focus === 'multi-hop') questions.push(`Which semantic claims about ${subject} are in tension and need reconciliation?`);
+  if (focus === 'exploratory') questions.push(`What adjacent angles or missing assumptions would narrow ${subject}?`);
+  return questions.slice(0, 6);
 }
 
-function ambiguitiesFor(objective: string, entities: string[], topics: string[]): IntentAmbiguity[] {
+function inferAmbiguities(objective: string, entities: string[], topics: string[]): IntentAmbiguity[] {
   if (entities.length > 0 || topics.length > 2) return [];
-  return [{ issue: 'underspecified-subject', candidates: [objective], resolutionHint: 'prefer broad exploratory retrieval until evidence narrows the subject', confidence: 0.52 }];
+  return [{ issue: 'underspecified-subject', candidates: [objective], resolutionHint: 'collect broader semantic evidence and disambiguate the target before narrowing', confidence: 0.58 }];
 }
 
-export function bootstrapSemanticNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
-  const normalizedObjective = objective.trim();
-  const combined = `${normalizedObjective} ${JSON.stringify(context)}`.trim();
-  const contextEntities = Array.isArray(context.entities) ? (context.entities as unknown[]).map(String) : [];
-  const entities = uniq([...extractEntities(combined), ...contextEntities]);
-  const freshness = detectFreshness(combined);
-  const focus = detectFocus(combined);
-  const sourceHints = detectSourceHints(combined);
-  const topics = uniq([
-    ...(combined.match(/\b(?:web search|live signals|search policy|source reliability|multi-hop|trustworthiness|semantic nlu|behavior|forecast|reasoning|policy engine)\b/gi) ?? []).map((value) => value.toLowerCase()),
-    ...words(combined).filter((word) => !entities.some((entity) => normalize(entity).includes(word))),
-  ].map((value) => value.replace(/\b(?:the|a|an|and|or|to|of|for|with|from)\b/g, '').trim())).slice(0, 10);
+function semanticFrameName(focus: SearchFocus): string {
+  switch (focus) {
+    case 'diagnostic': return 'causal-diagnosis';
+    case 'trust': return 'evidence-verification';
+    case 'multi-hop': return 'compositional-research';
+    case 'exploratory': return 'exploratory-sensemaking';
+    case 'semantic': return 'semantic-retrieval';
+    default: return 'information-seeking';
+  }
+}
+
+function inferSemanticFrames(objective: string, entities: string[], topics: string[], focus: SearchFocus): SemanticFrame[] {
+  const actionSlots = words(objective).filter((word) => /^(verify|compare|find|explain|diagnose|monitor|forecast|rewrite|prove|trace|resolve|synthesize)$/i.test(word)).slice(0, 6);
+  return [{
+    name: semanticFrameName(focus),
+    description: `Deep semantic frame inferred for ${focus} search objective`,
+    confidence: clamp(0.68 + (focus === 'multi-hop' || focus === 'trust' || focus === 'diagnostic' ? 0.12 : 0)),
+    slots: { entities: entities.slice(0, 8), topics: topics.slice(0, 8), actions: actionSlots },
+  }];
+}
+
+function inferSourcePriors(hints: SearchSource[], freshness: SearchFreshness, focus: SearchFocus, objective: string): SourcePrior[] {
+  const seed = uniq([...hints, 'web', 'scholar', 'github'] as SearchSource[]);
+  return seed.map((source) => {
+    const base = hints.includes(source) ? 0.7 : 0.46;
+    const freshnessBoost = source === 'realtime-web' && freshness === 'live' ? 0.18 : source === 'web' && freshness === 'recent' ? 0.05 : 0;
+    const focusBoost = source === 'scholar' && focus === 'trust' ? 0.16 : source === 'github' && /code|repo|commit|issue|pull request/i.test(objective) ? 0.1 : 0;
+    return { source, weight: clamp(base + freshnessBoost + focusBoost), reason: hints.includes(source) ? 'semantic-source-prior' : 'coverage-backstop' };
+  }).sort((left, right) => right.weight - left.weight);
+}
+
+function estimateConfidence(objective: string, context: Record<string, unknown>, entities: string[], topics: string[], constraints: SearchConstraint[], sourcePriors: SourcePrior[]): number {
+  const structure = clamp(0.44 + Math.min(0.22, entities.length * 0.04) + Math.min(0.15, topics.length * 0.02) + Math.min(0.12, constraints.length * 0.03) + Math.min(0.12, sourcePriors.length * 0.015));
+  const contextClarity = Object.keys(context).length > 0 ? 0.08 : 0;
+  const lexicalCoverage = Math.min(0.18, uniq(words(bundle(objective, context))).length / 120);
+  return clamp(structure + contextClarity + lexicalCoverage);
+}
+
+function deepSemanticExtraction(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
+  const text = bundle(objective, context);
+  const entities = uniq([...extractEntities(text), ...(Array.isArray(context.entities) ? (context.entities as unknown[]).map(String) : [])]).slice(0, 16);
+  const freshness = detectFreshness(text);
+  const focus = detectFocus(text);
+  const sourceHints = inferSourceHints(text);
+  const topics = extractTopics(text, entities);
+  const constraints = buildConstraints(text);
+  const sourcePriors = inferSourcePriors(sourceHints, freshness, focus, objective);
+  const semanticFrames = inferSemanticFrames(objective, entities, topics, focus);
+  const decomposedQuestions = inferQuestions(objective, entities, topics, focus);
+  const ambiguities = inferAmbiguities(objective, entities, topics);
   return {
-    semanticQuery: buildSemanticQuery(normalizedObjective, entities),
+    semanticQuery: inferSemanticQuery(objective, entities, topics),
     entities,
     topics,
-    constraints: detectConstraints(combined),
-    sourcePriors: sourcePriorsFor(sourceHints, freshness, focus),
-    semanticFrames: semanticFramesFor(normalizedObjective, entities, topics, focus),
-    decomposedQuestions: decomposedQuestionsFor(normalizedObjective, entities, topics, focus),
-    ambiguities: ambiguitiesFor(normalizedObjective, entities, topics),
+    constraints,
+    sourcePriors,
+    semanticFrames,
+    decomposedQuestions,
+    ambiguities,
     freshness,
     focus,
-    hopBudget: hopBudgetFor(combined, focus),
-    trustMode: /(official|verify|reliable|trust|citation|source|provenance)/i.test(combined) ? 'official-first' : /(compare|mix|blend|diverse|cross-source|corroborat)/i.test(combined) ? 'diverse' : 'broad',
-    confidence: 0.62,
-    warnings: ['semantic-bootstrap'],
+    hopBudget: inferHopBudget(objective, context, focus),
+    trustMode: inferTrustMode(text),
+    confidence: estimateConfidence(objective, context, entities, topics, constraints, sourcePriors),
+    warnings: [],
   };
 }
-
 
 function uniqueFrames(frames: SemanticFrame[]): SemanticFrame[] {
   const seen = new Set<string>();
   const out: SemanticFrame[] = [];
   for (const frame of frames) {
-    if (!seen.has(frame.name)) {
-      seen.add(frame.name);
-      out.push(frame);
-    }
+    if (seen.has(frame.name)) continue;
+    seen.add(frame.name);
+    out.push(frame);
   }
   return out;
 }
 
-function semanticBootstrapNlu(objective: string, context: Record<string, unknown> = {}): SemanticNluOutput {
-  const base = bootstrapSemanticNlu(objective, context);
-  const emphasis = (base.semanticQuery + ' ' + base.topics.join(' ') + ' ' + JSON.stringify(context)).toLowerCase();
-  const extraFrames: SemanticFrame[] = [];
-  if (/(forecast|predict|next|future|anticipat)/i.test(emphasis)) {
-    extraFrames.push({
-      name: 'generative-forecast',
-      description: 'Model the next likely user intent and follow-up evidence flow',
-      confidence: 0.82,
-      slots: {
-        topics: uniq([...base.topics.slice(0, 4), 'forecast']),
-        entities: base.entities.slice(0, 4),
-        actions: ['forecast', 'simulate', 'anticipate'],
-      },
-    });
-  }
-  if (/(trust|verify|reliable|official|source|provenance|evidence)/i.test(emphasis)) {
-    extraFrames.push({
-      name: 'epistemic-verification',
-      description: 'Prioritize source reliability, corroboration, and provenance',
-      confidence: 0.86,
-      slots: {
-        topics: uniq(['trust', ...base.topics.slice(0, 4)]),
-        entities: base.entities.slice(0, 4),
-        actions: ['verify', 'corroborate', 'calibrate'],
-      },
-    });
-  }
-  if (/(claim|proposition|contradict|entail|reason|inference|proof)/i.test(emphasis)) {
-    extraFrames.push({
-      name: 'proposition-graph',
-      description: 'Lift text into propositions and reason over entailment and contradiction',
-      confidence: 0.84,
-      slots: {
-        topics: uniq(['proposition', ...base.topics.slice(0, 4)]),
-        entities: base.entities.slice(0, 4),
-        actions: ['infer', 'entail', 'rebut'],
-      },
-    });
-  }
-  if (/(policy|rewrite|architecture|self-modif|adapt)/i.test(emphasis)) {
-    extraFrames.push({
-      name: 'policy-adaptation',
-      description: 'Forecast policy and architecture changes from observed feedback',
-      confidence: 0.8,
-      slots: {
-        topics: uniq(['policy', 'architecture', ...base.topics.slice(0, 3)]),
-        entities: base.entities.slice(0, 4),
-        actions: ['rewrite', 'adapt', 'reconfigure'],
-      },
-    });
-  }
-  const semanticFrames = uniqueFrames([...base.semanticFrames, ...extraFrames]);
-  const decomposedQuestions = uniq([
-    ...base.decomposedQuestions,
-    ...extraFrames.map((frame) => 'How does ' + frame.name + ' change the answer to: ' + objective + '?'),
-  ]).slice(0, 8);
-  const ambiguities = base.ambiguities.length > 0 ? base.ambiguities : [{
-    issue: 'llm-default-semantic-coverage',
-    candidates: base.topics.slice(0, 3),
-    resolutionHint: 'expand the semantic frame and collect corroborating evidence before narrowing',
-    confidence: 0.68,
-  }];
+function normalizeSemanticOutput(output: SemanticNluOutput): SemanticNluOutput {
   return {
-    ...base,
-    semanticFrames,
-    decomposedQuestions,
-    ambiguities,
-    confidence: clamp(base.confidence + 0.18),
-    warnings: uniq([...(base.warnings ?? []), 'llm-default-semantic']),
+    ...output,
+    semanticQuery: output.semanticQuery.trim(),
+    entities: uniq(output.entities).slice(0, 20),
+    topics: uniq(output.topics).slice(0, 20),
+    constraints: output.constraints.slice(0, 20),
+    sourcePriors: output.sourcePriors.slice(0, 20),
+    semanticFrames: uniqueFrames(output.semanticFrames).slice(0, 8),
+    decomposedQuestions: uniq(output.decomposedQuestions).slice(0, 8),
+    ambiguities: output.ambiguities.slice(0, 8),
+    hopBudget: Math.max(1, Math.min(6, Math.round(output.hopBudget))),
+    confidence: clamp(output.confidence),
+    warnings: uniq(output.warnings ?? []),
   };
 }
-
-export const DEFAULT_LLM_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
-  name: 'llm-backed-semantic-default',
-  async extract({ objective, context }) {
-    return semanticBootstrapNlu(objective, context);
-  },
-};
-
-export const DEFAULT_SEMANTIC_NLU_PROVIDER = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
 
 function finiteNumber(value: unknown): number | null {
   const number = Number(value);
@@ -264,13 +245,12 @@ function finiteNumber(value: unknown): number | null {
 function asConstraint(value: unknown): SearchConstraint | null {
   if (!value || typeof value !== 'object') return null;
   const record = value as Record<string, unknown>;
-  const field = record.field;
-  const operator = record.operator;
   const confidence = finiteNumber(record.confidence);
-  if (field !== 'time' && field !== 'source' && field !== 'domain' && field !== 'format' && field !== 'exclusion' && field !== 'quality' && field !== 'privacy') return null;
-  if (operator !== 'must' && operator !== 'should' && operator !== 'must-not') return null;
-  if (typeof record.value !== 'string' || confidence === null) return null;
-  return { field, operator, value: record.value, confidence: clamp(confidence) };
+  if (confidence === null) return null;
+  if (record.field !== 'time' && record.field !== 'source' && record.field !== 'domain' && record.field !== 'format' && record.field !== 'exclusion' && record.field !== 'quality' && record.field !== 'privacy') return null;
+  if (record.operator !== 'must' && record.operator !== 'should' && record.operator !== 'must-not') return null;
+  if (typeof record.value !== 'string') return null;
+  return { field: record.field, operator: record.operator, value: record.value, confidence: clamp(confidence) };
 }
 
 function asSourcePrior(value: unknown): SourcePrior | null {
@@ -353,7 +333,7 @@ export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, pr
     topics: nlu.topics,
     constraints: nlu.constraints,
     sourceHints: sourceHints.length ? sourceHints : ['web'],
-    sourcePriors: nlu.sourcePriors.length ? nlu.sourcePriors : sourcePriorsFor(['web'], nlu.freshness, nlu.focus),
+    sourcePriors: nlu.sourcePriors.length ? nlu.sourcePriors : inferSourcePriors(['web'], nlu.freshness, nlu.focus, normalizedObjective),
     freshness: nlu.freshness,
     focus: nlu.focus,
     hopBudget: nlu.hopBudget,
@@ -368,26 +348,24 @@ export function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, pr
   };
 }
 
-export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
-  return buildIntentFromNlu(objective, semanticBootstrapNlu(objective, context), DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
+export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
+  const activeProvider = provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
+  const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
+  if (!extracted) throw new Error(`invalid-semantic-nlu-output:${activeProvider.name}`);
+  return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, activeProvider.name !== DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name && !strict);
 }
 
-export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
-  const fallback = semanticBootstrapNlu(objective, context);
-  if (!provider) {
-    if (strict) throw new Error('strict-semantic-nlu-provider-missing');
-    return buildIntentFromNlu(objective, fallback, DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
-  }
-  try {
-    const extracted = asNluOutput(await provider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
-    if (!extracted) {
-      if (strict) throw new Error('strict-semantic-nlu-invalid-output');
-      return buildIntentFromNlu(objective, { ...fallback, warnings: ['invalid-llm-structured-output'] }, provider.name, true);
-    }
-    const merged = { ...fallback, ...extracted, warnings: uniq([...(extracted.warnings ?? []), ...(extracted.confidence < 0.45 ? ['low-llm-confidence'] : [])]) };
-    return buildIntentFromNlu(objective, merged, provider.name, false);
-  } catch (error) {
-    if (strict) throw error;
-    return buildIntentFromNlu(objective, { ...fallback, warnings: ['llm-nlu-error:' + (error instanceof Error ? error.message : 'unknown')] }, provider.name, true);
-  }
+export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
+  const extracted = normalizeSemanticOutput(deepSemanticExtraction(objective, context));
+  return buildIntentFromNlu(objective, extracted, DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
 }
+
+export const DEFAULT_LLM_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
+  name: 'llm-backed-semantic-default',
+  async extract({ objective, context }) {
+    return normalizeSemanticOutput(deepSemanticExtraction(objective, context));
+  },
+};
+
+export const DEFAULT_SEMANTIC_NLU_PROVIDER = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
+export const DEFAULTLLMSEMANTICNLUPROVIDER = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;

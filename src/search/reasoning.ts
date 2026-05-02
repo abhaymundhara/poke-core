@@ -1,86 +1,99 @@
 import type { ClaimAssessment, EvidenceConflict, PolicyDecision, Proposition, PropositionGraph, SearchEvidenceEdge, SearchEvidenceGraph, SearchEvidenceNode, SearchIntent, SearchPolicyState, SearchResult, SearchStrategyProfile, TrustedEvidence, VerifiedClaim } from './types.ts';
-import { average, clamp, stableHash, words } from './utils.ts';
+import { average, clamp, stableHash, words, uniq } from './utils.ts';
 import { scoreEvidenceTrust } from './trust.ts';
 import { addKnowledgeGraphNodes, canonicalizeEntities, chainOfExploration, detectEvidenceCommunities, synthesizeEvidence } from './knowledge-graph.ts';
 
-const VECTOR_DIMENSIONS = 18;
+type NumericFact = {
+  value: number;
+  raw: string;
+  unit: string | null;
+};
 
-function vectorize(text: string, dimensions = VECTOR_DIMENSIONS): number[] {
-  const vector = new Array(dimensions).fill(0);
-  const tokens = words(text.toLowerCase());
-  if (tokens.length === 0) return vector;
-  for (let tokenIndex = 0; tokenIndex < tokens.length; tokenIndex += 1) {
-    const token = tokens[tokenIndex];
-    const seed = `${token}:${tokenIndex % 11}:${dimensions}`;
-    const hash = stableHash(seed);
-    for (let i = 0; i < hash.length; i += 2) {
-      const slice = hash.slice(i, i + 2);
-      if (!slice) continue;
-      const bucket = Number.parseInt(slice, 16) % dimensions;
-      const weight = ((tokenIndex % 5) + 1) / (tokens.length + 2);
-      vector[bucket] += weight;
-    }
-  }
-  const magnitude = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
-  return vector.map((value) => value / magnitude);
-}
+type SemanticPropositionShape = {
+  subject: string;
+  predicate: string;
+  object: string;
+  polarity: 'affirmed' | 'negated' | 'conditional';
+  modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative';
+  qualifiers: string[];
+  numericFacts: NumericFact[];
+  entities: string[];
+};
 
-function cosineSimilarity(left: number[], right: number[]): number {
-  const denominator = (Math.sqrt(left.reduce((sum, value) => sum + value * value, 0)) || 1) * (Math.sqrt(right.reduce((sum, value) => sum + value * value, 0)) || 1);
-  if (denominator === 0) return 0;
-  const numerator = left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
-  return clamp((numerator / denominator + 1) / 2);
+function splitFragments(text: string): string[] {
+  return text.split(/[.!?;:\n]+/g).map((part) => part.trim()).filter(Boolean);
 }
 
 function claimTexts(result: SearchResult): string[] {
   if (result.claims?.length) return result.claims;
-  return result.snippet.split(/[.!?]\s+/).map((part) => part.trim()).filter((part) => part.length > 18).slice(0, 3);
+  return splitFragments(result.snippet).filter((part) => part.length > 18).slice(0, 4);
 }
 
-function fragments(text: string): string[] {
-  return text.split(/[.!?;:\n]+/g).map((part) => part.trim()).filter(Boolean);
+function normalizeClauseText(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9.%:/\-+\s]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function propositionVector(text: string): number[] {
-  return vectorize(text);
+function extractNumericFacts(text: string): NumericFact[] {
+  const facts: NumericFact[] = [];
+  const matches = [...text.matchAll(/(?<![a-z0-9])(-?\d+(?:\.\d+)?)(%|ms|s|sec|secs|second|seconds|min|mins|minute|minutes|h|hr|hour|hours|gb|mb|tb|k|m|b|x)?\b/gi)];
+  for (const match of matches) {
+    const value = Number(match[1]);
+    if (!Number.isFinite(value)) continue;
+    facts.push({ value, raw: match[0], unit: match[2] ? match[2].toLowerCase() : null });
+  }
+  return facts;
 }
 
-function semanticSlots(text: string): { subject: string; predicate: string; object: string } {
-  const tokens = words(text.replace(/[()\[\]{}]/g, ' '));
-  if (tokens.length === 0) return { subject: '', predicate: 'states', object: '' };
-  const subject = tokens.slice(0, Math.min(3, Math.max(1, Math.floor(tokens.length / 3)))).join(' ');
-  const predicate = tokens.slice(Math.min(tokens.length - 1, Math.max(1, Math.floor(tokens.length / 3))), Math.min(tokens.length, Math.max(2, Math.floor((tokens.length * 2) / 3)))).join(' ') || 'states';
-  const object = tokens.slice(Math.max(1, Math.floor((tokens.length * 2) / 3))).join(' ');
-  return { subject, predicate, object };
+function extractEntities(text: string): string[] {
+  const candidates = text.match(/(?:[A-Z][a-z0-9]+(?:\s+[A-Z][a-z0-9]+)+|[A-Z]{2,}(?:-[A-Z0-9]+)?|[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}|https?:\/\/\S+|\b[a-z0-9_.-]+\/[a-z0-9_.-]+\b)/gi) ?? [];
+  return uniq(candidates.map((value) => value.replace(/[),.;]+$/g, ''))).slice(0, 12);
 }
 
-const POLARITY_PROTOTYPES = {
-  affirmed: vectorize('affirmed supported corroborated consistent true valid'),
-  negated: vectorize('negated denied absent incompatible false invalid impossible'),
-  conditional: vectorize('conditional hypothetical contingent uncertain possible dependent'),
-} as const;
-
-function semanticPolarity(text: string): 'affirmed' | 'negated' | 'conditional' {
-  const value = propositionVector(text);
-  const scored = Object.entries(POLARITY_PROTOTYPES).map(([label, prototype]) => ({ label, score: cosineSimilarity(value, prototype) }));
-  scored.sort((left, right) => right.score - left.score);
-  return (scored[0]?.label as 'affirmed' | 'negated' | 'conditional') ?? 'affirmed';
+function detectPolarity(text: string): 'affirmed' | 'negated' | 'conditional' {
+  if (/(?:\bnot\b|\bnever\b|\bno\b|\bwithout\b|\bfalse\b|\binvalid\b|\bdeny\b|\bdenies\b|\bdoesn't\b|\bwon't\b|\bcan't\b)/i.test(text)) return 'negated';
+  if (/(?:\bif\b|\bwhen\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bpotentially\b|\bcontingent\b|\bhypothetical\b)/i.test(text)) return 'conditional';
+  return 'affirmed';
 }
 
-function propositionSignature(text: string): string {
-  const { subject, predicate, object } = semanticSlots(text);
-  return stableHash(`${subject}|${predicate}|${object}`);
+function detectModality(text: string): SemanticPropositionShape['modality'] {
+  if (/(?:\bmust\b|\bshould\b|\brequired\b|\bneed to\b|\bneeds to\b|\bshall\b)/i.test(text)) return 'required';
+  if (/(?:\bwill\b|\bwould\b|\bcan\b|\bmay\b|\bmight\b|\bcould\b|\bpossibly\b|\bpotentially\b)/i.test(text)) return 'possible';
+  if (/(?:\bbefore\b|\bafter\b|\btoday\b|\btomorrow\b|\bnow\b|\brecently\b|\blatest\b|\bcurrent\b)/i.test(text)) return 'temporal';
+  if (/(?:\bmore\b|\bless\b|\bhigher\b|\blower\b|\bincrease\b|\bdecrease\b|\bbetter\b|\bworse\b|\bvs\b|\bthan\b)/i.test(text)) return 'comparative';
+  return 'asserted';
+}
+
+function clauseSubject(tokens: string[]): string {
+  if (tokens.length === 0) return '';
+  const cut = Math.max(1, Math.min(4, Math.ceil(tokens.length / 3)));
+  return tokens.slice(0, cut).join(' ');
+}
+
+function clausePredicate(tokens: string[]): string {
+  if (tokens.length === 0) return 'states';
+  const start = Math.max(1, Math.floor(tokens.length / 3));
+  const end = Math.max(start + 1, Math.floor((tokens.length * 2) / 3));
+  return tokens.slice(start, end).join(' ') || 'states';
+}
+
+function clauseObject(tokens: string[]): string {
+  if (tokens.length === 0) return '';
+  return tokens.slice(Math.max(1, Math.floor((tokens.length * 2) / 3))).join(' ');
 }
 
 function parseProposition(text: string, sourceId: string, confidence: number): Proposition {
-  const { subject, predicate, object } = semanticSlots(text);
+  const normalized = normalizeClauseText(text);
+  const tokens = words(normalized).filter((token) => token.length > 1);
+  const subject = clauseSubject(tokens);
+  const predicate = clausePredicate(tokens);
+  const object = clauseObject(tokens);
   return {
-    id: `prop-${propositionSignature(text)}`,
-    text,
+    id: `prop-${stableHash(`${subject}|${predicate}|${object}|${sourceId}`)}`,
+    text: text.trim(),
     subject,
     predicate,
     object,
-    polarity: semanticPolarity(text),
+    polarity: detectPolarity(text),
     confidence: clamp(confidence),
     support: clamp(confidence),
     contradiction: 0,
@@ -88,90 +101,122 @@ function parseProposition(text: string, sourceId: string, confidence: number): P
   };
 }
 
-function propositionSimilarity(left: Proposition, right: Proposition): number {
-  const semantic = cosineSimilarity(propositionVector(`${left.text} ${left.subject} ${left.object}`), propositionVector(`${right.text} ${right.subject} ${right.object}`));
-  const structure = cosineSimilarity(propositionVector(`${left.subject}|${left.predicate}`), propositionVector(`${right.subject}|${right.predicate}`));
-  const polarityPenalty = left.polarity !== right.polarity ? 0.12 : 0;
-  return clamp(semantic * 0.68 + structure * 0.32 - polarityPenalty);
+function propositionSignature(proposition: Proposition): string {
+  const facts = extractNumericFacts(proposition.text).map((fact) => `${fact.value}:${fact.unit ?? ''}`).join(',');
+  return stableHash([proposition.subject, proposition.predicate, proposition.object, proposition.polarity, facts].join('|'));
 }
 
-function graphNeighborhoodConsistency(graph: SearchEvidenceGraph, proposition: Proposition): number {
-  const signalNodes = graph.nodes.filter((node) => node.type === 'claim' || node.type === 'result' || node.type === 'conflict');
-  if (signalNodes.length === 0) return 0.5;
-  const propositionVectorValue = propositionVector(`${proposition.text} ${proposition.subject} ${proposition.predicate} ${proposition.object}`);
-  const nodeScores = signalNodes.map((node) => {
-    const metadataVector = propositionVector(`${node.label} ${JSON.stringify(node.metadata ?? {})}`);
-    const relationWeight = graph.edges.filter((edge) => edge.from === node.id || edge.to === node.id).reduce((sum, edge) => sum + edge.weight * (edge.relation === 'contradicts' || edge.relation === 'rebuts' ? -0.5 : 1), 0);
-    const structuralWeight = graph.propositionGraph?.edges.filter((edge) => edge.from === proposition.id || edge.to === proposition.id).reduce((sum, edge) => sum + edge.weight * (edge.relation === 'contradicts' ? -0.4 : 0.25), 0) ?? 0;
-    return cosineSimilarity(propositionVectorValue, metadataVector) * 0.62 + clamp(relationWeight / Math.max(1, graph.edges.length)) * 0.26 + clamp(structuralWeight / Math.max(1, graph.propositionGraph?.edges.length ?? 1)) * 0.12;
-  });
-  return clamp(average(nodeScores));
+function propositionShape(text: string): SemanticPropositionShape {
+  const normalized = normalizeClauseText(text);
+  const tokens = words(normalized).filter((token) => token.length > 1);
+  return {
+    subject: clauseSubject(tokens),
+    predicate: clausePredicate(tokens),
+    object: clauseObject(tokens),
+    polarity: detectPolarity(text),
+    modality: detectModality(text),
+    qualifiers: uniq(tokens.filter((token) => /^(not|never|only|always|often|sometimes|likely|unlikely|must|should|will|would|could|may|might|before|after|more|less|higher|lower|increase|decrease|better|worse|than|vs|via|for|of|to)$/.test(token))),
+    numericFacts: extractNumericFacts(text),
+    entities: extractEntities(text),
+  };
+}
+
+function headMatch(left: string, right: string): boolean {
+  if (!left || !right) return false;
+  if (left === right) return true;
+  const leftTokens = left.split(' ');
+  const rightTokens = right.split(' ');
+  return leftTokens.some((token) => rightTokens.includes(token)) || left.includes(right) || right.includes(left);
+}
+
+function numericContradiction(left: SemanticPropositionShape, right: SemanticPropositionShape): number {
+  if (left.numericFacts.length === 0 || right.numericFacts.length === 0) return 0;
+  const sharedUnits = left.numericFacts.flatMap((l) => right.numericFacts.filter((r) => l.unit === r.unit && l.unit !== null).map((r) => ({ l, r })));
+  if (sharedUnits.length === 0) return 0;
+  const mismatch = sharedUnits.some(({ l, r }) => Math.abs(l.value - r.value) > Math.max(1, Math.abs(l.value) * 0.05));
+  return mismatch ? 0.26 : 0;
+}
+
+function semanticEntailment(left: SemanticPropositionShape, right: SemanticPropositionShape): number {
+  const subjectAgreement = headMatch(left.subject, right.subject) ? 1 : 0;
+  const predicateAgreement = headMatch(left.predicate, right.predicate) ? 1 : 0;
+  const objectContainment = right.object && (left.object.includes(right.object) || right.object.includes(left.object)) ? 1 : 0;
+  const entityOverlap = right.entities.length === 0 ? 0 : right.entities.filter((entity) => left.entities.some((candidate) => normalizeClauseText(candidate).includes(normalizeClauseText(entity)) || normalizeClauseText(entity).includes(normalizeClauseText(candidate)))).length / right.entities.length;
+  const polarityCompatibility = left.polarity === right.polarity ? 1 : left.polarity === 'conditional' || right.polarity === 'conditional' ? 0.56 : 0;
+  const modalityCompatibility = left.modality === right.modality ? 1 : left.modality === 'asserted' && right.modality !== 'required' ? 0.7 : 0.45;
+  const specificityBoost = left.object.length >= right.object.length ? 0.18 : 0.06;
+  return clamp(subjectAgreement * 0.26 + predicateAgreement * 0.2 + objectContainment * 0.16 + entityOverlap * 0.12 + polarityCompatibility * 0.16 + modalityCompatibility * 0.08 + specificityBoost);
+}
+
+function semanticContradiction(left: SemanticPropositionShape, right: SemanticPropositionShape): number {
+  const sameSubject = headMatch(left.subject, right.subject) ? 1 : 0;
+  const samePredicate = headMatch(left.predicate, right.predicate) ? 1 : 0;
+  const oppositePolarity = left.polarity !== right.polarity ? 1 : 0;
+  const conditionalConflict = left.polarity === 'conditional' || right.polarity === 'conditional' ? 0.12 : 0;
+  const modalityConflict = left.modality === 'required' && right.modality === 'possible' || left.modality === 'possible' && right.modality === 'required' ? 0.16 : 0;
+  const objectConflict = left.object && right.object && left.object !== right.object && (left.object.includes('increase') && right.object.includes('decrease') || left.object.includes('higher') && right.object.includes('lower') || left.object.includes('more') && right.object.includes('less') || left.object.includes('true') && right.object.includes('false')) ? 0.22 : 0;
+  const numericConflict = numericContradiction(left, right);
+  const predicateNegation = /\bnot\b|\bno\b|\bnever\b/.test(left.predicate) !== /\bnot\b|\bno\b|\bnever\b/.test(right.predicate) ? 0.14 : 0;
+  const directNegation = oppositePolarity && sameSubject && samePredicate ? 0.3 : 0;
+  return clamp(sameSubject * 0.18 + samePredicate * 0.16 + oppositePolarity * 0.24 + conditionalConflict + modalityConflict + objectConflict + numericConflict + predicateNegation + directNegation);
+}
+
+function graphNeighborhoodSupport(graph: SearchEvidenceGraph, proposition: Proposition): number {
+  const adjacentEdges = [...graph.edges, ...(graph.propositionGraph?.edges ?? [])].filter((edge) => edge.from === proposition.id || edge.to === proposition.id);
+  if (adjacentEdges.length === 0) return 0.5;
+  const support = adjacentEdges.reduce((sum, edge) => sum + (edge.relation === 'supports' || edge.relation === 'entails' || edge.relation === 'corroborates' ? edge.weight : -edge.weight * 0.6), 0);
+  return clamp(0.5 + support / Math.max(3, adjacentEdges.length * 2));
 }
 
 function propositionEntails(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
-  const similarity = propositionSimilarity(left, right);
-  const graphAffinity = graphNeighborhoodConsistency(graph, left) * 0.45 + graphNeighborhoodConsistency(graph, right) * 0.45;
-  const supports = graph.propositionGraph?.edges.filter((edge) => edge.relation === 'supports' || edge.relation === 'entails' || edge.relation === 'refines') ?? [];
-  const supportBias = supports.length > 0 ? supports.reduce((sum, edge) => sum + edge.weight, 0) / supports.length : 0.18;
-  const lexicalContainment = right.text.length > 0 && left.text.includes(right.text) ? 0.2 : right.subject && left.subject === right.subject ? 0.12 : 0;
-  const predicateAlignment = left.predicate === right.predicate ? 0.1 : cosineSimilarity(propositionVector(left.predicate), propositionVector(right.predicate)) * 0.08;
-  const polarityPenalty = left.polarity === 'negated' && right.polarity === 'affirmed' ? 0.34 : left.polarity !== right.polarity ? 0.16 : 0;
-  const contextualContinuity = cosineSimilarity(propositionVector(`${left.text} ${left.subject} ${left.predicate}`), propositionVector(`${right.text} ${right.subject} ${right.predicate}`));
-  return clamp(similarity * 0.28 + graphAffinity * 0.24 + supportBias * 0.18 + lexicalContainment + predicateAlignment + contextualContinuity * 0.18 - polarityPenalty);
+  const leftShape = propositionShape(left.text);
+  const rightShape = propositionShape(right.text);
+  const semanticFit = semanticEntailment(leftShape, rightShape);
+  const supportBias = graphNeighborhoodSupport(graph, left) * 0.34 + graphNeighborhoodSupport(graph, right) * 0.26;
+  const qualifierBias = rightShape.qualifiers.every((qualifier) => leftShape.qualifiers.includes(qualifier) || left.text.toLowerCase().includes(qualifier)) ? 0.12 : 0.04;
+  const coverage = rightShape.entities.every((entity) => leftShape.entities.some((candidate) => headMatch(candidate, entity))) ? 0.14 : 0.06;
+  const numericAgreement = numericContradiction(leftShape, rightShape) > 0 ? -0.12 : 0.08;
+  return clamp(semanticFit * 0.44 + supportBias * 0.2 + qualifierBias + coverage + numericAgreement);
 }
 
 function propositionContradicts(left: Proposition, right: Proposition, graph: SearchEvidenceGraph): number {
-  const similarity = propositionSimilarity(left, right);
-  const leftVector = propositionVector(`${left.text} ${left.subject} ${left.predicate} ${left.object}`);
-  const rightVector = propositionVector(`${right.text} ${right.subject} ${right.predicate} ${right.object}`);
-  const contradictionEdges = [
-    ...(graph.propositionGraph?.edges ?? []),
-    ...graph.edges.filter((edge) => edge.relation === 'contradicts' || edge.relation === 'rebuts'),
-  ].filter((edge) => edge.relation === 'contradicts' || edge.relation === 'rebuts');
-  const graphTension = contradictionEdges.length === 0 ? 0 : contradictionEdges.reduce((sum, edge) => {
-    const fromNode = graph.nodes.find((node) => node.id === edge.from) || graph.propositions?.find((proposition) => proposition.id === edge.from);
-    const toNode = graph.nodes.find((node) => node.id === edge.to) || graph.propositions?.find((proposition) => proposition.id === edge.to);
-    if (!fromNode || !toNode) return sum;
-    const fromVector = propositionVector(`${'label' in fromNode ? fromNode.label : fromNode.text} ${JSON.stringify('metadata' in fromNode ? fromNode.metadata ?? {} : fromNode)}`);
-    const toVector = propositionVector(`${'label' in toNode ? toNode.label : toNode.text} ${JSON.stringify('metadata' in toNode ? toNode.metadata ?? {} : toNode)}`);
-    return sum + Math.max(cosineSimilarity(leftVector, toVector), cosineSimilarity(rightVector, fromVector)) * edge.weight;
-  }, 0) / contradictionEdges.length;
-  const neighborhoodGap = Math.abs(graphNeighborhoodConsistency(graph, left) - graphNeighborhoodConsistency(graph, right));
-  const numericalDivergence = /\d/.test(left.text) && /\d/.test(right.text) && left.text !== right.text ? 0.1 : 0;
-  const polarityConflict = left.polarity !== right.polarity ? 0.28 : 0;
-  const antonymic = /(increase|more|higher|up|faster|better|gain|rise)/i.test(left.object) && /(decrease|less|lower|down|slower|worse|drop|fall)/i.test(right.object) ? 0.2 : 0;
-  const logicalInversion = left.subject === right.subject && left.predicate === right.predicate && left.object !== right.object ? 0.14 : 0;
-  return clamp(similarity * 0.2 + graphTension * 0.32 + neighborhoodGap * 0.18 + numericalDivergence + polarityConflict + antonymic + logicalInversion);
+  const leftShape = propositionShape(left.text);
+  const rightShape = propositionShape(right.text);
+  const semanticConflict = semanticContradiction(leftShape, rightShape);
+  const supportGap = Math.abs(graphNeighborhoodSupport(graph, left) - graphNeighborhoodSupport(graph, right)) * 0.14;
+  const sharedEntityPressure = leftShape.entities.some((entity) => rightShape.entities.some((candidate) => headMatch(entity, candidate))) ? 0.08 : 0;
+  const graphTension = [...(graph.propositionGraph?.edges ?? []), ...graph.edges].filter((edge) => edge.relation === 'contradicts' || edge.relation === 'rebuts').length > 0 ? 0.06 : 0;
+  return clamp(semanticConflict * 0.58 + supportGap + sharedEntityPressure + graphTension);
 }
 
 function assessClaim(premise: Proposition, hypothesis: Proposition, graph: SearchEvidenceGraph): ClaimAssessment {
   const contradiction = propositionContradicts(premise, hypothesis, graph);
   const entailment = propositionEntails(premise, hypothesis, graph);
-  const consistency = clamp(1 - contradiction * 0.75 + entailment * 0.25);
-  if (contradiction >= Math.max(0.52, entailment + 0.08)) {
+  const consistency = clamp(1 - contradiction * 0.72 + entailment * 0.18);
+  if (contradiction >= Math.max(0.5, entailment + 0.06)) {
     return {
       premise: premise.text,
       hypothesis: hypothesis.text,
       relation: 'contradicts',
-      confidence: clamp(0.44 + contradiction * 0.48 + (1 - consistency) * 0.08),
-      rationale: 'semantic entailment fails under the evidence graph: the claims align lexically, but their logical forms and neighborhood evidence conflict',
+      confidence: clamp(0.42 + contradiction * 0.5 + (1 - consistency) * 0.08),
+      rationale: 'the semantic claims diverge on polarity, modality, or quantitative content rather than mere lexical overlap',
     };
   }
-  if (entailment >= Math.max(0.5, contradiction + 0.05) && consistency >= 0.48) {
+  if (entailment >= Math.max(0.48, contradiction + 0.08) && consistency >= 0.46) {
     return {
       premise: premise.text,
       hypothesis: hypothesis.text,
       relation: 'entails',
-      confidence: clamp(0.4 + entailment * 0.5 + consistency * 0.1),
-      rationale: 'the proposition graph and semantic embedding support a consistent entailment path through corroborating evidence',
+      confidence: clamp(0.38 + entailment * 0.52 + consistency * 0.1),
+      rationale: 'the structured proposition representation supports a stable entailment path through compatible claims',
     };
   }
   return {
     premise: premise.text,
     hypothesis: hypothesis.text,
     relation: 'unknown',
-    confidence: clamp(0.24 + (entailment * 0.42) + ((1 - contradiction) * 0.18)),
-    rationale: 'the model cannot establish a stable entailment or contradiction path from the current evidence graph',
+    confidence: clamp(0.24 + entailment * 0.36 + (1 - contradiction) * 0.2),
+    rationale: 'the proposition engine cannot establish a definitive entailment or contradiction from the current semantic evidence',
   };
 }
 
@@ -190,7 +235,7 @@ export function buildQueries(intent: SearchIntent, strategy: SearchStrategyProfi
 export function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProfile, results: SearchResult[]): string[] {
   const hopPlan = [intent.semanticQuery];
   for (const result of results.slice(0, Math.max(1, intent.hopBudget - 1))) {
-    const extracted = claimTexts(result).join(' ').split(/\s+/).slice(0, 8).join(' ');
+    const extracted = claimTexts(result).join(' ').split(/\s+/).slice(0, 10).join(' ');
     const sourceHint = result.source === 'github' ? 'repository evidence' : result.source === 'scholar' ? 'citation trail' : result.source === 'realtime-web' ? 'fresh source' : 'supporting source';
     hopPlan.push(`${extracted} ${sourceHint}`.trim());
   }
@@ -213,7 +258,7 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
   for (const [index, result] of trusted.entries()) {
     const resultId = `result-${index}-${stableHash(result.url || result.title)}`;
     nodes.push({ id: resultId, label: result.title, type: 'result', weight: result.trustScore, metadata: { url: result.url, source: result.source, snippet: result.snippet, trust: result.trustScore, breakdown: result.trustBreakdown } });
-    for (const queryId of queryIds) edges.push({ from: queryId, to: resultId, relation: 'supports', weight: clamp(0.32 + strategy.semanticBias * 0.12 + result.trustScore * 0.2) });
+    for (const queryId of queryIds) edges.push({ from: queryId, to: resultId, relation: 'supports', weight: clamp(0.26 + strategy.semanticBias * 0.12 + result.trustScore * 0.22) });
     const sourceId = result.provenance.domain || String(result.source);
     for (const text of claimTexts(result)) {
       const proposition = parseProposition(text, sourceId, result.trustScore);
@@ -221,9 +266,9 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
         nodes.push({ id: proposition.id, label: proposition.text, type: 'claim', weight: proposition.confidence, metadata: proposition });
       }
       edges.push({ from: resultId, to: proposition.id, relation: 'claims', weight: result.trustScore });
-      const signature = propositionSignature(proposition.text);
+      const signature = propositionSignature(proposition);
       const entry = propositionMap.get(signature) ?? { proposition, support: [], contradiction: [], assessments: [] };
-      entry.proposition.support += result.trustScore;
+      entry.proposition.support = clamp(entry.proposition.support + result.trustScore * 0.1);
       entry.proposition.sources = [...new Set([...entry.proposition.sources, sourceId])];
       entry.support.push(result);
       propositionMap.set(signature, entry);
@@ -244,7 +289,7 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
 
   for (let i = 0; i < propositions.length; i += 1) {
     const left = propositions[i];
-    const leftEntry = propositionMap.get(propositionSignature(left.text));
+    const leftEntry = propositionMap.get(propositionSignature(left));
     if (!leftEntry) continue;
     for (let j = 0; j < propositions.length; j += 1) {
       if (i === j) continue;
@@ -252,11 +297,11 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
       const assessment = assessClaim(left, right, graphView);
       leftEntry.assessments.push(assessment);
       if (assessment.relation === 'contradicts') {
-        leftEntry.contradiction.push(...(propositionMap.get(propositionSignature(right.text))?.support ?? []));
+        leftEntry.contradiction.push(...(propositionMap.get(propositionSignature(right))?.support ?? []));
         propositionEdges.push({ from: left.id, to: right.id, relation: 'contradicts', weight: assessment.confidence });
       } else if (assessment.relation === 'entails') {
         propositionEdges.push({ from: left.id, to: right.id, relation: 'entails', weight: assessment.confidence });
-      } else if (propositionSimilarity(left, right) > 0.42) {
+      } else if (headMatch(left.subject, right.subject) && headMatch(left.predicate, right.predicate)) {
         propositionEdges.push({ from: left.id, to: right.id, relation: 'refines', weight: assessment.confidence });
       }
     }
@@ -266,8 +311,8 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
     const contradiction = average(leftEntry.contradiction.map((item) => item.trustScore));
     const independentSupport = new Set(leftEntry.support.map((item) => item.provenance.domain || item.source)).size;
     const corroborationMet = !policy.requireCorroboration || independentSupport >= 2;
-    const confidence = clamp(support * 0.82 - contradiction * 0.46 + Math.min(0.16, leftEntry.support.length * 0.04) - (corroborationMet ? 0 : 0.18));
-    const verdict: VerifiedClaim['verdict'] = contradictionIds.length > 0 && contradiction > support * 0.65 ? 'contested' : supportIds.length > 0 && corroborationMet ? 'supported' : 'unsupported';
+    const confidence = clamp(support * 0.82 - contradiction * 0.48 + Math.min(0.16, leftEntry.support.length * 0.04) - (corroborationMet ? 0 : 0.16));
+    const verdict: VerifiedClaim['verdict'] = contradictionIds.length > 0 && contradiction > support * 0.6 ? 'contested' : supportIds.length > 0 && corroborationMet ? 'supported' : 'unsupported';
     claims.push({ id: left.id, text: left.text, confidence, supportedBy: supportIds, contradictedBy: contradictionIds, verdict, assessments: leftEntry.assessments });
     if (contradictionIds.length > 0) {
       conflicts.push({ claim: left.text, supporting: supportIds, contradicting: contradictionIds, resolution: support >= contradiction ? 'prefer higher-trust corroborated support' : 'prefer higher-trust contradiction', confidence: clamp(Math.abs(support - contradiction)) });
