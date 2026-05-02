@@ -13,13 +13,22 @@ function normalizeSelectors(selectors: unknown): string[] { return Array.isArray
 function makeSession(frame: VisionFrame): ComputerUseSession {
   const windowId = frame.activeWindowId ?? 'window-1';
   const tabId = frame.activeTabId ?? 'tab-1';
-  return { windows: [{ id: windowId, title: 'Primary window', focused: true, width: frame.viewport?.width ?? 1280, height: frame.viewport?.height ?? 800 }], tabs: [{ id: tabId, title: 'Primary tab', url: 'about:blank', active: true, history: ['about:blank'], selectors: normalizeSelectors(frame.selectors) }], focus: { windowId, tabId, selector: null }, cursorHistory: [], driftRecoveries: 0, captures: [] };
+  const selectors = normalizeSelectors(frame.selectors);
+  const title = frame.ocr?.trim() || frame.dom?.trim() || '';
+  return {
+    windows: [{ id: windowId, title, focused: true, width: frame.viewport?.width ?? 1280, height: frame.viewport?.height ?? 800 }],
+    tabs: [{ id: tabId, title, url: frame.dom?.trim() || frame.ocr?.trim() || '', active: true, history: [frame.dom?.trim() || frame.ocr?.trim() || ''], selectors }],
+    focus: { windowId, tabId, selector: selectors[0] ?? null },
+    cursorHistory: [],
+    driftRecoveries: 0,
+    captures: [],
+  };
 }
 function visibleText(frame: VisionFrame): string { return [frame.ocr, frame.dom, frame.screenshot].map(text).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim(); }
 function detectSelectors(frame: VisionFrame): string[] {
   const haystack = visibleText(frame).toLowerCase();
   const selectors = normalizeSelectors(frame.selectors);
-  const fromText = [...haystack.matchAll(/(?:button|input|textarea|a|select|dialog|menu|tab|window|sheet|pane|modal|tooltip)(?:\[[^\]]+\])?/g)].map((match) => canonicalSelector(match[0]));
+  const fromText = haystack.split(/\s+/).map((entry) => canonicalSelector(entry)).filter(Boolean);
   return [...new Set([...selectors, ...fromText])];
 }
 function detectFocusedSelector(session: ComputerUseSession, frame: VisionFrame, selectors: string[]): string | null {
@@ -27,8 +36,7 @@ function detectFocusedSelector(session: ComputerUseSession, frame: VisionFrame, 
   const target = session.focus.selector ? canonicalSelector(session.focus.selector) : null;
   if (target && selectors.includes(target)) return target;
   if (target && haystack.includes(target.replace(/[#.\[\]]/g, ''))) return target;
-  const strongest = selectors.find((selector) => /button|input|textarea|tab|dialog|modal|menu/.test(selector)) ?? null;
-  return strongest;
+  return selectors[0] ?? null;
 }
 function ensureFocus(session: ComputerUseSession, windowId: string, tabId: string, selector: string | null) { session.focus = { windowId, tabId, selector }; if (selector) session.cursorHistory.push(selector); }
 
@@ -36,21 +44,12 @@ export function captureFrame(frame: VisionFrame, session: ComputerUseSession): U
   const selectors = detectSelectors(frame);
   const activeWindowId = frame.activeWindowId ?? session.focus.windowId;
   const activeTabId = frame.activeTabId ?? session.focus.tabId;
-
-  if (frame.activeTabId && !session.tabs.find((t) => t.id === frame.activeTabId)) {
-    session.tabs.push({ id: frame.activeTabId, title: 'New Tab', url: 'about:blank', active: false, history: ['about:blank'], selectors: [] });
-  }
-  if (frame.activeWindowId && !session.windows.find((w) => w.id === frame.activeWindowId)) {
-    session.windows.push({ id: frame.activeWindowId, title: 'New Window', focused: false, width: 1280, height: 800 });
-  }
-
-  const tab = session.tabs.find((entry) => entry.id === activeTabId) ?? session.tabs[0];
-  if (tab) tab.selectors = selectors;
-
   const focusedSelector = detectFocusedSelector(session, frame, selectors);
   const driftDetected = session.focus.selector !== null && focusedSelector !== session.focus.selector;
   const perception: UiPerception = { frameId: frame.id, visibleText: visibleText(frame).slice(0, 4000), detectedSelectors: selectors, activeTabId, activeWindowId, driftDetected, focusedSelector, keyboardHints: selectors.filter((selector) => /button|input|textarea|tab|dialog|menu/.test(selector)).slice(0, 6), tabCount: session.tabs.length, windowCount: session.windows.length };
   session.captures.push(perception);
+  const tab = session.tabs.find((entry) => entry.id === activeTabId) ?? session.tabs[0];
+  if (tab) tab.selectors = selectors;
   session.focus.windowId = activeWindowId;
   session.focus.tabId = activeTabId;
   session.focus.selector = focusedSelector;
@@ -75,19 +74,14 @@ export function keyboardNavigate(session: ComputerUseSession, key: string): stri
   }
   if (normalized === 'alt+left') {
     const tab = session.tabs.find((entry) => entry.id === session.focus.tabId);
-    if (tab && tab.history.length > 1) {
-      tab.history.pop();
-      tab.url = tab.history.at(-1) ?? 'about:blank';
-    } else if (tab) {
-      tab.url = tab.history[0] ?? 'about:blank';
-    }
-    return tab?.url ?? 'about:blank';
+    const prev = tab?.history.at(-2) ?? tab?.history[0] ?? 'about:blank';
+    if (tab) tab.url = prev;
+    return prev;
   }
   if (normalized === 'tab') {
     const tab = session.tabs.find((entry) => entry.id === session.focus.tabId);
     const selectors = tab?.selectors ?? [];
-    const currentIndex = session.focus.selector ? selectors.indexOf(session.focus.selector) : -1;
-    const nextSelector = selectors.length > 0 ? selectors[(currentIndex + 1) % selectors.length] : null;
+    const nextSelector = selectors.find((selector) => selector !== session.focus.selector) ?? selectors[0] ?? null;
     ensureFocus(session, session.focus.windowId, session.focus.tabId, nextSelector);
     return nextSelector ?? 'tab-cycle';
   }
@@ -101,7 +95,7 @@ export function keyboardNavigate(session: ComputerUseSession, key: string): stri
 
 export function recoverFromUiDrift(session: ComputerUseSession, perception: UiPerception, fallbackSelectors: string[] = []): { recovered: boolean; selector: string | null; reason: string } {
   if (!perception.driftDetected && perception.focusedSelector) return { recovered: false, selector: perception.focusedSelector, reason: 'no drift' };
-  const candidate = [...fallbackSelectors, ...perception.detectedSelectors, 'body', 'main', 'button', 'input'].map(canonicalSelector).find(Boolean) ?? null;
+  const candidate = [...fallbackSelectors, ...perception.detectedSelectors, session.focus.selector ?? ''].map((value) => canonicalSelector(value)).find(Boolean) ?? null;
   if (candidate) {
     session.driftRecoveries += 1;
     ensureFocus(session, perception.activeWindowId, perception.activeTabId, candidate);

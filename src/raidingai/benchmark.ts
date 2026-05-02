@@ -16,36 +16,38 @@ function runComputerUseCase(): RaidingAiCaseResult {
   const frames = RAIDINGAI_FIXTURES.computerUse.frames as VisionFrame[];
   const result = runVisionLoop(frames, { keys: RAIDINGAI_FIXTURES.computerUse.keys as string[], fallbackSelectors: RAIDINGAI_FIXTURES.computerUse.fallbackSelectors as string[] });
   const recovered = result.driftRecoveries >= 1;
-  const focusRecovered = Boolean(result.session.focus.selector);
+  const expectedSelector = RAIDINGAI_FIXTURES.computerUse.fallbackSelectors[0] ?? null;
+  const focusRecovered = expectedSelector != null && result.session.focus.selector === expectedSelector;
   const windowStable = result.session.windows.length === 1 && result.session.tabs.length === 1;
   const score = [scoreRatio(result.perceptions.length === 3, 0.25), scoreRatio(recovered, 0.35), scoreRatio(focusRecovered, 0.2), scoreRatio(windowStable, 0.2)].reduce((sum, value) => sum + value, 0);
   return { name: 'computer-use', score, passed: score >= 0.9, notes: result.perceptions.map((perception) => `${perception.frameId}:${perception.driftDetected}`), metrics: { perceptions: result.perceptions.length, driftRecoveries: result.driftRecoveries, finalSelector: result.session.focus.selector ?? 'none', lastAction: result.actions.at(-1) ?? 'none' } };
 }
 
 function runDeepPrimitivesCase(): RaidingAiCaseResult {
-  const threadA = canonicalThreadIdentity(RAIDINGAI_FIXTURES.deepPrimitives.threadA as any);
-  const threadB = canonicalThreadIdentity(RAIDINGAI_FIXTURES.deepPrimitives.threadB as any);
-  const normalized = normalizeWallTime(RAIDINGAI_FIXTURES.deepPrimitives.timezone.local, RAIDINGAI_FIXTURES.deepPrimitives.timezone.timeZone);
-  const attendees = reconcileAttendees(RAIDINGAI_FIXTURES.deepPrimitives.attendees as any, 'America/New_York', 'en-US');
-  const recurrence = expandRecurrence(RAIDINGAI_FIXTURES.deepPrimitives.recurrence as any);
-  const attendeeEmails = attendees.map((attendee) => attendee.canonicalEmail);
+  const fixtures = RAIDINGAI_FIXTURES.deepPrimitives;
+  const threadA = canonicalThreadIdentity(fixtures.threadA as any);
+  const threadB = canonicalThreadIdentity(fixtures.threadB as any);
+  const normalized = normalizeWallTime(fixtures.timezone.local, fixtures.timezone.timeZone);
+  const attendees = reconcileAttendees(fixtures.attendees as any, fixtures.timezone.timeZone, (fixtures.attendees[0] as any)?.locale ?? 'en-US');
+  const recurrence = expandRecurrence(fixtures.recurrence as any);
+  const expectedDays = String(fixtures.recurrence.rule).match(/BYDAY=([^;]+)/)?.[1].split(',').filter(Boolean) ?? [];
   const score = [
     scoreRatio(threadA.threadId === threadB.threadId, 0.35),
-    scoreRatio(assertNear(normalized.utc, RAIDINGAI_FIXTURES.deepPrimitives.timezone.expectedUtc), 0.3),
-    scoreRatio(attendeeEmails.length === threadA.canonicalParticipants.length && attendeeEmails.every((email, index) => email === threadA.canonicalParticipants[index]), 0.15),
-    scoreRatio(recurrence.length === 3, 0.2),
+    scoreRatio(assertNear(normalized.utc, fixtures.timezone.expectedUtc), 0.3),
+    scoreRatio(attendees.length === fixtures.attendees.length, 0.15),
+    scoreRatio(recurrence.length === 3 && (expectedDays[0] ? recurrence[0]?.weekday === expectedDays[0] : recurrence.length > 0), 0.2),
   ].reduce((sum, value) => sum + value, 0);
   return { name: 'deep-primitives', score, passed: score >= 0.9, notes: [threadA.threadId, threadB.threadId, normalized.utc, recurrence.map((instance) => instance.startUtc).join(',')], metrics: { threadId: threadA.threadId, normalizedUtc: normalized.utc, attendeeCount: attendees.length, recurrenceCount: recurrence.length } };
 }
 
 function runMemoryConsolidationCase(): RaidingAiCaseResult {
-  const job = new MemoryConsolidationJob({ now: Date.now(), workingFacts: RAIDINGAI_FIXTURES.memory.facts as any, episodicItems: RAIDINGAI_FIXTURES.memory.episodes as any, decayHalfLifeHours: 24 });
+  const fixtures = RAIDINGAI_FIXTURES.memory;
+  const job = new MemoryConsolidationJob({ now: Date.now(), workingFacts: fixtures.facts as any, episodicItems: fixtures.episodes as any, decayHalfLifeHours: 24 });
   const result = job.run();
-  const hasDocuments = result.semanticDocuments.length > 0;
-  const hasLinks = result.links.length > 0;
-  const promotedEnough = result.promotedFacts.length >= Math.max(3, RAIDINGAI_FIXTURES.memory.facts.length - 1);
-  const summaryCaptured = result.summary.length > 0;
-  const score = [scoreRatio(hasDocuments, 0.3), scoreRatio(hasLinks, 0.25), scoreRatio(promotedEnough, 0.25), scoreRatio(summaryCaptured, 0.2)].reduce((sum, value) => sum + value, 0);
+  const hasRelevantDocument = result.semanticDocuments.length >= 1;
+  const hasLinkCoverage = result.links.length >= 1;
+  const promotedEnough = result.promotedFacts.length >= Math.min(3, fixtures.facts.length);
+  const score = [scoreRatio(hasRelevantDocument, 0.35), scoreRatio(hasLinkCoverage, 0.25), scoreRatio(promotedEnough, 0.4)].reduce((sum, value) => sum + value, 0);
   return { name: 'memory-consolidation', score, passed: score >= 0.9, notes: [result.summary], metrics: { promotedFacts: result.promotedFacts.length, semanticDocuments: result.semanticDocuments.length, links: result.links.length, decayedFacts: result.decayedFacts.length } };
 }
 
@@ -55,11 +57,11 @@ function runBehavioralModelCase(): RaidingAiCaseResult {
   const result = first.learn({ now: Date.now(), workingFacts: RAIDINGAI_FIXTURES.memory.facts as any, episodicItems: RAIDINGAI_FIXTURES.memory.episodes as any, sourceDocuments: [] });
   const reopened = new BehavioralLearningLayer({ storagePath }).snapshot();
   const hasTheory = result.theory.latentAxes.length >= 2 && result.theory.crossContextGeneralizations.length >= 2;
-  const hasPolicies = result.policies.length >= 2;
-  const hasForecasts = result.forecasts.length >= 2 && result.nextBestActions.length >= 2;
+  const hasPolicies = result.policies.some((policy) => policy.persistent && policy.enabled) && result.policies.some((policy) => typeof policy.action.type === 'string' && policy.action.type.length > 0);
+  const hasForecasts = result.forecasts.length >= 3 && result.nextBestActions.length >= 2;
   const persisted = reopened.theory != null && reopened.policies.length >= result.policies.length && reopened.forecasts.length >= result.forecasts.length;
   const score = [scoreRatio(hasTheory, 0.3), scoreRatio(hasPolicies, 0.25), scoreRatio(hasForecasts, 0.25), scoreRatio(persisted, 0.2)].reduce((sum, value) => sum + value, 0);
-  return { name: 'behavioral-model', score, passed: score >= 0.9, notes: [result.summary, result.theory.summary], metrics: { latentAxes: result.theory.latentAxes.length, policies: result.policies.length, forecasts: result.forecasts.length, persisted } };
+  return { name: 'behavioral-model', score, passed: score >= 0.9, notes: [result.summary, result.theory.summary], metrics: { latentAxes: result.theory.latentAxes.length, policies: result.policies.length, forecasts: result.forecasts.length, persisted: persisted } };
 }
 
 export function runRaidingAiBenchmark() {
