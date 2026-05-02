@@ -22,12 +22,13 @@ export function buildPokeGraph(deps: {
       id: 'profile',
       name: 'profile request',
       run: (state) => {
-        const q = state.query.toLowerCase();
-        const executionProfile: ExecutionProfile = {
-          primarySource: /email|mail|inbox/.test(q) ? 'email' : /calendar|meeting|schedule/.test(q) ? 'calendar' : /browser|web|url|page/.test(q) ? 'browser' : /file|filesystem|path/.test(q) ? 'filesystem' : 'integration',
+        const executionProfile: ExecutionProfile = state.executionProfile ?? {
+          primarySource: 'integration',
           secondarySources: [],
           parallelizable: true,
-          rationale: ['profiled by keyword signature'],
+          rationale: ['planner-provided execution profile fallback'],
+          strategy: state.planner?.strategy,
+          affordanceSignals: state.intentGraph?.toolAffordances?.slice(0, 4).map((affordance) => ({ skill: affordance.skill, score: affordance.score, bucket: affordance.skill === 'browser' || affordance.skill === 'computer-use' ? 'browser' : affordance.skill === 'harness' ? 'memory' : affordance.skill === 'integration' ? 'integration' : 'memory', kind: affordance.selectedKind })) ?? [],
         };
         return { ...state, executionProfile };
       },
@@ -76,3 +77,4 @@ export function buildPokeGraph(deps: {
     { from: 'retrieve-rag', to: 'synthesize' },
   ]);
 }
+

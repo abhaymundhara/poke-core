@@ -1,3 +1,4 @@
+import type { SearchIntent } from './search/types';
 export type TaskStatus = 'draft' | 'planning' | 'routing' | 'executing' | 'recovering' | 'completed' | 'failed' | 'rolled_back';
 export type StepKind = 'browser.navigate' | 'browser.extract' | 'integration.call' | 'verify' | 'autopilot.loop' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use.vision' | 'harness.readthread' | 'harness.draftreply' | 'harness.conflict_detection' | 'harness.relationship_recall' | 'harness.filesystem_scan';
 export type TransitionKind = 'plan' | 'route' | 'execute' | 'validate' | 'recover' | 'complete' | 'fail' | 'rollback';
@@ -32,6 +33,9 @@ export type TaskPlan = {
   taskId: string;
   objective: string;
   steps: PlanStep[];
+  semanticIntent?: SearchIntent;
+  intentGraph?: PlannerIntentGraph;
+  planner?: PlannerPlanMetadata;
 };
 
 export type TaskRecord = {
@@ -114,6 +118,89 @@ export type ExecutionProfile = {
   secondarySources: string[];
   parallelizable: boolean;
   rationale: string[];
+  strategy?: PlannerStrategy;
+  affordanceSignals?: Array<{ skill: string; score: number; bucket: string; kind: StepKind }>;
+};
+
+export type PlannerStrategy = 'semantic-first' | 'trust-first' | 'multi-hop' | 'freshness-first' | 'blend';
+export type PlannerRecoveryMode = 'retry' | 'replan' | 'compensate' | 'escalate';
+
+export type PlannerToolAffordance = {
+  skill: string;
+  domain: string;
+  capabilities: string[];
+  score: number;
+  reasons: string[];
+  selectedKind: StepKind;
+  availableKinds: StepKind[];
+};
+
+export type PlannerIntentNode = {
+  id: string;
+  kind: 'goal' | 'subgoal' | 'tool' | 'checkpoint' | 'state' | 'recovery' | 'ambiguity';
+  label: string;
+  summary: string;
+  status: 'pending' | 'active' | 'done' | 'blocked' | 'failed';
+  stepId?: string;
+  dependsOn?: string[];
+  confidence: number;
+  metadata: Record<string, unknown>;
+};
+
+export type PlannerIntentEdge = {
+  from: string;
+  to: string;
+  relation: 'decomposes-into' | 'depends-on' | 'routes-to' | 'supports' | 'tracks-state' | 'confirms' | 'recovers' | 'blocks';
+  weight: number;
+};
+
+export type PlannerRecoveryPolicy = {
+  mode: PlannerRecoveryMode;
+  maxReplans: number;
+  maxAttemptsPerStep: number;
+  blockedKinds: StepKind[];
+  fallbackSkills: string[];
+  recoveryNotes: string[];
+};
+
+export type PlannerIntentGraph = {
+  id: string;
+  objective: string;
+  normalizedObjective: string;
+  semanticQuery: string;
+  strategy: PlannerStrategy;
+  semanticProvider: string;
+  confidence: number;
+  nodes: PlannerIntentNode[];
+  edges: PlannerIntentEdge[];
+  frontier: string[];
+  stepOrder: string[];
+  stateAnchorByStepId: Record<string, string>;
+  toolAffordances: PlannerToolAffordance[];
+  recoveryPolicy: PlannerRecoveryPolicy;
+  warnings: string[];
+};
+
+export type PlannerPlanMetadata = {
+  provider: string;
+  fallbackUsed: boolean;
+  strategy: PlannerStrategy;
+  confidence: number;
+  warnings: string[];
+  semanticQuery: string;
+  decompositionCount: number;
+};
+
+export type PlannerRuntimeState = {
+  strategy: PlannerStrategy;
+  provider: string;
+  fallbackUsed: boolean;
+  confidence: number;
+  currentNodeId: string | null;
+  completedNodeIds: string[];
+  blockedNodeIds: string[];
+  lastRecovery?: { stepId: string; reason: string; at: number };
+  notes: string[];
 };
 
 export type RuntimeState = {
@@ -125,4 +212,8 @@ export type RuntimeState = {
   breadcrumbs: Array<{ stepId: string; kind: StepKind; skill: string; status: 'done' | 'failed' | 'compensated' }>;
   recovery: Array<{ stepId: string; reason: string; at: number }>;
   executionProfile?: ExecutionProfile;
+  semanticIntent?: SearchIntent;
+  intentGraph?: PlannerIntentGraph;
+  planner?: PlannerRuntimeState;
 };
+
