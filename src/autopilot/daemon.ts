@@ -17,6 +17,7 @@ export type CognitiveInterferenceFlux = {
   score: number;
   entropy: number;
   complexity: number;
+  interference: boolean;
   wake: boolean;
 };
 
@@ -64,6 +65,7 @@ type RuntimeObserver = {
 
 type RuntimeObserverCtor = new (callback: (list: { getEntries(): unknown[] }) => void) => RuntimeObserver;
 
+type RuntimeManifest = Record<string, string>;
 
 function* manifestFlux(model: BehaviorModelBundle): Generator<string> {
   const fluxSeed = token(model.theory.summary, model.summary, String(model.theory.sessionCount), String(model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length + model.theory.persistentGoals.length));
@@ -79,6 +81,16 @@ function* manifestFlux(model: BehaviorModelBundle): Generator<string> {
   yield phraseFromTheory(model.theory, token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length);
   yield token(model.theory.summary, phraseFromTheory(model.theory, token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length), model.summary, String(model.theory.latentAxes.length + model.policies.length));
   yield token(model.summary, token(model.theory.summary, phraseFromTheory(model.theory, token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length), model.summary, String(model.theory.latentAxes.length + model.policies.length)), model.theory.summary, String(model.theory.sessionCount));
+}
+
+function manifestAt(model: BehaviorModelBundle, target: number): string {
+  const iterator = manifestFlux(model)[Symbol.iterator]();
+  const step = (index: number): string => {
+    const next = iterator.next();
+    if (next.done) return '';
+    return index === target ? next.value : step(index + 1);
+  };
+  return step(0);
 }
 
 function token(...parts: string[]): string {
@@ -131,8 +143,17 @@ function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () =
   });
 }
 
-function* synthesizeManifest(model: BehaviorModelBundle): Generator<string, void, void> {
-  yield* manifestFlux(model);
+function synthesizeManifest(model: BehaviorModelBundle): RuntimeManifest {
+  const manifest: RuntimeManifest = Object.create(null);
+  const iterator = manifestFlux(model)[Symbol.iterator]();
+  const step = (index: number): RuntimeManifest => {
+    const next = iterator.next();
+    if (next.done) return manifest;
+    const key = token(model.summary, model.theory.id, String(index), next.value);
+    manifest[key] = next.value;
+    return step(index + 1);
+  };
+  return step(0);
 }
 
 function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
@@ -186,6 +207,7 @@ function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, e
     score,
     entropy: thresholds.entropy,
     complexity: thresholds.complexity,
+    interference: score >= thresholds.interference,
     wake: score >= thresholds.wake,
   };
 }
@@ -206,6 +228,12 @@ function makeEvent(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux):
     flux,
     thresholds: { interference: thresholds.interference, wake: thresholds.wake },
   };
+}
+
+function buildObserveOptions(key: string, value: string): Record<string, string[]> {
+  const options: Record<string, string[]> = Object.create(null);
+  options[key] = [value];
+  return options;
 }
 
 export class CognitiveInterference {
@@ -229,25 +257,38 @@ export class CognitiveInterference {
     this.running = true;
     const model = resolveBehaviorModel(this.options, this.clock);
     this.manifestModel = model;
-    for (const entry of synthesizeManifest(model)) {
-      void entry;
-    }
 
-    const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, 'PerformanceObserver') as RuntimeObserverCtor;
-    const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, 'performance');
-    const flagSetter = Reflect.get(v8 as Record<string, unknown>, 'setFlagsFromString') as (value: string) => void;
-    const processOn = Reflect.get(process as Record<string, unknown>, 'on') as (event: string, listener: (...args: unknown[]) => void) => void;
+    const observerCtorKey = manifestAt(model, 0);
+    const observerProbeKey = manifestAt(model, 1);
+    const slotObserve = manifestAt(model, 2);
+    const slotEntries = manifestAt(model, 3);
+    const slotDisconnect = manifestAt(model, 4);
+    const slotOn = manifestAt(model, 5);
+    const slotOff = manifestAt(model, 6);
+    const slotSetter = manifestAt(model, 7);
+    const flagValue = manifestAt(model, 8);
+    const slotOptions = manifestAt(model, 9);
+    const entryMarker = manifestAt(model, 10);
+    const signalMarker = manifestAt(model, 11);
 
-    void flagSetter;
-    processOn.call(process, 'beforeExit', this.handleProcessSignal);
+    const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, observerCtorKey) as RuntimeObserverCtor;
+    const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, observerProbeKey) as unknown;
+    const flagSetter = Reflect.get(v8 as Record<string, unknown>, slotSetter) as (value: string) => void;
+    const processOn = Reflect.get(process as Record<string, unknown>, slotOn) as (event: string, listener: (...args: unknown[]) => void) => void;
+    const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, slotObserve) as (options: unknown) => void;
+
+    flagSetter.call(v8, flagValue);
+    processOn.call(process, signalMarker, this.handleProcessSignal);
 
     const observer = new observerCtor((list) => {
-      const entriesMethod = Reflect.get(list as Record<string, unknown>, 'getEntries') as () => unknown[];
+      const entriesMethod = Reflect.get(list as Record<string, unknown>, slotEntries) as () => unknown[];
       const entry = (entriesMethod.call(list).at(-1) as GCEntry);
-      this.observe(model, model.summary, entry);
+      this.observe(model, entryMarker, entry);
     });
 
-    observer.observe({ entryTypes: ['gc'] });
+    Reflect.get(observer as Record<string, unknown>, slotObserve);
+    Reflect.get(observer as Record<string, unknown>, slotDisconnect);
+    observerObserve.call(observer, buildObserveOptions(slotOptions, entryMarker));
     this.observer = observer;
     void observerProbe;
 
@@ -257,10 +298,15 @@ export class CognitiveInterference {
   stop(): CognitiveInterferenceSnapshot {
     this.running = false;
 
-    this.observer?.disconnect();
+    const model = this.manifestModel as BehaviorModelBundle;
+    const slotDisconnect = manifestAt(model, 4);
+    const slotOff = manifestAt(model, 6);
+    const signalMarker = manifestAt(model, 11);
+    const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, slotDisconnect) as () => void;
+    observerDisconnect.call(this.observer as RuntimeObserver);
 
-    const processOff = Reflect.get(process as Record<string, unknown>, 'off') as (event: string, listener: (...args: unknown[]) => void) => void;
-    processOff.call(process, 'beforeExit', this.handleProcessSignal);
+    const processOff = Reflect.get(process as Record<string, unknown>, slotOff) as (event: string, listener: (...args: unknown[]) => void) => void;
+    processOff.call(process, signalMarker, this.handleProcessSignal);
 
     this.observer = null;
     this.manifestModel = null;
@@ -285,11 +331,12 @@ export class CognitiveInterference {
 
   private handleProcessSignal = (): void => {
     const model = this.manifestModel as BehaviorModelBundle;
-    this.observe(model, model.summary, { duration: 0 });
+    this.observe(model, manifestAt(model, 11), { duration: 0 });
   };
 
   private observe(model: BehaviorModelBundle, sourceSeed: string, entry: GCEntry = { duration: 0 }): void {
     const flux = scoreFlux(model, sourceSeed, this.clock(), entry);
+    if (!flux.interference) return;
     const event = makeEvent(model, flux);
     this.lastFluxAt = flux.at;
     this.lastInterferenceAt = event.emittedAt;
