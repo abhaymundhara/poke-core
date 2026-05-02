@@ -158,6 +158,7 @@ function semanticSignalSeed(objective: string, harnessState: Record<string, unkn
 export class AutopilotEngine {
   private readonly scheduler: AutopilotSchedulerWorker;
   private readonly liveDaemon: AutopilotLiveDaemon;
+  private readonly liveNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   private readonly subscriptions: AutopilotSubscription[] = [];
   private readonly observations: AutopilotObservation[] = [];
   private readonly signals: AutopilotSignal[] = [];
@@ -198,8 +199,9 @@ export class AutopilotEngine {
         this.auditTrail.push(`live-wake:${reason}`);
         this.auditTrail.push(`live-wake-payload:${JSON.stringify(payload)}`);
       },
-      nluProvider: DEFAULT_LLM_SEMANTIC_NLU_PROVIDER,
+      nluProvider: this.liveNluProvider,
     }, asNumber(this.context.daemonIntervalMs, 15_000));
+    this.auditTrail.push(`live-nlu-provider:${this.liveNluProvider.name}`);
     this.seed();
     if (this.context.liveDaemon !== false) this.startDaemon(asNumber(this.context.daemonIntervalMs, 15_000));
   }

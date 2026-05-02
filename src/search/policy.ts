@@ -292,31 +292,45 @@ function applySynthesizedArchitecture(state: SearchPolicyState, synthesized: Sea
 function synthesizeRuntimePolicy(outcome: SearchOutcome, current: SearchPolicyState): SearchPolicyFeedback & { strategyLogic: Partial<StrategyLogic>; architecture: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>> } {
   const source = outcome.source ? String(outcome.source) : 'web';
   const utility = outcome.useful ?? outcome.score >= 0.7;
+  const priorLogic = current.reasoningArchitecture?.strategyLogic ?? baseStrategyLogic();
+  const sourceNeighborhood = [...new Set([source, ...(outcome.resultDomains ?? []).slice(0, 3)])].filter(Boolean);
+  const logicHash = stableHash([outcome.sessionKey, outcome.strategyId, source, ...(outcome.resultDomains ?? [])].join('|')).slice(0, 12);
   const summaryBits = [
     utility ? 'reinforce' : 'correct',
     outcome.strategyId,
     outcome.query,
     source,
     `score=${outcome.score.toFixed(2)}`,
+    `logic=${logicHash}`,
   ];
   const strategyLogic: Partial<StrategyLogic> = {
-    search: outcome.hopsUsed && outcome.hopsUsed > 2 ? 'llm-semantic-decomposition' : current.reasoningArchitecture?.strategyLogic?.search ?? 'semantic-decomposition',
-    trust: utility ? 'epistemic-corroboration-learning' : 'epistemic-corroboration-learning+contradiction-resolver',
-    conflict: outcome.relevantCount && outcome.relevantCount > 1 ? 'graph-conditioned-logical-reconciliation' : current.reasoningArchitecture?.strategyLogic?.conflict ?? 'graph-conditioned-entailment',
-    searchSources: [...new Set([...(current.reasoningArchitecture?.strategyLogic?.searchSources ?? []), source, ...(outcome.resultDomains ?? []).slice(0, 2)])],
-    trustSignals: [...new Set([...(current.reasoningArchitecture?.strategyLogic?.trustSignals ?? []), 'cross-corroboration', 'evidence-outcome', 'domain-memory'])],
-    conflictSignals: [...new Set([...(current.reasoningArchitecture?.strategyLogic?.conflictSignals ?? []), 'semantic-embedding', 'graph-neighborhood', 'proposition-consistency'])],
+    search: outcome.hopsUsed && outcome.hopsUsed > 2
+      ? 'llm-semantic-decomposition+cross-hop-planning'
+      : utility
+        ? 'llm-semantic-decomposition'
+        : 'llm-semantic-decomposition+counterevidence-expansion',
+    trust: utility
+      ? 'epistemic-corroboration-learning+domain-expertise-model'
+      : 'epistemic-corroboration-learning+domain-expertise-model+outcome-calibration',
+    conflict: outcome.relevantCount && outcome.relevantCount > 1
+      ? 'graph-conditioned-logical-reconciliation'
+      : 'semantic-entailment-check+contradiction-resolution',
+    searchSources: [...new Set([...(priorLogic.searchSources ?? []), ...sourceNeighborhood])],
+    trustSignals: [...new Set([...(priorLogic.trustSignals ?? []), 'cross-corroboration', 'evidence-outcome', 'domain-memory', 'expertise-embedding'])],
+    conflictSignals: [...new Set([...(priorLogic.conflictSignals ?? []), 'semantic-entailment', 'logical-consistency', 'counterevidence', 'graph-neighborhood'])],
   };
   return {
     summary: summaryBits.join(' | '),
     latentNeeds: outcome.resultDomains ?? [],
     successfulSources: utility ? [source] : [],
     failedSources: utility ? [] : [source],
-    sourceReliability: utility ? { [source]: clamp((current.sourceReliability[source]?.score ?? 0.6) * 0.9 + 0.1 * outcome.score) } : { [source]: clamp((current.sourceReliability[source]?.score ?? 0.6) * 0.94 - 0.02) },
+    sourceReliability: utility ? { [source]: clamp((current.sourceReliability[source]?.score ?? 0.6) * 0.88 + 0.12 * outcome.score) } : { [source]: clamp((current.sourceReliability[source]?.score ?? 0.6) * 0.92 - 0.02) },
     strategyLogic,
     architecture: {
       explanationStyle: outcome.score >= 0.8 ? 'thorough' : outcome.score >= 0.6 ? 'balanced' : 'compact',
-      activeModules: outcome.score < 0.6 ? ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite'] : current.reasoningArchitecture?.activeModules,
+      activeModules: priorLogic.search.includes('counterevidence') || !utility
+        ? ['semantic-nlu', 'epistemic-trust', 'proposition-reasoning', 'intent-forecasting', 'policy-rewrite']
+        : current.reasoningArchitecture?.activeModules,
     },
   };
 }
@@ -349,14 +363,13 @@ export class SearchPolicyStore {
     profile.averageScore = profile.averageScore === 0 ? outcome.score : profile.averageScore * 0.7 + outcome.score * 0.3;
     state.queryProfiles[outcome.sessionKey] = profile;
     const runtimeFeedback = synthesizeRuntimePolicy(outcome, state);
+    applySynthesizedArchitecture(state, runtimeFeedback, 'outcome');
     const architecture = ensureArchitecture(state);
-    architecture.selfModificationCount += 1;
-    architecture.rewriteHistory.push({ at: nowMs(), source: 'outcome', change: runtimeFeedback.summary });
-    architecture.strategyBias[outcome.strategyId] = clamp((architecture.strategyBias[outcome.strategyId] ?? 0) * 0.82 + outcome.score * 0.18);
+    architecture.strategyBias[outcome.strategyId] = clamp((architecture.strategyBias[outcome.strategyId] ?? 0) * 0.8 + outcome.score * 0.2);
     if (!useful || outcome.score < 0.6) {
-      architecture.strategyBias['proposition-reasoning'] = clamp((architecture.strategyBias['proposition-reasoning'] ?? 0.08) + 0.05);
-      architecture.strategyBias['epistemic-trust'] = clamp((architecture.strategyBias['epistemic-trust'] ?? 0.08) + 0.05);
-      architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.03);
+      architecture.strategyBias['proposition-reasoning'] = clamp((architecture.strategyBias['proposition-reasoning'] ?? 0.08) + 0.07);
+      architecture.strategyBias['epistemic-trust'] = clamp((architecture.strategyBias['epistemic-trust'] ?? 0.08) + 0.07);
+      architecture.strategyBias['semantic-first'] = clamp((architecture.strategyBias['semantic-first'] ?? 0.08) + 0.04);
     }
     state.epistemicModel = updateEpistemicTrustModel(state.epistemicModel, { source, resultDomains: outcome.resultDomains ?? [], useful, score: outcome.score, notes: outcome.notes ?? [] });
     state.reasoningArchitecture = architecture;

@@ -128,30 +128,57 @@ export function updateEpistemicTrustModel(model: NonNullable<SearchPolicyState['
   const next = model ?? initialEpistemicTrustModel();
   const useful = outcome.useful ?? outcome.score >= 0.7;
   const domains = (outcome.resultDomains ?? []).filter(Boolean).map(domainKey);
+  const domainSet = [...new Set(domains)];
   const sourceKey = String(outcome.source);
-  const sourceEntry = ensureTrustEntry(next.sourceMemory, sourceKey, epistemicClassFor(outcome.source, domains[0] ?? ''));
+  const classKey = epistemicClassFor(outcome.source, domainSet[0] ?? sourceKey);
   const evidenceVector = outcomeVector(outcome);
-  updateEntry(sourceEntry, evidenceVector, useful, outcome.score, sourceKey, domains, outcome.notes ?? []);
+  const sourceEntry = ensureTrustEntry(next.sourceMemory, sourceKey, classKey);
+  const domainEntries = (domainSet.length > 0 ? domainSet : [sourceKey]).map((domain) => ({
+    domain,
+    entry: ensureTrustEntry(next.domainMemory, domain, epistemicClassFor(outcome.source, domain)),
+  }));
+  const domainAffinity = domainEntries.length > 0
+    ? average(domainEntries.map(({ entry }) => cosineSimilarity(entry.representation, evidenceVector)))
+    : 0.5;
+  const peerAffinity = domainEntries.length > 1
+    ? average(domainEntries.map(({ entry }, index) => average(domainEntries.filter((_, otherIndex) => otherIndex !== index).map(({ entry: peerEntry }) => cosineSimilarity(entry.representation, peerEntry.representation)))))
+    : domainAffinity;
+  const corroborationPressure = clamp(domainAffinity * 0.58 + peerAffinity * 0.42);
 
-  for (const domain of domains.length > 0 ? domains : [sourceKey]) {
-    const domainEntry = ensureTrustEntry(next.domainMemory, domain, epistemicClassFor(outcome.source, domain));
-    updateEntry(domainEntry, evidenceVector, useful, outcome.score, domain, domains.filter((value) => value !== domain), outcome.notes ?? []);
+  updateEntry(sourceEntry, evidenceVector, useful, outcome.score, sourceKey, domainSet, outcome.notes ?? []);
+  sourceEntry.mean = clamp(sourceEntry.mean * 0.76 + corroborationPressure * 0.18 + (useful ? 0.04 : -0.05));
+  sourceEntry.variance = clamp(sourceEntry.variance * 0.84 + Math.abs(sourceEntry.mean - corroborationPressure) * 0.09, 0.02, 0.5);
+  sourceEntry.representation = blendVector(sourceEntry.representation, evidenceVector, 0.6);
+  sourceEntry.classPosterior[classKey] = clamp((sourceEntry.classPosterior[classKey] ?? 0.2) * 0.74 + corroborationPressure * 0.16 + (useful ? 0.06 : 0.03), 0, 1);
+
+  for (const { domain, entry } of domainEntries) {
+    const peerSupport = domainEntries.length > 1
+      ? average(domainEntries.filter((candidate) => candidate.domain !== domain).map((candidate) => cosineSimilarity(entry.representation, candidate.entry.representation)))
+      : corroborationPressure;
+    updateEntry(entry, evidenceVector, useful, outcome.score, domain, domainSet.filter((value) => value !== domain), outcome.notes ?? []);
+    entry.mean = clamp(entry.mean * 0.7 + corroborationPressure * 0.12 + peerSupport * 0.1 + (useful ? 0.05 : -0.06));
+    entry.variance = clamp(entry.variance * 0.82 + Math.abs(entry.mean - peerSupport) * 0.07, 0.02, 0.5);
+    entry.representation = blendVector(entry.representation, evidenceVector, 0.57);
+    entry.classPosterior[entry.epistemicClass] = clamp((entry.classPosterior[entry.epistemicClass] ?? 0.2) * 0.73 + peerSupport * 0.18 + (useful ? 0.05 : 0.02), 0, 1);
+    if (outcome.notes?.length) entry.notes.push(...outcome.notes.map((note) => `cross-corroboration:${domain}:${note}`));
   }
 
-  for (let i = 0; i < domains.length; i += 1) {
-    const left = domains[i];
-    for (let j = i + 1; j < domains.length; j += 1) {
-      const right = domains[j];
-      next.corroborationGraph[left] ??= {};
+  for (let i = 0; i < domainSet.length; i += 1) {
+    const left = domainSet[i];
+    next.corroborationGraph[left] ??= {};
+    for (let j = i + 1; j < domainSet.length; j += 1) {
+      const right = domainSet[j];
       next.corroborationGraph[right] ??= {};
-      next.corroborationGraph[left][right] = clamp((next.corroborationGraph[left][right] ?? 0.1) * 0.8 + (useful ? 0.18 : -0.06) + outcome.score * 0.06, 0, 1);
-      next.corroborationGraph[right][left] = clamp((next.corroborationGraph[right][left] ?? 0.1) * 0.8 + (useful ? 0.18 : -0.06) + outcome.score * 0.06, 0, 1);
+      const leftEntry = next.domainMemory[left];
+      const rightEntry = next.domainMemory[right];
+      const pairAffinity = leftEntry && rightEntry ? cosineSimilarity(leftEntry.representation, rightEntry.representation) : corroborationPressure;
+      next.corroborationGraph[left][right] = clamp((next.corroborationGraph[left][right] ?? 0.1) * 0.74 + pairAffinity * 0.16 + (useful ? 0.08 : -0.05) + outcome.score * 0.06, 0, 1);
+      next.corroborationGraph[right][left] = clamp((next.corroborationGraph[right][left] ?? 0.1) * 0.74 + pairAffinity * 0.16 + (useful ? 0.08 : -0.05) + outcome.score * 0.06, 0, 1);
     }
   }
 
-  const classKey = epistemicClassFor(outcome.source, domains[0] ?? sourceKey);
-  next.knowledgeClassRepresentations[classKey] = blendVector(next.knowledgeClassRepresentations[classKey] ?? vectorize(classKey), evidenceVector, 0.62);
-  next.calibration = clamp(next.calibration * 0.84 + (useful ? 0.18 : 0.08) + outcome.score * 0.06);
+  next.knowledgeClassRepresentations[classKey] = blendVector(next.knowledgeClassRepresentations[classKey] ?? vectorize(classKey), evidenceVector, 0.58);
+  next.calibration = clamp(next.calibration * 0.81 + corroborationPressure * 0.12 + peerAffinity * 0.05 + (useful ? 0.03 : 0.01) + outcome.score * 0.04);
   return next;
 }
 
