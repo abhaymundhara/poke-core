@@ -369,9 +369,10 @@ async function invokeSemanticNluProvider(objective: string, context: Record<stri
 function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider: string, fallbackUsed: boolean): SearchIntent {
   const normalizedObjective = objective.trim();
   const sourceHints = uniq(nlu.sourcePriors.map((prior) => prior.source).filter((source): source is SearchSource => source === 'web' || source === 'realtime-web' || source === 'scholar' || source === 'github' || source === 'memory' || source === 'email' || source === 'calendar' || source === 'filesystem' || source === 'integration'));
-  const querySeeds = uniq([nlu.semanticQuery, ...nlu.entities.map((entity) => `${entity} ${nlu.topics[0] ?? ''}`.trim()), ...nlu.topics.map((topic) => `${topic} ${nlu.entities[0] ?? ''}`.trim())]).slice(0, 6);
-  const evidenceTerms = uniq([...nlu.entities, ...nlu.topics, ...words(`${normalizedObjective} ${nlu.semanticQuery}`)]).slice(0, 16);
-  const sessionKey = stableHash(`${nlu.semanticQuery}|${sourceHints.join(',')}|${nlu.freshness}|${nlu.focus}|${nlu.hopBudget}|${nlu.trustMode}`);
+  const querySeeds = uniq([nlu.semanticQuery, ...nlu.entities.map((entity) => (entity + ' ' + (nlu.topics[0] ?? '')).trim()), ...nlu.topics.map((topic) => (topic + ' ' + (nlu.entities[0] ?? '')).trim())]).slice(0, 6);
+  const evidenceTerms = uniq([...nlu.entities, ...nlu.topics, ...words((normalizedObjective + ' ' + nlu.semanticQuery))]).slice(0, 16);
+  const sessionKey = stableHash([nlu.semanticQuery, sourceHints.join(','), nlu.freshness, nlu.focus, String(nlu.hopBudget), nlu.trustMode].join('|'));
+  const fallbackConfidence = fallbackUsed ? clamp(nlu.confidence * 0.92) : nlu.confidence;
   return {
     objective: normalizedObjective,
     normalizedObjective,
@@ -391,11 +392,40 @@ function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider:
     semanticFrames: nlu.semanticFrames,
     decomposedQuestions: nlu.decomposedQuestions,
     ambiguities: nlu.ambiguities,
-    nlu: { provider, confidence: nlu.confidence, fallbackUsed, warnings: nlu.warnings ?? [] },
+    nlu: {
+      provider,
+      confidence: fallbackConfidence,
+      fallbackUsed,
+      warnings: uniq([...(nlu.warnings ?? []), fallbackUsed ? 'heuristic-fallback-used' : 'semantic-provider-used']),
+    },
   };
 }
 
 export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
+  const activeProvider = provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
+  const fallback = normalizeSemanticOutput(localSemanticExtraction(objective, context));
+
+  if (!strict) {
+    return buildIntentFromNlu(objective, {
+      ...fallback,
+      warnings: uniq([...(fallback.warnings ?? []), 'heuristic-only-runtime-path']),
+    }, activeProvider.name, true);
+  }
+
+  try {
+    const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
+    if (extracted) {
+      return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, false);
+    }
+  } catch {
+    // fall through to heuristic fallback
+  }
+
+  return buildIntentFromNlu(objective, {
+    ...fallback,
+    warnings: uniq([...(fallback.warnings ?? []), 'heuristic-fallback:' + activeProvider.name]),
+  }, activeProvider.name, true);
+}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
   const activeProvider = provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
   try {
     const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
