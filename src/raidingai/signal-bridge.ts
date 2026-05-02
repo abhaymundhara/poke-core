@@ -92,39 +92,38 @@ function theoryWords(theory: UserBehaviorTheory): string[] {
   return [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].flatMap(words);
 }
 
+function recursiveSegments(text: string, size: number, index = 0, acc: string[] = []): string[] {
+  if (index >= text.length) return acc;
+  acc.push(text.slice(index, index + size));
+  return recursiveSegments(text, size, index + size, acc);
+}
+
+function uniqueSeries(values: string[], index = 0, acc: string[] = []): string[] {
+  if (index >= values.length) return acc;
+  const value = values[index];
+  if (value && !acc.includes(value)) acc.push(value);
+  return uniqueSeries(values, index + 1, acc);
+}
+
+function recursiveSeries<T>(count: number, factory: (index: number) => T, index = 0, acc: T[] = []): T[] {
+  if (index >= count) return acc;
+  acc.push(factory(index));
+  return recursiveSeries(count, factory, index + 1, acc);
+}
+
+function recursiveSeedSeries(source: string, width: number, count: number, index = 0, acc: string[] = []): string[] {
+  if (index >= count) return acc;
+  acc.push(source.slice(index * width, index * width + width));
+  return recursiveSeedSeries(source, width, count, index + 1, acc);
+}
+
 export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
   const pool = [...theoryWords(theory), token(seed, scope, String(index))];
   const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
   const parts = pool.slice(0, countSeed % pool.length + 1).map((entry, offset) => pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length]);
-  const hashed = chunkText(token(seed, scope, String(index)), 4).slice(0, 2);
-  return cleanText(uniqueValues([...parts, ...hashed]).join(' '));
+  const hashed = recursiveSegments(token(seed, scope, String(index)), 4).slice(0, 2);
+  return cleanText(uniqueSeries([...parts, ...hashed]).join(' '));
 }
-
-function chunkText(text: string, size: number, index = 0, acc: string[] = []): string[] {
-  if (index >= text.length) return acc;
-  acc.push(text.slice(index, index + size));
-  return chunkText(text, size, index + size, acc);
-}
-
-function uniqueValues(values: string[], index = 0, acc: string[] = []): string[] {
-  if (index >= values.length) return acc;
-  const value = values[index];
-  if (value && !acc.includes(value)) acc.push(value);
-  return uniqueValues(values, index + 1, acc);
-}
-
-function buildSeries<T>(count: number, factory: (index: number) => T, index = 0, acc: T[] = []): T[] {
-  if (index >= count) return acc;
-  acc.push(factory(index));
-  return buildSeries(count, factory, index + 1, acc);
-}
-
-function segmentSeeds(source: string, width: number, count: number, index = 0, acc: string[] = []): string[] {
-  if (index >= count) return acc;
-  acc.push(source.slice(index * width, index * width + width));
-  return segmentSeeds(source, width, count, index + 1, acc);
-}
-
 function runtimeLocale(): string {
   const resolved = Intl.DateTimeFormat().resolvedOptions().locale || '';
   const envLocale = process.env.LANG?.split('.')[0] ?? '';
@@ -168,8 +167,8 @@ function entropyPhrase(seed: string, scope: string, index: number, inputs: strin
   const pool = [...inputs.flatMap(words).filter(Boolean), token(seed, scope, String(index))];
   const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
   const parts = pool.slice(0, countSeed % pool.length + 1).map((entry, offset) => pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length]);
-  const hashed = chunkText(token(seed, scope, String(index)), 4).slice(0, 2);
-  return cleanText(uniqueValues([...parts, ...hashed]).join(' '));
+  const hashed = recursiveSegments(token(seed, scope, String(index)), 4).slice(0, 2);
+  return cleanText(uniqueSeries([...parts, ...hashed]).join(' '));
 }
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
   const cwd = process.cwd();
@@ -180,7 +179,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
   const categorySeed = token(localeHint, timeZone, String(now), '0');
   const sourceSeed = token(localeHint, timeZone, String(now), '1');
   const observationCount = Number.parseInt(token(localeHint, timeZone, String(now), 'observations').slice(0, 2), 16) % Math.max(1, entropy.length) || entropy.length;
-  return buildSeries(observationCount, (index) => {
+  return recursiveSeries(observationCount, (index) => {
     const categoryBand = token(categorySeed, localeHint).length || entropy.length;
     const category = token(categorySeed, String(index % categoryBand));
     const sourceBand = token(sourceSeed, timeZone).length || entropy.length;
@@ -210,7 +209,7 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
 
 function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): MemoryFact[] {
   const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
-  return buildSeries(Math.max(5, pools.length || 0), (index) => {
+  return recursiveSeries(Math.max(5, pools.length || 0), (index) => {
     const base = pools[index % (pools.length || 1)] ?? theory.summary;
     return {
       key: token(base, localeHint, timeZone, String(index)),
@@ -224,7 +223,7 @@ function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: s
 
 function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: string): EpisodicMemoryItem[] {
   const pools = [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)];
-  return buildSeries(4, (index) => {
+  return recursiveSeries(4, (index) => {
     const base = pools[index % (pools.length || 1)] ?? theory.summary;
     return {
       id: token(base, localeHint, String(index)),
@@ -241,9 +240,8 @@ function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: stri
 function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string): VisionFrame[] {
   const scope = token(theory.summary, localeHint, String(now));
   const frameCount = Number.parseInt(token(scope, theory.summary, localeHint, 'frames').slice(0, 1), 16) % 3 + 2;
-  const frameSeeds = segmentSeeds(scope, 4, frameCount);
-  return buildSeries(frameSeeds.length, (index) => {
-    const fragment = frameSeeds[index] ?? scope.slice(index * 4, index * 4 + 4);
+  const frameSeeds = recursiveSeedSeries(scope, 4, frameCount);
+  return recursiveSeries(frameSeeds.length, (index) => {
     const frameSeed = token(scope, fragment, String(index));
     return {
       id: token(scope, frameSeed, String(index)),
@@ -261,18 +259,15 @@ function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: stri
   });
 }
 function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Attendee[] {
-  const seed = [localeHint, timeZone, roleName].join('|');
+  const seed = `${localeHint}|${timeZone}|${roleName}`;
   const attendeeCount = Number.parseInt(token(seed, theory.summary, 'attendees').slice(0, 1), 16) % 3 + 2;
-  const attendeeSeeds = segmentSeeds(seed, 4, attendeeCount);
-  return buildSeries(attendeeSeeds.length, (index) => {
-    const fragment = attendeeSeeds[index] ?? seed.slice(index * 4, index * 4 + 4);
-    return {
-      email: token(seed, fragment, localeHint) + '@' + token(seed, localeHint, fragment) + '.local',
-      name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
-      locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
-      timezone: timeZone,
-    };
-  });
+  const attendeeSeeds = recursiveSeedSeries(seed, 4, attendeeCount);
+  return recursiveSeries(attendeeSeeds.length, (index) => ({
+    email: `${token(seed, fragment, localeHint)}@${token(seed, localeHint, fragment)}.local`,
+    name: phraseFromTheory(theory, seed, token(seed, localeHint, fragment), index),
+    locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
+    timezone: timeZone,
+  }));
 }
 
 function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): ThreadIdentityInput {
@@ -328,7 +323,7 @@ export class SignalBridge {
       now,
       capturedAt: new Date(now).toISOString(),
       localeHint,
-      locales: uniqueValues([localeHint, ...splitLocale(localeHint)]).filter(Boolean),
+      locales: uniqueSeries([localeHint, ...splitLocale(localeHint)]).filter(Boolean),
       timeZone,
       timezoneLocal,
       timezoneExpectedUtc,
