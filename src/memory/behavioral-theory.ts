@@ -282,7 +282,7 @@ function buildGeneralizations(axes: LatentBehaviorSignal[], observations: Behavi
 
   for (const observation of observations) {
     const domains = [domainFromObservation(observation)];
-    register(`${normalize(observation.category)} clusters around the same signal`, domains, observation.evidence ?? [], 0.45 + observation.confidence * 0.2);
+    register(`${normalize(observation.category)} clusters around the same signal`, domains, observation.evidence ?? [], 0.43 + observation.confidence * 0.22);
   }
 
   for (const fact of facts) {
@@ -390,7 +390,7 @@ function inferNeedForecasts(axes: LatentBehaviorSignal[], policies: BehaviorPoli
     push(
       stableId('need', [String(now), String(index)]).slice(0, 16),
       Math.min(1, 0.27 + urgency * 0.24 + index * 0.03),
-      240 + index * 45,
+      240 + index * Math.max(9, policies.length + 1),
       activePolicy?.action.value ?? stableId('action', [String(now), String(index)]).slice(0, 12),
       'fallback forecast derived from the current behavioral state',
       ['state', 'fallback'],
