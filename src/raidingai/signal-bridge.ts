@@ -561,32 +561,33 @@ function* threadIdentityReferences(rootMessageId: string): Generator<string, voi
   yield rootMessageId;
 }
 
-function* buildThreadIdentity(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string, timeZone: string, rootMessageId: string, stage = 0): Generator<string, void, void> {
+function* buildThreadIdentity(theory: UserBehaviorTheory, subjectScope: string, messageSeed: string, timeZone: string, rootMessageId: string, localeHint: string, roleName: string, stage = 0): Generator<string | Attendee, void, void> {
   if (stage === 0) {
     yield* threadIdentitySubject(theory, subjectScope, messageSeed);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 1);
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 1);
     return;
   }
   if (stage === 1) {
     yield* threadIdentityMessageId(subjectScope, messageSeed, timeZone);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 2);
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 2);
     return;
   }
   if (stage === 2) {
     yield* threadIdentityRoot(rootMessageId);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 3);
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 3);
     return;
   }
   if (stage === 3) {
     yield* threadIdentityInReplyTo(rootMessageId);
-    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, 4);
+    yield* buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName, 4);
     return;
   }
   yield* threadIdentityReferences(rootMessageId);
+  yield* buildAttendees(theory, localeHint, timeZone, roleName);
 }
 
 function composeThreadIdentity(theory: UserBehaviorTheory, localeHint: string, timeZone: string, subjectScope: string, rootMessageId: string, messageSeed: string, roleName: string): ThreadIdentityInput {
-  const fields = buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId)[Symbol.iterator]();
+  const fields = buildThreadIdentity(theory, subjectScope, messageSeed, timeZone, rootMessageId, localeHint, roleName)[Symbol.iterator]();
   const subject = String(fields.next().value ?? '');
   const messageId = String(fields.next().value ?? token(subjectScope, messageSeed, timeZone));
   const root = String(fields.next().value ?? rootMessageId);
