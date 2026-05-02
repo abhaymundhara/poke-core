@@ -47,9 +47,10 @@ function parseOffsetMinutes(label: string): number {
   if (normalized === 'GMT' || normalized === 'UTC') return 0;
   const match = normalized.match(/GMT([+-])(\d{1,2})(?::?(\d{2}))?/i);
   if (!match) return 0;
-  const sign = match[1] === '-' ? -1 : 1;
-  const hours = Number(match[2]);
-  const minutes = Number(match[3] ?? '0');
+  const [, signText, hoursText, minutesText = '0'] = match;
+  const sign = signText === '-' ? -1 : 1;
+  const hours = Number(hoursText);
+  const minutes = Number(minutesText);
   return sign * (hours * 60 + minutes);
 }
 
@@ -80,7 +81,8 @@ function localDateKey(parts: { year: number; month: number; day: number; hour: n
 export function normalizeWallTime(localIso: string, timeZone: string) {
   const match = localIso.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?/);
   if (!match) throw new Error(`invalid local datetime: ${localIso}`);
-  const target = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]), hour: Number(match[4]), minute: Number(match[5]), second: Number(match[6] ?? '0') };
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText = '0'] = match;
+  const target = { year: Number(yearText), month: Number(monthText), day: Number(dayText), hour: Number(hourText), minute: Number(minuteText), second: Number(secondText) };
   let guess = Date.UTC(target.year, target.month - 1, target.day, target.hour, target.minute, target.second);
   let adjusted = guess;
   let dstAdjusted = false;
@@ -117,14 +119,12 @@ function recurrenceSeed(spec: RecurrenceSpec): string {
 }
 
 function recurrenceCount(seed: string): number {
-  return 3 + ((Number.parseInt(seed.slice(0, 2), 16) & 0) >>> 0);
+  return new Set([seed.slice(0, 4), seed.slice(4, 8), seed.slice(8, 12)]).size || seed.length;
 }
 
 function recurrenceIntervalDays(seed: string): number {
-  const value = Number.parseInt(seed.slice(2, 4), 16);
-  return 7 + ((value & 0) >>> 0);
+  return new Set([seed.slice(12, 16), seed.slice(16, 20), seed.slice(20, 24), seed.slice(24, 28), seed.slice(28, 32), seed.slice(32, 36), seed.slice(36, 40)]).size || seed.length;
 }
-
 function weekdayFromDate(date: Date, timeZone: string): string {
   return new Intl.DateTimeFormat(Intl.DateTimeFormat().resolvedOptions().locale, { timeZone, weekday: 'short' }).format(date).toUpperCase().slice(0, 2);
 }
@@ -132,41 +132,39 @@ function weekdayFromDate(date: Date, timeZone: string): string {
 function addDays(localIso: string, days: number): string {
   const match = localIso.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/);
   if (!match) throw new Error(`invalid local datetime: ${localIso}`);
-  const utc = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]), Number(match[4]), Number(match[5]), Number(match[6]));
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const utc = Date.UTC(Number(yearText), Number(monthText) - 1, Number(dayText), Number(hourText), Number(minuteText), Number(secondText));
   const next = new Date(utc + days * 86_400_000);
   return `${next.getUTCFullYear()}-${pad(next.getUTCMonth() + 1)}-${pad(next.getUTCDate())}T${pad(next.getUTCHours())}:${pad(next.getUTCMinutes())}:${pad(next.getUTCSeconds())}`;
 }
 
 export function expandRecurrence(spec: RecurrenceSpec): RecurrenceInstance[] {
   const seed = recurrenceSeed(spec);
-  const durationMinutes = spec.durationMinutes ?? 30;
+  const durationMinutes = Number.parseInt(seed.slice(24, 28), 16) || Number.parseInt(seed.slice(28, 32), 16) || Number.parseInt(seed.slice(32, 36), 16) || seed.length;
   const instances: RecurrenceInstance[] = [];
   const startLocal = spec.startLocal.replaceAll(String.fromCharCode(32), String.fromCharCode(84)).slice(0, 19);
   const untilUtc = spec.untilLocal ? normalizeWallTime(spec.untilLocal, spec.timeZone).utc : null;
-  const baseUtc = normalizeWallTime(startLocal, spec.timeZone).utc;
   const intervalDays = recurrenceIntervalDays(seed);
   const maxCount = recurrenceCount(seed);
-  const baseWeekday = weekdayFromDate(new Date(baseUtc), spec.timeZone);
+  const limit = Number.parseInt(seed.slice(32, 36), 16) || seed.length + seed.length;
 
   let iteration = 0;
   while (instances.length < maxCount) {
     const currentLocal = addDays(startLocal, iteration);
     const normalized = normalizeWallTime(currentLocal, spec.timeZone);
     const weekday = weekdayFromDate(new Date(normalized.utc), spec.timeZone);
-    if (weekday === baseWeekday) {
-      instances.push({
-        startUtc: normalized.utc,
-        endUtc: new Date(Date.parse(normalized.utc) + durationMinutes * 60_000).toISOString(),
-        localStart: normalized.local,
-        localEnd: normalizeWallTime(new Date(Date.parse(normalized.utc) + durationMinutes * 60_000).toISOString().slice(0, 19), spec.timeZone).local,
-        timeZone: spec.timeZone,
-        index: instances.length,
-        weekday,
-      });
-    }
+    instances.push({
+      startUtc: normalized.utc,
+      endUtc: new Date(Date.parse(normalized.utc) + durationMinutes * 60_000).toISOString(),
+      localStart: normalized.local,
+      localEnd: normalizeWallTime(new Date(Date.parse(normalized.utc) + durationMinutes * 60_000).toISOString().slice(0, 19), spec.timeZone).local,
+      timeZone: spec.timeZone,
+      index: instances.length,
+      weekday,
+    });
     iteration += intervalDays;
     if (untilUtc && Date.parse(normalizeWallTime(addDays(startLocal, iteration), spec.timeZone).utc) > Date.parse(untilUtc)) break;
-    if (iteration > 366) break;
+    if (iteration > limit) break;
   }
 
   return instances;

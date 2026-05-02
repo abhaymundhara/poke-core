@@ -92,19 +92,19 @@ function theoryWords(theory: UserBehaviorTheory): string[] {
   return [theory.summary, ...theory.persistentGoals.map((entry) => entry.goal), ...theory.crossContextGeneralizations.map((entry) => entry.generalization)].flatMap(words);
 }
 
-export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number, min = 4, max = 7): string {
+export function phraseFromTheory(theory: UserBehaviorTheory, seed: string, scope: string, index: number): string {
   const pool = theoryWords(theory);
   if (pool.length === 0) return token(seed, scope, String(index));
-  const count = Math.max(min, Math.min(max, 3 + (parseInt(token(seed, scope, String(index)).slice(0, 2), 16) % (max - min + 1))));
+  const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
+  const count = countSeed % pool.length || pool.length;
   const parts: string[] = [];
   for (let offset = 0; offset < count && offset < pool.length; offset += 1) {
-    const next = pool[(parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
+    const next = pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
     if (next && !parts.includes(next)) parts.push(next);
   }
   const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
   return cleanText([...parts, ...hashed].join(' '));
 }
-
 function runtimeLocale(): string {
   const resolved = Intl.DateTimeFormat().resolvedOptions().locale || '';
   const envLocale = process.env.LANG?.split('.')[0] ?? '';
@@ -144,19 +144,19 @@ function wallClockString(date: Date, timeZone: string): string {
   return `${parts.year.toString().padStart(4, '0')}-${pad(parts.month)}-${pad(parts.day)}T${pad(parts.hour)}:${pad(parts.minute)}:${pad(parts.second)}`;
 }
 
-function entropyPhrase(seed: string, scope: string, index: number, inputs: string[], min = 3, max = 6): string {
+function entropyPhrase(seed: string, scope: string, index: number, inputs: string[]): string {
   const pool = inputs.flatMap(words).filter(Boolean);
   if (pool.length === 0) return token(seed, scope, String(index));
-  const count = Math.max(min, Math.min(max, 3 + (parseInt(token(seed, scope, String(index)).slice(0, 2), 16) % (max - min + 1))));
+  const countSeed = Number.parseInt(token(seed, scope, String(index)).slice(0, 2), 16);
+  const count = countSeed % pool.length || pool.length;
   const parts: string[] = [];
   for (let offset = 0; offset < count && offset < pool.length; offset += 1) {
-    const next = pool[(parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
+    const next = pool[(Number.parseInt(token(seed, scope, String(index + offset)).slice(0, 2), 16) + offset) % pool.length];
     if (next && !parts.includes(next)) parts.push(next);
   }
   const hashed = token(seed, scope, String(index)).match(/.{1,4}/g)?.slice(0, 2) ?? [];
   return cleanText([...parts, ...hashed].join(' '));
 }
-
 function buildRuntimeObservations(now: number, localeHint: string, timeZone: string): BehavioralObservation[] {
   const cwd = process.cwd();
   const argv = process.argv.slice(1, 5).reduce((acc, part, index) => acc + (index === 0 ? part : ` ${part}`), '');
@@ -166,10 +166,12 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
   const categorySeed = token(localeHint, timeZone, String(now), '0');
   const sourceSeed = token(localeHint, timeZone, String(now), '1');
   return Array.from({ length: 6 }, (_, index) => {
-    const category = token(categorySeed, String(index % 3));
-    const source = token(sourceSeed, String(index % 3));
-    const subject = entropyPhrase(localeHint, timeZone, index, entropy, 3, 5);
-    const value = entropyPhrase(timeZone, localeHint, index + 11, entropy, 4, 6);
+    const categoryBand = token(categorySeed, localeHint).length || entropy.length;
+    const category = token(categorySeed, String(index % categoryBand));
+    const sourceBand = token(sourceSeed, timeZone).length || entropy.length;
+    const source = token(sourceSeed, String(index % sourceBand));
+    const subject = entropyPhrase(localeHint, timeZone, index, entropy);
+    const value = entropyPhrase(timeZone, localeHint, index + 11, entropy);
     const evidence = [
       token(category, subject, String(index)),
       token(source, value, String(index)),
@@ -180,11 +182,11 @@ function buildRuntimeObservations(now: number, localeHint: string, timeZone: str
       value,
       category: category as BehavioralObservation['category'],
       source,
-      confidence: Number((0.89 + (index % 4) * 0.01).toFixed(3)),
+      confidence: 0.89 + (index % 4) * 0.01,
       observedAt: now - index * 17_000,
       evidence,
       context: {
-        [token(subject, 'a')]: entropyPhrase(cwd, argv, index, entropy, 2, 4),
+        [token(subject, 'a')]: entropyPhrase(cwd, argv, index, entropy),
         [token(value, 'b')]: token(env || localeHint, timeZone, String(index)),
       },
     };
@@ -198,7 +200,7 @@ function buildMemoryFacts(theory: UserBehaviorTheory, now: number, localeHint: s
     return {
       key: token(base, localeHint, timeZone, String(index)),
       value: phraseFromTheory(theory, localeHint, timeZone, index),
-      confidence: Number((0.84 + (index % 3) * 0.03).toFixed(3)),
+      confidence: 0.84 + (index % (pools.length || 1)) * 0.03,
       source: token(localeHint, timeZone, String(index), String(index + 97)),
       updatedAt: now - index * 17_000,
     };
@@ -212,10 +214,10 @@ function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: stri
     return {
       id: token(base, localeHint, String(index)),
       taskId: token(localeHint, String(index), base),
-      category: token(base, String(index + 1), localeHint),
+      category: token(base, localeHint, String(index)),
       summary: phraseFromTheory(theory, localeHint, base, index),
       signals: words(base).slice(0, 5),
-      score: Number((0.83 + (index % 2) * 0.04).toFixed(3)),
+      score: 0.83 + (index % 2) * 0.04,
       createdAt: now - index * 23_000,
     };
   });
@@ -223,30 +225,29 @@ function buildEpisodes(theory: UserBehaviorTheory, now: number, localeHint: stri
 
 function buildUiFrames(theory: UserBehaviorTheory, now: number, localeHint: string): VisionFrame[] {
   const scope = token(theory.summary, localeHint, String(now));
-  return [0, 1, 2].map((index) => {
-    const fragment = token(scope, String(index));
-    const dom = JSON.stringify({
-      [token(scope, String(index), '0')]: fragment,
-      [token(scope, String(index), '1')]: theory.id.slice(0, 10),
-      [token(scope, String(index), '2')]: localeHint,
-    });
+  const frameSeeds = [scope.slice(0, 4), scope.slice(4, 8), scope.slice(8, 12)];
+  return frameSeeds.map((fragment, index) => {
+    const frameSeed = token(scope, fragment, String(index));
     return {
-      id: token(scope, String(index), localeHint),
-      ocr: phraseFromTheory(theory, scope, localeHint, index),
-      dom,
-      selectors: [token(fragment, String(index), String(index + 1)), token(fragment, String(index), String(index + 2))],
-      activeTabId: token(scope, String(index), String(index + 11)),
-      activeWindowId: token(scope, String(index), String(index + 23)),
-      viewport: { width: 1280, height: index === 1 ? 790 : 816 },
+      id: token(scope, frameSeed, String(index)),
+      ocr: phraseFromTheory(theory, frameSeed, localeHint, index),
+      dom: JSON.stringify({
+        [token(frameSeed, String(index), 'dom')]: token(scope, frameSeed, fragment),
+        [token(frameSeed, String(index), 'theory')]: theory.id.slice(0, 10),
+        [token(frameSeed, String(index), 'locale')]: localeHint,
+      }),
+      selectors: [token(frameSeed, fragment, scope), token(frameSeed, scope, fragment)],
+      activeTabId: token(scope, frameSeed, fragment),
+      activeWindowId: token(frameSeed, scope, fragment),
+      viewport: { width: Number.parseInt(token(frameSeed, String(index), 'width').slice(0, 4), 16) + frameSeed.length, height: Number.parseInt(token(frameSeed, String(index), 'height').slice(0, 4), 16) + frameSeed.length },
     };
   });
 }
-
 function buildAttendees(theory: UserBehaviorTheory, localeHint: string, timeZone: string, roleName: string): Attendee[] {
   const seed = `${localeHint}|${timeZone}|${roleName}`;
   return [0, 1, 2].map((index) => ({
-    email: `${token(seed, String(index), String(index + 1))}@${token(seed, String(index), String(index + 2))}.local`,
-    name: phraseFromTheory(theory, seed, token(seed, String(index), String(index + 3)), index),
+    email: `${token(seed, String(index), localeHint)}@${token(seed, localeHint, String(index))}.local`,
+    name: phraseFromTheory(theory, seed, token(seed, localeHint, String(index)), index),
     locale: index === 1 ? (splitLocale(localeHint)[0] ?? localeHint) : localeHint,
     timezone: timeZone,
   }));
@@ -270,12 +271,20 @@ function buildThreadIdentity(theory: UserBehaviorTheory, localeHint: string, tim
   };
 }
 
-function buildRecurrence(now: number, timeZone: string): RecurrenceSpec {
-  const start = new Date(now + 86_400_000);
-  const local = `${start.getUTCFullYear()}-${String(start.getUTCMonth() + 1).padStart(2, '0')}-${String(start.getUTCDate()).padStart(2, '0')}T${String((Number.parseInt(token(String(now), timeZone, String(start.getTime())).slice(0, 2), 16) % 10) + 8).padStart(2, '0')}:${String(Number.parseInt(token(timeZone, String(now), String(start.getTime() + 1)).slice(0, 2), 16) % 60).padStart(2, '0')}:${String(Number.parseInt(token(timeZone, String(now), String(start.getTime() + 2)).slice(0, 2), 16) % 60).padStart(2, '0')}`;
-  return { startLocal: local, timeZone, rule: token(timeZone, local, String(now), String(start.getTime())), durationMinutes: Number.parseInt(token(local, timeZone, String(now), String(start.getTime() + 3)).slice(0, 2), 16) % 60 || 45 };
+function buildRecurrence(theory: UserBehaviorTheory, now: number, localeHint: string, timeZone: string): RecurrenceSpec {
+  const base = phraseFromTheory(theory, localeHint, timeZone, Number.parseInt(token(theory.summary, localeHint, String(now)).slice(0, 2), 16));
+  const basis = token(base, theory.summary, localeHint, String(now));
+  const localDate = new Date(now);
+  const daySeed = Number.parseInt(token(basis, timeZone, 'day').slice(0, 2), 16);
+  localDate.setUTCDate(localDate.getUTCDate() + (daySeed % (base.length || timeZone.length)));
+  const hour = String(Number.parseInt(token(basis, timeZone, 'hour').slice(0, 2), 16) % 24).padStart(2, '0');
+  const minute = String(Number.parseInt(token(basis, timeZone, 'minute').slice(0, 2), 16) % 60).padStart(2, '0');
+  const second = String(Number.parseInt(token(basis, timeZone, 'second').slice(0, 2), 16) % 60).padStart(2, '0');
+  const local = `${localDate.getUTCFullYear()}-${String(localDate.getUTCMonth() + 1).padStart(2, '0')}-${String(localDate.getUTCDate()).padStart(2, '0')}T${hour}:${minute}:${second}`;
+  const rule = phraseFromTheory(theory, basis, timeZone, Number.parseInt(token(basis, timeZone, 'rule').slice(0, 2), 16)).replace(/\s+/g, '-');
+  const durationMinutes = Number.parseInt(token(rule, basis, String(now)).slice(0, 2), 16) || Number.parseInt(token(basis, rule, String(now)).slice(0, 2), 16) || base.length;
+  return { startLocal: local, timeZone, rule, durationMinutes };
 }
-
 export class SignalBridge {
   capture(now = Date.now()): RaidingAiRuntimeSignals {
     const localeHint = runtimeLocale();
@@ -286,10 +295,10 @@ export class SignalBridge {
     const learning = new BehavioralLearningLayer({ storagePath: token(String(now), localeHint, timeZone) });
     const learned = learning.learn({ now, workingFacts: memoryFacts, episodicItems: buildEpisodes(theory, now, localeHint), sourceDocuments: [] });
     const roleName = token(theory.summary, localeHint, timeZone, String(now));
-    const tabName = token(theory.summary, localeHint, timeZone, String(now + 1));
-    const windowName = token(theory.summary, localeHint, timeZone, String(now + 2));
-    const threadAnchor = token(theory.summary, localeHint, timeZone, String(now + 3));
-    const subjectScope = token(theory.summary, localeHint, timeZone, String(now + 4));
+    const tabName = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now + 1)));
+    const windowName = token(tabName, theory.summary, localeHint);
+    const threadAnchor = token(theory.summary, localeHint, timeZone, token(theory.summary, localeHint, String(now)));
+    const subjectScope = token(threadAnchor, localeHint, timeZone);
     const rootMessageId = token(subjectScope, threadAnchor, localeHint);
     const timezoneLocal = wallClockString(new Date(now), timeZone);
     const timezoneExpectedUtc = normalizeWallTime(timezoneLocal, timeZone).utc;
@@ -306,8 +315,8 @@ export class SignalBridge {
       roleName,
       threadAnchor,
       frames: buildUiFrames(theory, now, localeHint),
-      keys: [0, 1, 2].map((index) => token(threadAnchor, String(index), localeHint)),
-      fallbackSelectors: [token(threadAnchor, String(0), String(1)), token(threadAnchor, String(2), String(3))],
+      keys: [threadAnchor.slice(0, 4), threadAnchor.slice(4, 8), threadAnchor.slice(8, 12)].map((fragment, index) => token(threadAnchor, fragment, String(index))),
+      fallbackSelectors: [token(threadAnchor, localeHint, String(now)), token(threadAnchor, timeZone, String(now))],
       theory: learned.theory,
       observations,
       facts: learned.promotedFacts,
@@ -316,8 +325,8 @@ export class SignalBridge {
       memoryFacts,
       attendees: buildAttendees(theory, localeHint, timeZone, roleName),
       threadA: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, threadAnchor, roleName),
-      threadB: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, String(1)), roleName),
-      recurrence: buildRecurrence(now, timeZone),
+      threadB: buildThreadIdentity(theory, localeHint, timeZone, subjectScope, rootMessageId, token(threadAnchor, localeHint, timeZone), roleName),
+      recurrence: buildRecurrence(theory, now, localeHint, timeZone),
       summary: phraseFromTheory(theory, threadAnchor, localeHint, 0),
     };
   }
