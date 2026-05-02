@@ -13,7 +13,7 @@ import type {
 } from './types';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from './search/nlu';
 import type { SearchIntent } from './search/types';
-import { parseModelJson } from './llm-bridge';
+import { extractWithDefaultProviderSync, parseModelJson } from './llm-bridge';
 
 export type PlannerResolveContext = Record<string, unknown> & {
   semanticIntent?: SearchIntent;
@@ -191,7 +191,11 @@ export function notePlannerRecovery(state: PlannerRuntimeState | undefined, step
   return next;
 }
 
-export async function deriveExecutionProfile(plan: TaskPlan): Promise<ExecutionProfile> {
-  const raw = await DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.extract({ objective: 'derive the execution profile for a completed task plan', context: { plan, semanticIntent: plan.semanticIntent ?? null, intentGraph: plan.intentGraph ?? null, planner: plan.planner ?? null }, schema: EXECUTION_PROFILE_SCHEMA });
+export function deriveExecutionProfile(plan: TaskPlan): ExecutionProfile {
+  const raw = extractWithDefaultProviderSync<ExecutionProfile>({
+    objective: 'derive the execution profile for a completed task plan',
+    context: { plan, semanticIntent: plan.semanticIntent ?? null, intentGraph: plan.intentGraph ?? null, planner: plan.planner ?? null },
+    schema: EXECUTION_PROFILE_SCHEMA,
+  });
   return parseModelJson<ExecutionProfile>(raw);
 }
