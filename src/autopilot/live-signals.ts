@@ -1,5 +1,5 @@
 import { createObservation, createSignal, type AutopilotObservation, type AutopilotSignal, type AutopilotSignalSource } from './events';
-import { createSearchSession, type SearchPlan, type SearchResult, type SearchSignalForecast, type SemanticNluProvider } from '../search/index.ts';
+import { createSearchSession, DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SearchPlan, type SearchResult, type SearchSignalForecast, type SemanticNluProvider } from '../search/index.ts';
 import { listIssues, listPullRequests } from '../../../../mcp/github-2-5fa2cac3-9210-42b4-8e09-3c789dc5c9e3.ts';
 import { realtimeWebSearch } from '../../../../poke/search/realtime_web_search.ts';
 
@@ -596,7 +596,7 @@ export class AutopilotLiveDaemon {
   private readonly session;
 
   constructor(private readonly deps: LiveDaemonDependencies, private intervalMs = 30_000) {
-    this.session = createSearchSession({ nluProvider: deps.nluProvider, behaviorSeed: deps.context ?? { query: deps.query }, strictSemanticNlu: true });
+    this.session = createSearchSession({ nluProvider: deps.nluProvider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, behaviorSeed: deps.context ?? { query: deps.query }, strictSemanticNlu: false });
   }
 
   start(intervalMs = this.intervalMs): void {
