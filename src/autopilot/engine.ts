@@ -134,17 +134,24 @@ function buildCheckIn(label: string, minutes: number, channel: AutopilotCheckIn[
   };
 }
 
-function semanticBootstrapSignal(objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>): AutopilotSignal {
+function semanticSignalSeed(objective: string, harnessState: Record<string, unknown>, context: Record<string, unknown>, seed: Record<string, unknown> = {}): AutopilotSignal {
+  const explicitTags = Array.isArray(seed.tags) ? seed.tags.map(normalizeText).filter(Boolean) : [];
   return createSignal({
-    source: 'system',
-    key: 'semantic-bootstrap',
-    reason: normalizeText(context.reason) || objective,
-    payload: { objective, harnessState, context, semanticBootstrap: true },
-    priority: 0.72,
-    debounceMs: 220,
-    throttleMs: 1_200,
-    wakeMode: 'debounce',
-    tags: ['semantic-bootstrap'],
+    source: (normalizeText(seed.source) as AutopilotSignalSource) || 'system',
+    key: normalizeText(seed.key) || 'semantic-seed',
+    reason: normalizeText(seed.reason) || normalizeText(context.reason) || objective,
+    payload: {
+      objective,
+      harnessState,
+      context,
+      semanticSeed: true,
+      explicitSeed: seed,
+    },
+    priority: asNumber(seed.priority, 0.72),
+    debounceMs: asNumber(seed.debounceMs, 220),
+    throttleMs: asNumber(seed.throttleMs, 1_200),
+    wakeMode: (normalizeText(seed.wakeMode) as AutopilotSignal['wakeMode']) || 'debounce',
+    tags: explicitTags.length > 0 ? explicitTags : ['semantic-seed'],
   });
 }
 export class AutopilotEngine {
@@ -304,7 +311,7 @@ export class AutopilotEngine {
         if (typeof item === 'object' && item !== null) {
           const record = item as Record<string, unknown>;
           const signal = {
-            ...semanticBootstrapSignal(this.objective, this.harnessState, this.context),
+            ...semanticSignalSeed(this.objective, this.harnessState, this.context, record),
             id: `${normalizeText(record.id) || randomUUID()}-${this.clock()}`,
             source: (normalizeText(record.source) as AutopilotSignalSource) || 'system',
             key: normalizeText(record.key) || 'context-signal',
@@ -325,11 +332,13 @@ export class AutopilotEngine {
       }
     }
     if (!seeded) {
-      const signal = semanticBootstrapSignal(this.objective, this.harnessState, this.context);
+      const signal = semanticSignalSeed(this.objective, this.harnessState, this.context);
       this.signals.push(signal);
       this.auditTrail.push('signal:' + signal.source + ':' + signal.key);
     }
-  }  pause(reason = 'manual pause'): void {
+  }
+
+  pause(reason = 'manual pause'): void {
     this.status = 'paused';
     this.lastWakeReason = reason;
     this.auditTrail.push(`pause:${reason}`);
@@ -405,29 +414,23 @@ export class AutopilotEngine {
 
   private buildBackgroundTriggers(snapshot: ReturnType<typeof summarizeHarnessState>): AutopilotTrigger[] {
     const triggers: AutopilotTrigger[] = [];
-    const hasEmailSubscription = this.subscriptions.some((subscription) => subscription.source === 'email' && subscription.enabled);
-    const hasCalendarSubscription = this.subscriptions.some((subscription) => subscription.source === 'calendar' && subscription.enabled);
-    const hasBrowserSubscription = this.subscriptions.some((subscription) => subscription.source === 'browser' && subscription.enabled);
     const schedulerSnapshot = this.scheduler.snapshot();
+    const forecasted = this.lastSearchPlan?.predictedSignals ?? [];
 
-    if (snapshot.relationshipWeight >= 0.55 || hasEmailSubscription) {
-      triggers.push(buildTrigger('relationship-recall', 'relationship context is active and should not rot', 1_440, 'recall relationships and compact stale thread noise', 'email', 'relationship', 'debounce'));
+    for (const [index, signal] of forecasted.slice(0, 5).entries()) {
+      triggers.push(buildTrigger(
+        `${signal.topic}-forecast`,
+        `semantic forecast ${index + 1} from ${signal.source} with posterior ${signal.confidence.toFixed(2)}`,
+        Math.max(15, Math.round(360 / Math.max(0.25, signal.priority + 0.25))),
+        `act on the forecasted need ${signal.topic} and preserve the evidence path`,
+        signal.source as AutopilotSignalSource,
+        signal.topic,
+        signal.confidence > 0.7 ? 'immediate' : 'debounce',
+      ));
     }
 
-    if (snapshot.openThreads > 0 || hasEmailSubscription) {
-      triggers.push(buildTrigger('thread-watcher', 'open threads need a follow-up cycle', 360, 'compact the current thread and identify the next reply', 'email', 'thread', 'debounce'));
-    }
-
-    if (snapshot.calendarConflicts > 0 || hasCalendarSubscription) {
-      triggers.push(buildTrigger('calendar-conflict-watch', 'calendar state has unresolved overlap or scheduling risk', 180, 'run conflict detection and propose a reschedule', 'calendar', 'calendar', 'debounce'));
-    }
-
-    if (snapshot.staleTransactional > 0) {
-      triggers.push(buildTrigger('transactional-compaction', 'transactional records should not crowd the harness', 720, 'compact stale transactional data and preserve durable thread history', 'email', 'transactional', 'throttle'));
-    }
-
-    if (snapshot.signalIntensity > 0.35 || this.signals.length > 3 || hasBrowserSubscription) {
-      triggers.push(buildTrigger('signal-observer', 'signal intensity suggests the loop should re-run without a user nudge', 90, 'observe signals, summarize drift, and refresh the working set', 'system', 'signal', 'debounce'));
+    if (forecasted.length === 0) {
+      triggers.push(buildTrigger('semantic-forecast-refresh', 'no semantic forecast was available from the latest model pass', 45, 'refresh the semantic model and recompute future need distribution', 'system', 'forecast', 'debounce'));
     }
 
     if ((this.lastLiveWeb?.results.length ?? 0) > 0) {
@@ -442,10 +445,6 @@ export class AutopilotEngine {
       triggers.push(buildTrigger('auto-resume', 'pending wake requests exist while the loop is paused', 5, 'resume the loop immediately after the next wake arrives', 'system', 'resume', 'immediate'));
     }
 
-    if (triggers.length === 0) {
-      triggers.push(buildTrigger('idle-watch', 'keep the loop ready for the next live signal', 60, 'wait for background sensing or a new wake signal', 'system', 'idle', 'debounce'));
-    }
-
     if (schedulerSnapshot.pendingCount > 0) {
       triggers.push(buildTrigger('scheduler-pulse', 'the scheduler already has pending wakeups', 1, 'flush due wakeups and continue the autonomy loop', 'system', 'scheduler', 'immediate'));
     }
@@ -455,26 +454,31 @@ export class AutopilotEngine {
 
   private buildCheckIns(snapshot: ReturnType<typeof summarizeHarnessState>): AutopilotCheckIn[] {
     const checkIns: AutopilotCheckIn[] = [];
-    if (snapshot.relationshipWeight >= 0.55) checkIns.push(buildCheckIn('relationship-check-in', 1_440, 'email', 'revisit the relevant thread with relationship-weighted recall', 'email'));
-    if (snapshot.openThreads > 0) checkIns.push(buildCheckIn('thread-follow-up', 360, 'email', 'check whether the open thread needs a reply or compaction', 'email'));
-    if (snapshot.calendarConflicts > 0) checkIns.push(buildCheckIn('calendar-review', 180, 'calendar', 're-check the schedule and confirm conflict-free windows', 'calendar'));
-    if (snapshot.staleTransactional > 0) checkIns.push(buildCheckIn('transactional-cleanup', 720, 'browser', 'review whether transactional artifacts are still worth keeping', 'browser'));
-    if (snapshot.signalIntensity > 0.35 || this.signals.length > 3) checkIns.push(buildCheckIn('signal-observation', 90, 'browser', 're-scan the latest signals and capture trend drift', 'browser'));
+    const forecasted = this.lastSearchPlan?.predictedSignals ?? [];
+
+    for (const signal of forecasted.slice(0, 5)) {
+      const channel: AutopilotCheckIn['channel'] = signal.source === 'calendar' ? 'calendar' : signal.source === 'email' ? 'email' : signal.source === 'browser' ? 'browser' : 'in-app';
+      checkIns.push(buildCheckIn(
+        `${signal.topic}-check-in`,
+        Math.max(10, Math.round(180 / Math.max(0.25, signal.priority + 0.25))),
+        channel,
+        `revisit the semantic forecast for ${signal.topic} and validate the next information need`,
+        signal.source as AutopilotSignalSource,
+      ));
+    }
+
     if ((this.lastLiveWeb?.results.length ?? 0) > 0) checkIns.push(buildCheckIn('live-web-review', 30, 'browser', 'review the latest web evidence and keep freshness-aware results current', 'browser'));
     if ((this.lastPlatformSignals?.events.length ?? 0) > 0) checkIns.push(buildCheckIn('platform-event-review', 20, 'browser', 'revisit external platform changes and continue the wake cycle', 'integration'));
     if (this.status === 'paused') checkIns.push(buildCheckIn('resume-observation', 5, 'in-app', 'wake the loop when the next pending signal clears', 'system'));
+    if (checkIns.length === 0) checkIns.push(buildCheckIn('semantic-baseline-review', 60, 'in-app', 'review the current semantic forecast and keep the loop ready', 'system'));
     return checkIns.slice(0, 6);
   }
 
   private derivePriorities(snapshot: ReturnType<typeof summarizeHarnessState>, liveState: AutopilotLiveState): string[] {
     const priorities = [
-      snapshot.relationshipWeight >= 0.55 ? 'preserve relationship context' : '',
-      snapshot.openThreads > 0 ? 'keep active threads warm' : '',
-      snapshot.calendarConflicts > 0 ? 'resolve scheduling friction' : '',
-      snapshot.staleTransactional > 0 ? 'trim stale transactional noise' : '',
-      snapshot.signalIntensity > 0.35 || this.signals.length > 3 ? 'watch the signal surface' : '',
-      liveState.status === 'paused' ? 'auto-resume on the next wake' : '',
+      ...(this.lastSearchPlan?.predictedSignals ?? []).slice(0, 4).map((signal) => `protect semantic forecast: ${signal.topic}`),
       liveState.pendingSignals > 0 ? 'flush queued wakes without duplication' : '',
+      liveState.status === 'paused' ? 'auto-resume on the next wake' : '',
     ];
     return unique(priorities);
   }
