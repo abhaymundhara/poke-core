@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { PolicyDecision, SearchFocus, SearchIntent, SearchOutcome, SearchPolicyRule, SearchPolicyState, SearchSignalForecast, SearchSource, SearchSourceReliability, SearchStrategyProfile, RuntimeComposition } from './types.ts';
 import { clamp, nowMs, readJson, stableHash, uniq, writeJson } from './utils.ts';
@@ -336,7 +335,6 @@ function asFeedback(value: SearchPolicyFeedback): SearchPolicyFeedback {
 }
 
 function generateSearchIndexSourceRewrite(feedback: SearchPolicyFeedback, current: SearchPolicyState): string {
-  const currentSource = readFileSync(SEARCH_INDEX_SOURCE_PATH, 'utf8');
   const revision = stableHash([
     feedback.summary,
     ...(feedback.failedQueries ?? []),
@@ -344,15 +342,19 @@ function generateSearchIndexSourceRewrite(feedback: SearchPolicyFeedback, curren
     ...(feedback.successfulSources ?? []).map(String),
     ...(feedback.latentNeeds ?? []),
     feedback.desiredBehavior ?? '',
+    String(current.reasoningArchitecture?.runtimeComposition?.version ?? 0),
   ].join('|')).slice(0, 12);
-  const revisionLine = "export const SEARCH_INDEX_REWRITE_REVISION = '" + revision + "';";
-  if (currentSource.includes('SEARCH_INDEX_REWRITE_REVISION')) {
-    return currentSource.replace(/export const SEARCH_INDEX_REWRITE_REVISION = '.*?';/, revisionLine);
-  }
-  return currentSource.replace(
-    "export * from './policy.ts';\n\nexport const SEARCH_INDEX_SOURCE_PATH",
-    "export * from './policy.ts';\n\n" + revisionLine + "\n\nexport const SEARCH_INDEX_SOURCE_PATH",
-  );
+  return JSON.stringify({
+    kind: 'search-index-rewrite-manifest',
+    revision,
+    summary: feedback.summary,
+    failedQueries: feedback.failedQueries ?? [],
+    failedSources: feedback.failedSources ?? [],
+    successfulSources: feedback.successfulSources ?? [],
+    latentNeeds: feedback.latentNeeds ?? [],
+    desiredBehavior: feedback.desiredBehavior ?? '',
+    createdAt: nowMs(),
+  });
 }
 
 function asSynthesizedOutput(value: unknown): (SearchPolicyFeedback & { rules?: SearchPolicyRule[]; strategyLogic?: Partial<StrategyLogic>; architecture?: Partial<NonNullable<SearchPolicyState['reasoningArchitecture']>>; runtimeComposition?: Partial<RuntimeComposition> }) | null {
