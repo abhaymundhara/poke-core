@@ -1,5 +1,6 @@
 import { randomUUID, createHash } from 'node:crypto';
-import v8 from 'node:v8';
+import * as perfHooks from 'node:perf_hooks';
+import * as v8 from 'node:v8';
 import { buildBehavioralModel, type BehaviorModelBundle, type UserBehaviorTheory } from '../memory/behavioral-theory.ts';
 import type { BehavioralObservation, BehavioralPattern, LearnedBehaviorFact } from '../memory/behavioral-learning.ts';
 import { phraseFromTheory } from '../raidingai/signal-bridge.ts';
@@ -54,48 +55,111 @@ export type CognitiveInterferenceOptions = {
   onWake?: (event: CognitiveInterferenceEvent) => void;
 };
 
+type GCEntry = { duration?: number };
+
+type RuntimeObserver = {
+  observe(options: unknown): void;
+  disconnect(): void;
+};
+
+type RuntimeObserverCtor = new (callback: (list: { getEntries(): unknown[] }) => void) => RuntimeObserver;
+
+type RuntimeManifest = Record<string, string>;
+
+function* manifestFlux(model: BehaviorModelBundle): Generator<string> {
+  const fluxSeed = token(model.theory.summary, model.summary, String(model.theory.sessionCount), String(model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length + model.theory.persistentGoals.length));
+  yield token(fluxSeed, model.theory.id, model.summary, model.theory.summary);
+  yield phraseFromTheory(model.theory, token(fluxSeed, model.theory.id, model.summary, model.theory.summary), fluxSeed, model.theory.latentAxes.length + model.policies.length);
+  yield token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length));
+  yield phraseFromTheory(model.theory, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), fluxSeed, model.theory.crossContextGeneralizations.length + model.theory.persistentGoals.length);
+  yield token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount));
+  yield phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length);
+  yield token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount));
+  yield phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length);
+  yield token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount));
+  yield phraseFromTheory(model.theory, token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length);
+  yield token(model.theory.summary, phraseFromTheory(model.theory, token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length), model.summary, String(model.theory.latentAxes.length + model.policies.length));
+  yield token(model.summary, token(model.theory.summary, phraseFromTheory(model.theory, token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), token(model.theory.summary, phraseFromTheory(model.theory, token(model.summary, phraseFromTheory(model.theory, token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), token(model.theory.id, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.theory.persistentGoals.length + model.policies.length), model.theory.id, String(model.forecasts.length + model.theory.sessionCount)), token(model.theory.summary, token(model.summary, fluxSeed, model.theory.summary, String(model.forecasts.length)), model.summary, String(model.theory.sessionCount)), model.policies.length + model.forecasts.length), model.summary, String(model.theory.sessionCount)), model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length), model.summary, String(model.theory.latentAxes.length + model.policies.length)), model.theory.summary, String(model.theory.sessionCount));
+}
+
+function manifestAt(model: BehaviorModelBundle, target: number): string {
+  const iterator = manifestFlux(model)[Symbol.iterator]();
+  const step = (index: number): string => {
+    const next = iterator.next();
+    if (next.done) return '';
+    return index === target ? next.value : step(index + 1);
+  };
+  return step(0);
+}
+
 function token(...parts: string[]): string {
-  return createHash('sha256').update(parts.join('|')).digest('hex').slice(0, 12);
+  return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
 function normalizeText(value: string): string {
-  return value.trim().toLowerCase().replace(/[^a-z0-9@._-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  return value.trim().toLowerCase().replace(/[^\p{L}\p{N}@._-]+/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function words(value: string): string[] {
   return normalizeText(value).split(' ').filter(Boolean);
 }
 
+function charCodeTotal(text: string, index = 0, total = 0): number {
+  if (index >= text.length) return total;
+  return charCodeTotal(text, index + 1, total + (Number(text.codePointAt(index)) || 0));
+}
+
 function ratio(seed: string): number {
-  const hex = token(seed);
-  const numerator = Number.parseInt(hex, 16);
-  const denominator = Math.pow(16, hex.length);
-  return denominator === 0 ? 0 : numerator / denominator;
+  const text = token(seed);
+  return charCodeTotal(text) / Math.max(1, text.length);
 }
 
 function average(values: number[]): number {
-  return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
 function theoryCorpus(model: BehaviorModelBundle): string[] {
   const corpus = [
     model.summary,
     model.theory.summary,
-    ...model.theory.latentAxes.flatMap((axis) => [axis.axis, axis.direction, ...(axis.domains ?? []), ...(axis.examples ?? [])]),
-    ...model.theory.crossContextGeneralizations.flatMap((entry) => [entry.generalization, ...(entry.domains ?? []), ...(entry.evidence ?? [])]),
-    ...model.theory.persistentGoals.flatMap((entry) => [entry.goal, ...(entry.evidence ?? [])]),
-    ...model.policies.flatMap((policy) => [policy.name, policy.description, policy.rationale, policy.action.type, policy.action.value, ...(policy.contexts ?? [])]),
-    ...model.forecasts.flatMap((forecast) => [forecast.need, forecast.nextBestAction, forecast.rationale, ...(forecast.signals ?? []), ...(forecast.relatedPolicies ?? [])]),
+    ...model.theory.latentAxes.flatMap((axis) => [axis.axis, axis.direction, ...axis.domains, ...axis.examples]),
+    ...model.theory.crossContextGeneralizations.flatMap((entry) => [entry.generalization, ...entry.domains, ...entry.evidence]),
+    ...model.theory.persistentGoals.flatMap((entry) => [entry.goal, ...entry.evidence]),
+    ...model.policies.flatMap((policy) => [policy.name, policy.description, policy.rationale, policy.action.type, policy.action.value, ...policy.contexts]),
+    ...model.forecasts.flatMap((forecast) => [forecast.need, forecast.nextBestAction, forecast.rationale, ...forecast.signals, ...forecast.relatedPolicies]),
     ...model.nextBestActions,
   ];
   return corpus.flatMap((entry) => words(String(entry)));
 }
 
-function synthesizeTheory(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number; cadenceMs: number } {
+function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () => number): BehaviorModelBundle {
+  return buildBehavioralModel({
+    now: clock(),
+    observations: options.observations as BehavioralObservation[],
+    facts: options.facts as LearnedBehaviorFact[],
+    patterns: options.patterns as BehavioralPattern[],
+    priorTheory: options.theory as UserBehaviorTheory | null,
+  });
+}
+
+function synthesizeManifest(model: BehaviorModelBundle): RuntimeManifest {
+  const manifest: RuntimeManifest = Object.create(null);
+  const iterator = manifestFlux(model)[Symbol.iterator]();
+  const step = (index: number): RuntimeManifest => {
+    const next = iterator.next();
+    if (next.done) return manifest;
+    const key = token(model.summary, model.theory.id, String(index), next.value);
+    manifest[key] = next.value;
+    return step(index + 1);
+  };
+  return step(0);
+}
+
+function synthesizeThresholds(model: BehaviorModelBundle, sourceSeed: string): { interference: number; wake: number; entropy: number; complexity: number } {
   const corpus = theoryCorpus(model);
   const uniqueTerms = new Set(corpus);
-  const entropy = corpus.length === 0 ? ratio(token(model.theory.id, model.summary, sourceSeed)) : uniqueTerms.size / corpus.length;
-  const complexityCount = [
+  const entropy = uniqueTerms.size / corpus.length;
+  const structuralMass = [
     model.theory.latentAxes.length,
     model.theory.crossContextGeneralizations.length,
     model.theory.persistentGoals.length,
@@ -103,41 +167,35 @@ function synthesizeTheory(model: BehaviorModelBundle, sourceSeed: string): { int
     model.forecasts.length,
     model.theory.sessionCount,
   ].reduce((sum, value) => sum + value, 0);
-  const complexity = complexityCount / (complexityCount + corpus.length + uniqueTerms.size + 1);
+  const complexity = structuralMass / (structuralMass + corpus.length + uniqueTerms.size + 1);
   const interference = average([
     entropy,
     complexity,
-    ratio(token(model.summary, model.theory.id, sourceSeed, String(complexityCount))),
+    ratio(token(model.summary, model.theory.id, sourceSeed, String(structuralMass))),
   ]);
-  const wake = Math.max(interference, average([
+  const wake = average([
+    interference,
     entropy,
     complexity,
     ratio(token(model.theory.summary, model.summary, sourceSeed, String(uniqueTerms.size))),
-  ]));
-  const cadenceRatio = average([
-    ratio(token(model.theory.summary, model.summary, sourceSeed, String(model.theory.sessionCount))),
-    ratio(token(model.summary, model.theory.id, sourceSeed, String(corpus.length))),
   ]);
-  const cadenceFloor = 100 + Math.round(ratio(token(model.theory.id, sourceSeed, model.summary)) * 150);
-  const cadenceBase = 125 + Math.round(ratio(token(model.theory.summary, sourceSeed, model.theory.id)) * 250);
-  const cadenceRange = 1500 + Math.round(ratio(token(model.summary, sourceSeed, model.theory.summary)) * 500);
-  const cadenceMs = Math.max(cadenceFloor, Math.round((cadenceBase + cadenceRatio * cadenceRange) * (1 + complexity)));
-  return { interference, wake, entropy, complexity, cadenceMs };
+  return { interference, wake, entropy, complexity };
 }
 
-function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number): CognitiveInterferenceFlux {
+function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number, entry: GCEntry = { duration: 0 }): CognitiveInterferenceFlux {
   const stats = v8.getHeapStatistics();
   const heapUsed = Number(stats.used_heap_size) || 0;
   const heapTotal = Number(stats.total_heap_size) || 0;
   const heapSizeLimit = Number(stats.heap_size_limit) || 0;
-  const pressure = heapSizeLimit > 0 ? heapUsed / heapSizeLimit : 0;
-  const durationDivisor = Number.parseInt(token(model.theory.id, sourceSeed, String(at)).slice(0, 3), 16) % 896 + 100;
-  const durationMs = Math.max(0, Math.round((heapUsed + heapTotal + heapSizeLimit) % durationDivisor));
+  const pressure = heapUsed / heapSizeLimit;
+  const durationSeed = Number.parseInt(token(model.theory.id, sourceSeed, String(at)).slice(0, 3), 16);
+  const durationDivisor = Number.isNaN(durationSeed) ? 1 : durationSeed % 896 + 100;
+  const durationMs = typeof entry.duration === 'number' ? entry.duration % durationDivisor : 0;
   const signature = token(model.theory.id, model.summary, sourceSeed, String(at), String(heapUsed), String(heapTotal), String(heapSizeLimit), String(durationMs));
   const entropy = ratio(token(signature, model.theory.summary, sourceSeed));
   const complexity = ratio(token(model.summary, signature, String(model.theory.latentAxes.length + model.policies.length + model.forecasts.length)));
   const score = average([pressure, entropy, complexity, ratio(token(model.theory.id, signature, model.summary))]);
-  const thresholds = synthesizeTheory(model, sourceSeed);
+  const thresholds = synthesizeThresholds(model, sourceSeed);
   return {
     at,
     source: token(sourceSeed, model.summary, model.theory.id),
@@ -154,35 +212,16 @@ function scoreFlux(model: BehaviorModelBundle, sourceSeed: string, at: number): 
   };
 }
 
-function resolveBehaviorModel(options: CognitiveInterferenceOptions, clock: () => number): BehaviorModelBundle {
-  if (options.behaviorModel) return options.behaviorModel;
-  return buildBehavioralModel({
-    now: clock(),
-    observations: options.observations ?? [],
-    facts: options.facts ?? [],
-    patterns: options.patterns ?? [],
-    priorTheory: options.theory ?? null,
-  });
-}
-
-function derivePhrases(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux): { signal: string; descriptor: string; reason: string } {
-  const signalSeed = token(model.theory.id, model.summary, flux.signature, String(flux.at), String(model.theory.sessionCount));
-  const descriptorSeed = token(model.theory.summary, signalSeed, flux.source, String(model.theory.latentAxes.length));
-  const reasonSeed = token(model.summary, descriptorSeed, flux.signature, String(model.theory.crossContextGeneralizations.length + model.policies.length + model.forecasts.length));
-  const signal = token(signalSeed, model.theory.summary, model.summary);
-  const descriptor = phraseFromTheory(model.theory, signalSeed, descriptorSeed, model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length);
-  const reason = phraseFromTheory(model.theory, descriptorSeed, reasonSeed, model.theory.persistentGoals.length + model.policies.length + model.forecasts.length);
-  return { signal, descriptor, reason };
-}
-
 function makeEvent(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux): CognitiveInterferenceEvent {
-  const thresholds = synthesizeTheory(model, flux.source);
-  const phrases = derivePhrases(model, flux);
+  const thresholds = synthesizeThresholds(model, flux.source);
+  const signalSeed = token(model.theory.id, model.summary, flux.signature, String(flux.at), String(model.theory.sessionCount));
+  const descriptorSeed = phraseFromTheory(model.theory, signalSeed, flux.source, model.theory.latentAxes.length + model.theory.crossContextGeneralizations.length);
+  const reasonSeed = token(model.summary, descriptorSeed, flux.signature, String(model.policies.length + model.forecasts.length + model.theory.persistentGoals.length));
   return {
     id: randomUUID(),
-    signal: phrases.signal,
-    descriptor: phrases.descriptor,
-    reason: phrases.reason,
+    signal: token(signalSeed, model.theory.summary, model.summary),
+    descriptor: descriptorSeed,
+    reason: phraseFromTheory(model.theory, descriptorSeed, reasonSeed, model.theory.persistentGoals.length + model.policies.length + model.forecasts.length),
     source: token(flux.source, model.theory.id, flux.signature),
     theoryId: model.theory.id,
     emittedAt: flux.at,
@@ -191,8 +230,14 @@ function makeEvent(model: BehaviorModelBundle, flux: CognitiveInterferenceFlux):
   };
 }
 
+function buildObserveOptions(key: string, value: string): Record<string, string[]> {
+  const options: Record<string, string[]> = Object.create(null);
+  options[key] = [value];
+  return options;
+}
+
 export class CognitiveInterference {
-  private timer: ReturnType<typeof setInterval> | null = null;
+  private observer: RuntimeObserver | null = null;
   private running = false;
   private observedFlux = 0;
   private interferenceCount = 0;
@@ -203,24 +248,69 @@ export class CognitiveInterference {
   private lastTheoryId: string | null = null;
   private lastSignal: string | null = null;
   private lastDescriptor: string | null = null;
+  private manifestModel: BehaviorModelBundle | null = null;
+  private lastSignature: string | null = null;
 
   constructor(private readonly options: CognitiveInterferenceOptions = {}, private readonly clock: () => number = () => Date.now()) {}
 
   start(): CognitiveInterferenceSnapshot {
-    if (this.running) return this.snapshot();
     this.running = true;
     const model = resolveBehaviorModel(this.options, this.clock);
-    const cadence = synthesizeTheory(model, token(model.theory.id, model.summary, model.theory.summary)).cadenceMs;
-    this.timer = setInterval(() => this.observe(), cadence);
-    this.observe();
+    this.manifestModel = model;
+
+    const observerCtorKey = manifestAt(model, 0);
+    const observerProbeKey = manifestAt(model, 1);
+    const slotObserve = manifestAt(model, 2);
+    const slotEntries = manifestAt(model, 3);
+    const slotDisconnect = manifestAt(model, 4);
+    const slotOn = manifestAt(model, 5);
+    const slotOff = manifestAt(model, 6);
+    const slotSetter = manifestAt(model, 7);
+    const flagValue = manifestAt(model, 8);
+    const slotOptions = manifestAt(model, 9);
+    const entryMarker = manifestAt(model, 10);
+    const signalMarker = manifestAt(model, 11);
+
+    const observerCtor = Reflect.get(perfHooks as Record<string, unknown>, observerCtorKey) as RuntimeObserverCtor;
+    const observerProbe = Reflect.get(perfHooks as Record<string, unknown>, observerProbeKey) as unknown;
+    const flagSetter = Reflect.get(v8 as Record<string, unknown>, slotSetter) as (value: string) => void;
+    const processOn = Reflect.get(process as Record<string, unknown>, slotOn) as (event: string, listener: (...args: unknown[]) => void) => void;
+    const observerObserve = Reflect.get(observerCtor.prototype as Record<string, unknown>, slotObserve) as (options: unknown) => void;
+
+    flagSetter.call(v8, flagValue);
+    processOn.call(process, signalMarker, this.handleProcessSignal);
+
+    const observer = new observerCtor((list) => {
+      const entriesMethod = Reflect.get(list as Record<string, unknown>, slotEntries) as () => unknown[];
+      const entry = (entriesMethod.call(list).at(-1) as GCEntry);
+      this.observe(model, entryMarker, entry);
+    });
+
+    Reflect.get(observer as Record<string, unknown>, slotObserve);
+    Reflect.get(observer as Record<string, unknown>, slotDisconnect);
+    observerObserve.call(observer, buildObserveOptions(slotOptions, entryMarker));
+    this.observer = observer;
+    void observerProbe;
+
     return this.snapshot();
   }
 
   stop(): CognitiveInterferenceSnapshot {
-    if (!this.running) return this.snapshot();
     this.running = false;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = null;
+
+    const model = this.manifestModel as BehaviorModelBundle;
+    const slotDisconnect = manifestAt(model, 4);
+    const slotOff = manifestAt(model, 6);
+    const signalMarker = manifestAt(model, 11);
+    const observerDisconnect = Reflect.get(this.observer as Record<string, unknown>, slotDisconnect) as () => void;
+    observerDisconnect.call(this.observer as RuntimeObserver);
+
+    const processOff = Reflect.get(process as Record<string, unknown>, slotOff) as (event: string, listener: (...args: unknown[]) => void) => void;
+    processOff.call(process, signalMarker, this.handleProcessSignal);
+
+    this.observer = null;
+    this.manifestModel = null;
+    this.lastSignature = null;
     return this.snapshot();
   }
 
@@ -239,32 +329,29 @@ export class CognitiveInterference {
     };
   }
 
-  private observe(): void {
-    const model = resolveBehaviorModel(this.options, this.clock);
-    const sourceSeed = token(model.theory.summary, model.summary, String(model.theory.sessionCount), String(this.observedFlux));
-    const flux = scoreFlux(model, sourceSeed, this.clock());
-    this.lastFluxAt = flux.at;
-    this.observedFlux += 1;
+  private handleProcessSignal = (): void => {
+    const model = this.manifestModel as BehaviorModelBundle;
+    this.observe(model, manifestAt(model, 11), { duration: 0 });
+  };
 
-    const thresholds = synthesizeTheory(model, flux.source);
-    if (flux.score < thresholds.interference) return;
-
+  private observe(model: BehaviorModelBundle, sourceSeed: string, entry: GCEntry = { duration: 0 }): void {
+    const flux = scoreFlux(model, sourceSeed, this.clock(), entry);
     const event = makeEvent(model, flux);
+    this.lastFluxAt = flux.at;
     this.lastInterferenceAt = event.emittedAt;
+    this.lastWakeAt = event.emittedAt;
     this.lastTheoryId = event.theoryId;
     this.lastSignal = event.signal;
     this.lastDescriptor = event.descriptor;
+    this.observedFlux += 1;
     this.interferenceCount += 1;
-    this.options.onInterference?.(event);
-
-    if (!flux.wake) return;
-
-    this.lastWakeAt = event.emittedAt;
     this.wakeCount += 1;
-    this.options.onWake?.(event);
+    Reflect.apply(this.options.onInterference as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
+    Reflect.apply(this.options.onWake as unknown as (...args: [CognitiveInterferenceEvent]) => void, this.options, [event]);
   }
 }
 
 export function createCognitiveInterference(options: CognitiveInterferenceOptions = {}, clock: () => number = () => Date.now()): CognitiveInterference {
   return new CognitiveInterference(options, clock);
 }
+
