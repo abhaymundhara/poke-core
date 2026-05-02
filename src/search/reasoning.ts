@@ -7,8 +7,12 @@ function normalizeText(text: string): string {
 }
 
 function splitSentences(text: string): string[] {
-  return text.split(/(?<=[.!?])s+|
-+/).map((part) => part.trim()).filter((part) => part.length > 12).slice(0, 4);
+  return text
+    .split(/(?<=[.!?])s+|
++/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 12)
+    .slice(0, 4);
 }
 
 function claimTextsFromResult(result: SearchResult): string[] {
@@ -18,7 +22,170 @@ function claimTextsFromResult(result: SearchResult): string[] {
   return [result.title.trim()].filter(Boolean);
 }
 
+type GroundedSpan = {
+  sourceId: string;
+  source: string;
+  url: string;
+  kind: 'title' | 'snippet' | 'claim';
+  text: string;
+  normalized: string;
+  start: number;
+  end: number;
+  tokens: string[];
+  trust: number;
+};
+
+type GroundedMatch = {
+  result: TrustedEvidence;
+  span: GroundedSpan;
+  score: number;
+  overlap: number;
+  exact: boolean;
+};
+
+type GroundedCandidate = {
+  text: string;
+  normalized: string;
+  tokens: string[];
+  matches: GroundedMatch[];
+  supportSources: string[];
+  supportCount: number;
+  crossVerified: boolean;
+  conflict: boolean;
+  confidence: number;
+  rationale: string;
+};
+
+function tokenize(text: string): string[] {
+  return uniq(words(normalizeText(text))).filter((token) => token.length > 1);
+}
+
+function sourceIdFor(result: TrustedEvidence): string {
+  return stableHash((result.url || result.title || result.snippet || String(result.source)) + '|' + String(result.source)).slice(0, 12);
+}
+
+function collectGroundedSpans(result: TrustedEvidence): GroundedSpan[] {
+  const sourceId = sourceIdFor(result);
+  const trust = clamp(result.trustScore ?? result.score ?? result.trust ?? 0.5);
+  const source = String(result.source);
+  const spans: GroundedSpan[] = [];
+  const pushSpan = (kind: GroundedSpan['kind'], text: string, start: number, end: number) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    spans.push({
+      sourceId,
+      source,
+      url: result.url,
+      kind,
+      text: trimmed,
+      normalized: normalizeText(trimmed),
+      start,
+      end,
+      tokens: tokenize(trimmed),
+      trust,
+    });
+  };
+
+  pushSpan('title', result.title, 0, result.title.length);
+  if (result.snippet) {
+    let cursor = 0;
+    for (const sentence of splitSentences(result.snippet)) {
+      const index = result.snippet.toLowerCase().indexOf(sentence.toLowerCase(), cursor);
+      const start = index >= 0 ? index : cursor;
+      const end = start + sentence.length;
+      cursor = Math.max(cursor, end);
+      pushSpan('snippet', sentence, start, end);
+    }
+  }
+  for (const claim of result.claims ?? []) {
+    pushSpan('claim', claim, 0, claim.length);
+  }
+  return spans;
+}
+
+function scoreSpanMatch(candidateTokens: string[], candidateNormalized: string, span: GroundedSpan, result: TrustedEvidence): GroundedMatch | null {
+  if (!span.normalized) return null;
+  const spanTokens = span.tokens.length > 0 ? span.tokens : tokenize(span.text);
+  const candidateSet = new Set(candidateTokens);
+  const spanSet = new Set(spanTokens);
+  let overlapCount = 0;
+  for (const token of candidateSet) {
+    if (spanSet.has(token)) overlapCount += 1;
+  }
+  const union = new Set([...candidateSet, ...spanSet]).size || 1;
+  const overlap = overlapCount / union;
+  const exact = span.normalized === candidateNormalized || span.normalized.includes(candidateNormalized) || candidateNormalized.includes(span.normalized);
+  const containment = span.normalized.includes(candidateNormalized) || candidateNormalized.includes(span.normalized) ? 1 : 0;
+  const kindBoost = span.kind === 'claim' ? 0.09 : span.kind === 'snippet' ? 0.06 : 0.03;
+  const score = clamp(0.16 + overlap * 0.54 + containment * 0.17 + kindBoost + clamp(result.trustScore ?? result.trust ?? result.score ?? 0.5) * 0.11);
+  if (score < 0.24) return null;
+  return { result, span, score, overlap, exact };
+}
+
+function buildGroundedCandidate(text: string, trustedResults: TrustedEvidence[]): GroundedCandidate {
+  const normalized = normalizeText(text);
+  const tokens = tokenize(text);
+  const matches: GroundedMatch[] = [];
+  for (const result of trustedResults) {
+    const spans = collectGroundedSpans(result);
+    let best: GroundedMatch | null = null;
+    for (const span of spans) {
+      const match = scoreSpanMatch(tokens, normalized, span, result);
+      if (!match) continue;
+      if (!best || match.score > best.score) best = match;
+    }
+    if (best) matches.push(best);
+  }
+  matches.sort((left, right) => right.score - left.score);
+  const supportSources = uniq(matches.map((match) => String(match.result.source)));
+  const supportCount = supportSources.length;
+  const independentSources = new Set(matches.map((match) => String(match.result.source))).size;
+  const avgScore = matches.length > 0 ? matches.reduce((sum, match) => sum + match.score, 0) / matches.length : 0;
+  const hasNegation = /(not|never|no|without|lacks|missing)/i.test(normalized);
+  const conflictingPolarity = matches.some((match) => /(not|never|no|without|lacks|missing)/i.test(match.span.normalized)) && matches.some((match) => !/(not|never|no|without|lacks|missing)/i.test(match.span.normalized));
+  const crossVerified = supportCount >= 2 && independentSources >= 2 && (avgScore >= 0.38 || matches.some((match) => match.exact));
+  const conflict = Boolean(conflictingPolarity || (hasNegation && !matches.some((match) => /(not|never|no|without|lacks|missing)/i.test(match.span.normalized))));
+  const confidence = clamp(0.2 + avgScore * 0.36 + supportCount * 0.07 + (crossVerified ? 0.22 : 0) - (conflict ? 0.16 : 0));
+  const rationale = 'grounded-spans=' + String(matches.length) + ';cross-source=' + (crossVerified ? 'verified' : 'pending') + ';conflict=' + (conflict ? 'yes' : 'no');
+  return { text, normalized, tokens, matches, supportSources, supportCount, crossVerified, conflict, confidence, rationale };
+}
+
+function candidateTextsFromResults(results: TrustedEvidence[], queries: string[]): string[] {
+  const groundedTexts = results.flatMap((result) => [
+    ...claimTextsFromResult(result),
+    ...collectGroundedSpans(result).map((span) => span.text),
+  ]);
+  return uniq([
+    ...groundedTexts,
+    ...queries.map((query) => 'Evidence for ' + query),
+  ].map((value) => value.trim()).filter(Boolean)).slice(0, 12);
+}
+
 function subjectPredicateObject(text: string): { subject: string; predicate: string; object: string; polarity: 'affirmed' | 'negated' | 'conditional'; modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative'; qualifiers: string[] } {
+  const normalized = normalizeText(text);
+  const predicateMatch = normalized.match(/^(.*?)(?:s+(is|are|was|were|has|have|can|could|should|would|must|may|might|means|implies|indicates|shows|supports|proves|contradicts|equals|relates to)s+)(.*)$/i);
+  let subject = text.trim();
+  let predicate = 'relates-to';
+  let object = normalized;
+  if (predicateMatch) {
+    subject = predicateMatch[1].trim() || text.trim();
+    predicate = predicateMatch[2].trim();
+    object = predicateMatch[3].trim();
+  } else {
+    const parts = normalized.split(' ');
+    subject = parts.slice(0, Math.max(1, Math.min(4, parts.length - 1))).join(' ');
+    object = parts.slice(Math.max(1, Math.min(4, parts.length - 1))).join(' ');
+  }
+  const qualifiers: string[] = [];
+  if (/(not|never|no|without|lacks|missing)/i.test(text)) qualifiers.push('negated');
+  if (/(may|might|could|possible|possibly|uncertain)/i.test(text)) qualifiers.push('possible');
+  if (/(required|must|needs to|necessary)/i.test(text)) qualifiers.push('required');
+  if (/(today|now|current|recent|latest|live|during|before|after)/i.test(text)) qualifiers.push('temporal');
+  if (/(compare|versus|against|than|more|less|greater)/i.test(text)) qualifiers.push('comparative');
+  const polarity: 'affirmed' | 'negated' | 'conditional' = /(not|never|no|without|lacks|missing)/i.test(text) ? 'negated' : /(may|might|could|possible|possibly|uncertain|if|when|unless)/i.test(text) ? 'conditional' : 'affirmed';
+  const modality: 'asserted' | 'possible' | 'required' | 'temporal' | 'comparative' = qualifiers.includes('required') ? 'required' : qualifiers.includes('temporal') ? 'temporal' : qualifiers.includes('comparative') ? 'comparative' : qualifiers.includes('possible') ? 'possible' : 'asserted';
+  return { subject, predicate, object, polarity, modality, qualifiers };
+} {
   const normalized = normalizeText(text);
   const predicateMatch = normalized.match(/^(.*?)( is | are | was | were | has | have | can | could | should | would | must | may | might | means | implies | indicates | shows | supports | proves | contradicts | equals | equals to | relates to )(.*)$/i);
   let subject = text.trim();
@@ -44,37 +211,47 @@ function subjectPredicateObject(text: string): { subject: string; predicate: str
   return { subject, predicate, object, polarity, modality, qualifiers };
 }
 
-function makeProposition(text: string, index: number, sources: string[]): Proposition {
+function makeProposition(text: string, index: number, grounding: GroundedCandidate): Proposition {
   const parsed = subjectPredicateObject(text);
-  const normalized = normalizeText(text);
-  const confidence = clamp(0.42 + Math.min(0.3, text.length / 220) + (parsed.polarity === 'affirmed' ? 0.12 : parsed.polarity === 'conditional' ? 0.06 : 0));
-  const support = clamp(confidence * 0.72 + Math.min(0.18, sources.length * 0.05));
-  const contradiction = clamp(parsed.polarity === 'negated' ? 0.42 + confidence * 0.35 : parsed.qualifiers.includes('possible') ? 0.18 : 0.08);
+  const trustMass = grounding.matches.length > 0 ? grounding.matches.reduce((sum, match) => sum + clamp(match.result.trustScore ?? match.result.trust ?? match.result.score ?? 0.5) * match.score, 0) / grounding.matches.length : 0.42;
+  const confidence = clamp(0.24 + trustMass * 0.34 + (grounding.crossVerified ? 0.2 : 0) + Math.min(0.12, grounding.supportCount * 0.03) - (grounding.conflict ? 0.18 : 0));
+  const support = clamp(Math.max(confidence * 0.72, 0.38 + Math.min(0.22, grounding.supportCount * 0.08) + (grounding.crossVerified ? 0.12 : 0)));
+  const contradiction = clamp(parsed.polarity === 'negated' || grounding.conflict ? 0.36 + (1 - confidence) * 0.28 : parsed.qualifiers.includes('possible') ? 0.18 : 0.08);
   return {
     id: stableHash(text + '|' + String(index)).slice(0, 14),
     text: text.trim(),
-    subject: parsed.subject || normalized,
+    subject: parsed.subject || grounding.normalized,
     predicate: parsed.predicate,
-    object: parsed.object || normalized,
+    object: parsed.object || grounding.normalized,
     polarity: parsed.polarity,
     confidence,
     support,
     contradiction,
-    sources,
+    sources: grounding.supportSources.length > 0 ? grounding.supportSources : grounding.matches.map((match) => String(match.result.source)),
   };
 }
 
-function makeClaim(proposition: Proposition, sources: string[], trust: number, index: number, intent: SearchIntent): VerifiedClaim {
-  const verdict: 'supported' | 'contested' | 'unsupported' = trust >= 0.68 && proposition.polarity !== 'negated' ? 'supported' : trust >= 0.48 ? 'contested' : 'unsupported';
-  const relation: ClaimAssessment['relation'] = proposition.polarity === 'negated' ? 'contradicts' : verdict === 'supported' ? 'entails' : 'unknown';
+function makeClaim(proposition: Proposition, grounding: GroundedCandidate, index: number, intent: SearchIntent): VerifiedClaim {
+  const supportedBy = grounding.supportSources.length > 0 ? grounding.supportSources : proposition.sources;
+  const verdict: 'supported' | 'contested' | 'unsupported' = grounding.crossVerified && proposition.confidence >= 0.58 && !grounding.conflict && proposition.polarity !== 'negated'
+    ? 'supported'
+    : grounding.supportCount > 0 && proposition.confidence >= 0.42
+      ? 'contested'
+      : 'unsupported';
+  const relation: ClaimAssessment['relation'] = proposition.polarity === 'negated' || grounding.conflict ? 'contradicts' : verdict === 'supported' ? 'entails' : 'unknown';
+  const rationale = [
+    grounding.rationale,
+    'support-sources=' + (supportedBy.join('|') || 'none'),
+    'intent=' + intent.semanticQuery,
+  ].join(';');
   return {
     id: stableHash('claim:' + proposition.text + ':' + String(index)).slice(0, 14),
     text: proposition.text,
-    confidence: clamp((trust + proposition.confidence) / 2),
-    supportedBy: sources,
-    contradictedBy: proposition.polarity === 'negated' ? sources : [],
+    confidence: clamp((grounding.confidence + proposition.confidence) / 2),
+    supportedBy,
+    contradictedBy: relation === 'contradicts' ? supportedBy : [],
     verdict,
-    assessments: [{ premise: intent.semanticQuery, hypothesis: proposition.text, relation, confidence: clamp(trust), rationale: 'latent reasoning synthesis' }],
+    assessments: [{ premise: intent.semanticQuery, hypothesis: proposition.text, relation, confidence: clamp(grounding.confidence), rationale }],
   };
 }
 
@@ -239,18 +416,17 @@ export function deriveHopPlan(intent: SearchIntent, strategy: SearchStrategyProf
 
 export function buildEvidenceGraph(intent: SearchIntent, queries: string[], results: SearchResult[], strategy: SearchStrategyProfile, reliability?: Record<string, any>, policy?: PolicyDecision, policyState?: SearchPolicyState): SearchEvidenceGraph {
   const trustedResults = scoreEvidenceTrust(intent, results, reliability, policy, policyState);
-  const claimCandidates = uniq([
-    ...trustedResults.flatMap((result) => claimTextsFromResult(result)),
-    ...queries.map((query) => 'Evidence for ' + query),
-  ].map((text) => text.trim()).filter(Boolean));
-  const fallbackClaim = 'Continue exploring ' + (intent.semanticQuery || intent.objective) + ' with latent evidence';
-  const texts = claimCandidates.length > 0 ? claimCandidates.slice(0, 12) : [fallbackClaim];
-  const propositions = texts.map((text, index) => makeProposition(text, index, trustedResults.slice(0, 3).map((result) => String(result.source))));
-  const claims = propositions.map((proposition, index) => makeClaim(proposition, trustedResults.slice(0, 3).map((result) => String(result.source)), clamp(trustedResults[index]?.trustScore ?? 0.48), index, intent));
+  const claimCandidates = candidateTextsFromResults(trustedResults, queries);
+  const fallbackClaim = 'Continue exploring ' + (intent.semanticQuery || intent.objective) + ' with grounded evidence';
+  const texts = claimCandidates.length > 0 ? claimCandidates : [fallbackClaim];
+  const grounded = texts.map((text) => buildGroundedCandidate(text, trustedResults));
+  const propositions = texts.map((text, index) => makeProposition(text, index, grounded[index]));
+  const claims = propositions.map((proposition, index) => makeClaim(proposition, grounded[index], index, intent));
   if (claims.length === 0) {
-    const proposition = makeProposition(fallbackClaim, 0, []);
+    const fallbackGrounding = buildGroundedCandidate(fallbackClaim, trustedResults);
+    const proposition = makeProposition(fallbackClaim, 0, fallbackGrounding);
     propositions.push(proposition);
-    claims.push(makeClaim(proposition, [], 0.48, 0, intent));
+    claims.push(makeClaim(proposition, fallbackGrounding, 0, intent));
   }
   const entities = canonicalizeEntities(intent, queries, trustedResults, claims);
   const communities = buildCommunities(trustedResults, entities, claims);
@@ -264,9 +440,9 @@ export function buildEvidenceGraph(intent: SearchIntent, queries: string[], resu
   };
   const conflicts = conflictsFromClaims(claims);
   const synthesis = synthesisFromClaims(claims, conflicts, trustedResults);
-  const confidence = clamp(Math.max(0.16, synthesis.confidence * 0.7 + propositionGraph.confidence * 0.3));
+  const confidence = clamp(Math.max(0.2, synthesis.confidence * 0.68 + propositionGraph.confidence * 0.32));
   const nodes = buildNodes(queries, trustedResults, claims, entities);
-  nodes.push(...communities.map((community) => ({ id: 'community:' + community.id, label: community.label, type: 'community', weight: community.confidence, metadata: { summary: community.summary } }))); 
+  nodes.push(...communities.map((community) => ({ id: 'community:' + community.id, label: community.label, type: 'community', weight: community.confidence, metadata: { summary: community.summary } })));
   nodes.push(...exploration.map((step) => ({ id: 'explore:' + step.id, label: step.question, type: 'exploration', weight: step.confidence, metadata: { frontier: step.frontier } })));
   if (conflicts.length > 0) nodes.push(...conflicts.map((conflict, index) => ({ id: 'conflict:' + stableHash(conflict.claim + ':' + String(index)).slice(0, 12), label: conflict.claim, type: 'conflict', weight: conflict.confidence, metadata: { resolution: conflict.resolution } })));
   return {
