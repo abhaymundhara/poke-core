@@ -190,8 +190,7 @@ export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; e
           ...(state.retrieval?.hits ?? []).map((hit) => hit.excerpt),
           ...(state.episodicRecall ?? []).map((item) => item.summary),
         ];
-        const combined = snippets.slice(0, 12).join('
-');
+        const combined = snippets.slice(0, 12).join('\n');
         return {
           ...state,
           artifacts: {
