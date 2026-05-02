@@ -38,7 +38,11 @@ function modelEntry(source: string, score: number, useful: boolean, notes: strin
 }
 
 function safeDomain(url: string): string {
-  try { return new URL(url).hostname.replace(/^www./, ''); } catch { return ''; }
+  try {
+    return new URL(url).hostname.replace(/^www./, '');
+  } catch {
+    return '';
+  }
 }
 
 function sourceFromReliability(reliability?: Record<string, SearchSourceReliability>, source?: SearchSource | string): number {
@@ -67,8 +71,9 @@ function trustBreakdown(intent: SearchIntent, result: SearchResult, reliabilityS
 
 function epistemicClassFor(result: SearchResult): 'primary' | 'expert' | 'institutional' | 'community' | 'unknown' {
   const source = String(result.source);
-  if (source === 'github' || /(api|docs|source|spec|release notes)/i.test(result.snippet)) return 'primary';
-  if (source === 'scholar' || /(study|paper|research|analysis|citation)/i.test(result.snippet)) return 'expert';
+  const snippet = result.snippet.toLowerCase();
+  if (source === 'github' || /(api|docs|source|spec|release notes|changelog)/i.test(snippet)) return 'primary';
+  if (source === 'scholar' || /(study|paper|research|analysis|citation|experiment)/i.test(snippet)) return 'expert';
   if (source === 'calendar' || source === 'email') return 'institutional';
   if (source === 'memory' || source === 'integration') return 'community';
   return 'unknown';
@@ -132,6 +137,94 @@ export function scoreEvidenceTrust(intent: SearchIntent, results: SearchResult[]
     };
   });
   return trustworthy.sort((left, right) => right.trustScore - left.trustScore);
+}
+
+export type TrustGateOutcome = {
+  mode: 'accept' | 'replan' | 'escalate';
+  threshold: number;
+  observedMinTrust: number;
+  observedMeanTrust: number;
+  observedMaxTrust: number;
+  supportedCount: number;
+  lowTrustCount: number;
+  reasons: string[];
+  shouldReplan: boolean;
+  shouldEscalate: boolean;
+  replanIntent: SearchIntent;
+};
+
+function uniqueSources(results: TrustedEvidence[]): number {
+  return new Set(results.map((result) => String(result.source))).size;
+}
+
+function trustThreshold(intent: SearchIntent, decision?: PolicyDecision, policy?: SearchPolicyState): number {
+  const ruleThresholds = (policy?.rules ?? []).filter((rule) => rule.enabled && typeof rule.minTrustScore === 'number').map((rule) => rule.minTrustScore ?? 0);
+  const policyFloor = ruleThresholds.length > 0 ? Math.max(...ruleThresholds) : 0;
+  const intentFloor = intent.focus === 'trust' || intent.trustMode === 'official-first' ? 0.7 : intent.focus === 'multi-hop' ? 0.66 : 0.6;
+  const decisionFloor = decision?.minTrustScore ?? 0;
+  return clamp(Math.max(policyFloor, decisionFloor, intentFloor));
+}
+
+function replanIntentForLowTrust(intent: SearchIntent, trustedResults: TrustedEvidence[], mode: TrustGateOutcome['mode']): SearchIntent {
+  const subject = intent.entities[0] ?? intent.topics[0] ?? intent.semanticQuery;
+  const lowTrustTerms = trustedResults.slice(0, 4).flatMap((result) => result.claims ?? [result.title, result.snippet]).filter(Boolean).slice(0, 8);
+  return {
+    ...intent,
+    focus: mode === 'escalate' ? 'trust' : 'multi-hop',
+    trustMode: 'official-first',
+    hopBudget: Math.min(6, Math.max(intent.hopBudget + 1, 2)),
+    sourceHints: uniq([...intent.sourceHints, 'web', 'scholar', 'github']),
+    querySeeds: uniq([
+      ...intent.querySeeds,
+      'verify ' + subject,
+      'corroborate ' + subject,
+      'cross-check ' + subject,
+      'grounded evidence ' + subject,
+    ]).slice(0, 8),
+    evidenceTerms: uniq([
+      ...intent.evidenceTerms,
+      ...lowTrustTerms,
+      subject,
+      'source span grounding',
+      'cross-source verification',
+    ]).slice(0, 16),
+  };
+}
+
+export function evaluateTrustGate(intent: SearchIntent, trustedResults: TrustedEvidence[], decision?: PolicyDecision, policy?: SearchPolicyState): TrustGateOutcome {
+  const threshold = trustThreshold(intent, decision, policy);
+  const trustScores = trustedResults.map((result) => clamp(result.trustScore));
+  const observedMinTrust = trustScores.length > 0 ? Math.min(...trustScores) : 0;
+  const observedMaxTrust = trustScores.length > 0 ? Math.max(...trustScores) : 0;
+  const observedMeanTrust = trustScores.length > 0 ? trustScores.reduce((sum, score) => sum + score, 0) / trustScores.length : 0;
+  const lowTrustCount = trustedResults.filter((result) => result.trustScore < threshold).length;
+  const supportedCount = trustedResults.filter((result) => result.trustScore >= threshold).length;
+  const corroboratedSources = uniqueSources(trustedResults.filter((result) => result.trustScore >= threshold));
+  const reasons: string[] = [];
+  if (trustedResults.length === 0) reasons.push('no-evidence-available');
+  if (observedMinTrust < threshold) reasons.push('minimum-trust-below-threshold:' + observedMinTrust.toFixed(3) + '<' + threshold.toFixed(3));
+  if (observedMeanTrust < threshold) reasons.push('mean-trust-below-threshold:' + observedMeanTrust.toFixed(3) + '<' + threshold.toFixed(3));
+  if (lowTrustCount > 0) reasons.push('low-trust-results=' + String(lowTrustCount));
+  if (corroboratedSources < 2 && trustedResults.length > 1) reasons.push('insufficient-independent-corroboration');
+  if (decision?.requireCorroboration && corroboratedSources < 2) reasons.push('policy-requires-corroboration');
+
+  const shouldEscalate = trustedResults.length === 0 || observedMinTrust < threshold - 0.16 || observedMeanTrust < threshold - 0.1;
+  const shouldReplan = reasons.length > 0;
+  const mode: TrustGateOutcome['mode'] = shouldEscalate ? 'escalate' : shouldReplan ? 'replan' : 'accept';
+
+  return {
+    mode,
+    threshold,
+    observedMinTrust,
+    observedMeanTrust,
+    observedMaxTrust,
+    supportedCount,
+    lowTrustCount,
+    reasons,
+    shouldReplan,
+    shouldEscalate,
+    replanIntent: shouldReplan ? replanIntentForLowTrust(intent, trustedResults, mode) : intent,
+  };
 }
 
 export function buildSourceRanking(intent: SearchIntent, reliability?: Record<string, SearchSourceReliability>, rules?: SearchPolicyRule[], decision?: PolicyDecision): Array<{ source: SearchSource | string; score: number; reason: string }> {
