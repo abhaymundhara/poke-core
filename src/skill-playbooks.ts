@@ -1,7 +1,7 @@
 export type SkillPlaybookStatus = 'live' | 'planned';
 
 export type SkillPlaybook = {
-  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use' | 'harness' | 'channel';
+  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use' | 'harness' | 'channel' | 'connection';
   status: SkillPlaybookStatus;
   instructionPath: string;
   summary: string;
@@ -144,6 +144,19 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
     failureModes: ['missing bridge', 'ambiguous thread mapping', 'rate limiting', 'unsupported channel capability'],
     recovery: ['resolve the conversation key first', 'retry through the registered bridge', 'defer unsupported metadata to the platform layer'],
     advancedNotes: ['keep bridge routing idempotent', 'treat middleware as a first-class policy layer', 'prefer explicit channel selection when available'],
+  },
+  connection: {
+    name: 'connection',
+    status: 'live',
+    instructionPath: 'src/skills/connections.ts',
+    summary: 'centralized permission and credential management for integrations',
+    coreCapabilities: ['list_connections', 'request_permissions', 'rotate_keys', 'refresh_credentials', 'multi_account_support'],
+    boundaries: ['encrypt secrets at rest', 'avoid ambiguous provider selection', 'preserve account-level isolation'],
+    inputSchema: ['mode', 'provider', 'accountId', 'label', 'scopes', 'authorizationUrl', 'clientId', 'redirectUri', 'secrets'],
+    outputSchema: ['connections', 'authorization', 'connection', 'refreshed', 'trace'],
+    failureModes: ['missing encryption key', 'ambiguous account lookup', 'refresh unavailable', 'provider configuration missing'],
+    recovery: ['specify provider plus account identifier', 'supply provider auth configuration', 'fall back to reauthorization when refresh is unavailable'],
+    advancedNotes: ['treat permissions as a first-class registry', 'support one provider with many accounts', 'prefer explicit scope checks before tool execution'],
   },
   'computer-use': {
     name: 'computer-use',
