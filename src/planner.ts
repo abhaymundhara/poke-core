@@ -2,7 +2,8 @@ export * from './planner-intelligence';
 import { buildPlan as buildPlannerPlan } from './planner-intelligence';
 import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, type SemanticNluProvider } from './search/nlu';
 import { parseModelJson } from './llm-bridge';
-import type { PlannerIntentGraph, SearchIntent, TaskInput, TaskPlan } from './types';
+import { runtimeServices } from './runtime/services.ts';
+import type { PlannerIntentGraph, SearchIntent, TaskInput, TaskPlan, TimeProvider } from './types';
 
 type TrajectorySession = {
   key: string;
@@ -22,10 +23,14 @@ export type PlannerTrajectoryProbe = {
 
 const sessions = new Map<string, TrajectorySession>();
 
-function ensureSession(key: string): TrajectorySession {
+function ensureSession(key: string, clock: TimeProvider): TrajectorySession {
   const existing = sessions.get(key);
-  if (existing) return existing;
-  const created = { key, history: [], lastUpdated: Date.now() };
+  const now = clock.now();
+  if (existing) {
+    existing.lastUpdated = now;
+    return existing;
+  }
+  const created = { key, history: [], lastUpdated: now };
   sessions.set(key, created);
   return created;
 }
@@ -42,9 +47,9 @@ function snapshotProbe(input: PlannerTrajectoryProbe): Record<string, unknown> {
   };
 }
 
-function appendHistory(session: TrajectorySession, event: Record<string, unknown>): void {
+function appendHistory(session: TrajectorySession, event: Record<string, unknown>, at: number): void {
   session.history.push(JSON.stringify(event));
-  session.lastUpdated = Date.now();
+  session.lastUpdated = at;
 }
 
 const LATENT_GOAL_SCHEMA = {
@@ -64,15 +69,16 @@ function asStringArray(value: unknown): string[] {
 }
 
 export class LatentGoalTracker {
-  constructor(private provider: SemanticNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER) {}
+  constructor(private provider: SemanticNluProvider = DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, private clock: TimeProvider = runtimeServices.clock) {}
 
-  observe(input: PlannerTrajectoryProbe): void {
-    const session = ensureSession(input.sessionKey);
-    appendHistory(session, { type: 'observation', at: Date.now(), probe: snapshotProbe(input) });
+  observe(input: PlannerTrajectoryProbe, clock: TimeProvider = this.clock): void {
+    const session = ensureSession(input.sessionKey, clock);
+    const at = clock.now();
+    appendHistory(session, { type: 'observation', at, probe: snapshotProbe(input) }, at);
   }
 
-  async infer(input: PlannerTrajectoryProbe): Promise<string[]> {
-    const session = ensureSession(input.sessionKey);
+  async infer(input: PlannerTrajectoryProbe, clock: TimeProvider = this.clock): Promise<string[]> {
+    const session = ensureSession(input.sessionKey, clock);
     const raw = await this.provider.extract({
       objective: 'infer latent goals from the session history',
       context: {
@@ -91,7 +97,7 @@ export class LatentGoalTracker {
 
 const tracker = new LatentGoalTracker();
 
-export async function observePlannerTrajectory(plan: TaskPlan): Promise<void> {
+export async function observePlannerTrajectory(plan: TaskPlan, clock: TimeProvider = runtimeServices.clock): Promise<void> {
   tracker.observe({
     sessionKey: plan.semanticIntent?.sessionKey ?? plan.taskId,
     objective: plan.objective,
@@ -99,16 +105,16 @@ export async function observePlannerTrajectory(plan: TaskPlan): Promise<void> {
     intentGraph: plan.intentGraph,
     semanticIntent: plan.semanticIntent,
     breadcrumbs: plan.steps.map((step) => ({ stepId: step.id, kind: step.kind, skill: step.skill, status: 'done' as const })),
-  });
+  }, clock);
 }
 
-export async function inferLatentGoalsFromTrajectory(input: PlannerTrajectoryProbe): Promise<string[]> {
-  tracker.observe(input);
-  return await tracker.infer(input);
+export async function inferLatentGoalsFromTrajectory(input: PlannerTrajectoryProbe, clock: TimeProvider = runtimeServices.clock): Promise<string[]> {
+  tracker.observe(input, clock);
+  return await tracker.infer(input, clock);
 }
 
-export async function buildPlan(input: TaskInput): Promise<TaskPlan> {
+export async function buildPlan(input: TaskInput, clock: TimeProvider = runtimeServices.clock): Promise<TaskPlan> {
   const plan = await buildPlannerPlan(input);
-  await observePlannerTrajectory(plan);
+  await observePlannerTrajectory(plan, clock);
   return plan;
 }

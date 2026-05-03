@@ -2,12 +2,15 @@ import { BridgeRegistry } from '../bridge/registry.ts';
 import { ConnectionManager } from '../connections/manager.ts';
 import type { PermissionRegistry, PermissionScope } from '../connections/types.ts';
 import { EventBus } from '../events/index.ts';
+import { createHighPrecisionClock } from './context.ts';
+import type { TimeProvider } from '../types';
 
 export type RuntimeServices = {
   eventBus: EventBus;
   bridgeRegistry: BridgeRegistry;
   connectionManager: ConnectionManager;
   permissionRegistry: PermissionRegistry;
+  clock: TimeProvider;
 };
 
 declare global {
@@ -30,12 +33,13 @@ function registerIntegrationPermissions(registry: PermissionRegistry): void {
 }
 
 function createRuntimeServices(): RuntimeServices {
+  const clock = createHighPrecisionClock();
   const eventBus = new EventBus();
   const connectionManager = new ConnectionManager();
   const permissionRegistry = connectionManager.permissionRegistry;
   registerIntegrationPermissions(permissionRegistry);
   const bridgeRegistry = new BridgeRegistry({ eventBus });
-  return { eventBus, bridgeRegistry, connectionManager, permissionRegistry };
+  return { eventBus, bridgeRegistry, connectionManager, permissionRegistry, clock };
 }
 
 export function getRuntimeServices(): RuntimeServices {
@@ -48,3 +52,4 @@ export const eventBus = runtimeServices.eventBus;
 export const bridgeRegistry = runtimeServices.bridgeRegistry;
 export const connectionManager = runtimeServices.connectionManager;
 export const permissionRegistry = runtimeServices.permissionRegistry;
+export const clock = runtimeServices.clock;

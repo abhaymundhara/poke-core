@@ -1,15 +1,22 @@
 import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
-import type { ExecutionEvent, StepAttempt, TaskPlan, TaskRecord, TaskSnapshot, TaskStatus, RuntimeState } from './types';
+import { runtimeServices } from './runtime/services.ts';
+import type { ExecutionEvent, StepAttempt, TaskPlan, TaskRecord, TaskSnapshot, TaskStatus, RuntimeState, TimeProvider } from './types';
 import type { MemoryDocument, ChunkRecord, RetrievalResult } from './rag/types';
 import type { MemoryFact } from './memory/working-memory';
 import type { EpisodicMemoryItem } from './memory/episodic-memory';
 
 export class PokeCoreStore {
   private db: Database;
+  private readonly clock: TimeProvider;
 
-  constructor(private dbPath: string) {
+  constructor(private dbPath: string, clock: TimeProvider = runtimeServices.clock) {
+    this.clock = clock;
     this.db = new Database(dbPath, { create: true });
+  }
+
+  private now(): number {
+    return this.clock.now();
   }
 
   init() {
@@ -127,7 +134,7 @@ export class PokeCoreStore {
   withTransaction<T>(fn: () => T): T { return this.db.transaction(fn)(); }
 
   upsertTask(taskId: string, objective: string, status: TaskStatus) {
-    const now = Date.now();
+    const now = this.now();
     this.db.prepare(`
       INSERT INTO tasks(task_id, objective, status, current_step_index, active_step_id, revision, result_json, error_json, lease_token, created_at, updated_at)
       VALUES (?, ?, ?, 0, NULL, 0, NULL, NULL, NULL, ?, ?)
@@ -146,7 +153,7 @@ export class PokeCoreStore {
   }
 
   savePlan(plan: TaskPlan) {
-    const now = Date.now();
+    const now = this.now();
     this.db.prepare(`
       INSERT INTO task_plans(task_id, objective, plan_json, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?)
@@ -166,7 +173,7 @@ export class PokeCoreStore {
       errorJson: patch.errorJson === undefined ? current.errorJson : patch.errorJson,
       leaseToken: patch.leaseToken === undefined ? current.leaseToken : patch.leaseToken,
     };
-    this.db.prepare(`UPDATE tasks SET status = ?, current_step_index = ?, active_step_id = ?, revision = ?, result_json = ?, error_json = ?, lease_token = ?, updated_at = ? WHERE task_id = ?`).run(next.status, next.currentStepIndex, next.activeStepId, next.revision, next.resultJson, next.errorJson, next.leaseToken, Date.now(), taskId);
+    this.db.prepare(`UPDATE tasks SET status = ?, current_step_index = ?, active_step_id = ?, revision = ?, result_json = ?, error_json = ?, lease_token = ?, updated_at = ? WHERE task_id = ?`).run(next.status, next.currentStepIndex, next.activeStepId, next.revision, next.resultJson, next.errorJson, next.leaseToken, this.now(), taskId);
   }
 
   bumpRevision(taskId: string) {
@@ -176,7 +183,7 @@ export class PokeCoreStore {
   }
 
   recordEvent(taskId: string, transitionKind: string, fromStatus: TaskStatus | null, toStatus: TaskStatus | null, detail: unknown) {
-    this.db.prepare(`INSERT INTO events(event_id, task_id, transition_kind, from_status, to_status, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), taskId, transitionKind, fromStatus, toStatus, JSON.stringify(detail), Date.now());
+    this.db.prepare(`INSERT INTO events(event_id, task_id, transition_kind, from_status, to_status, detail_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), taskId, transitionKind, fromStatus, toStatus, JSON.stringify(detail), this.now());
   }
 
   recordAttempt(attempt: StepAttempt) {
@@ -186,17 +193,17 @@ export class PokeCoreStore {
   finalizeAttempt(attemptId: string, patch: Partial<Pick<StepAttempt, 'status' | 'outputJson' | 'errorJson' | 'endedAt'>>) {
     const row = this.db.prepare(`SELECT * FROM executions WHERE attempt_id = ?`).get(attemptId) as any;
     if (!row) throw new Error(`attempt not found: ${attemptId}`);
-    this.db.prepare(`UPDATE executions SET status = ?, output_json = ?, error_json = ?, ended_at = ? WHERE attempt_id = ?`).run(patch.status ?? row.status, patch.outputJson ?? row.output_json, patch.errorJson ?? row.error_json, patch.endedAt ?? Date.now(), attemptId);
+    this.db.prepare(`UPDATE executions SET status = ?, output_json = ?, error_json = ?, ended_at = ? WHERE attempt_id = ?`).run(patch.status ?? row.status, patch.outputJson ?? row.output_json, patch.errorJson ?? row.error_json, patch.endedAt ?? this.now(), attemptId);
   }
 
   recordSnapshot(taskId: string, status: TaskStatus, state: RuntimeState) {
-    const snapshot: TaskSnapshot = { snapshotId: randomUUID(), taskId, status, stateJson: JSON.stringify(state), createdAt: Date.now() };
+    const snapshot: TaskSnapshot = { snapshotId: randomUUID(), taskId, status, stateJson: JSON.stringify(state), createdAt: this.now() };
     this.db.prepare(`INSERT INTO snapshots(snapshot_id, task_id, status, state_json, created_at) VALUES (?, ?, ?, ?, ?)`).run(snapshot.snapshotId, snapshot.taskId, snapshot.status, snapshot.stateJson, snapshot.createdAt);
     return snapshot;
   }
 
   recordGraphEdge(taskId: string, fromStepId: string | null, toStepId: string | null, edgeKind: string, reason: string) {
-    this.db.prepare(`INSERT INTO graph_edges(edge_id, task_id, from_step_id, to_step_id, edge_kind, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), taskId, fromStepId, toStepId, edgeKind, reason, Date.now());
+    this.db.prepare(`INSERT INTO graph_edges(edge_id, task_id, from_step_id, to_step_id, edge_kind, reason, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(randomUUID(), taskId, fromStepId, toStepId, edgeKind, reason, this.now());
   }
 
   upsertMemoryDocument(doc: MemoryDocument) {
@@ -212,7 +219,7 @@ export class PokeCoreStore {
       INSERT INTO memory_chunks(chunk_id, document_id, position, text, token_count, term_vector_json, salience, recency_score, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(chunk_id) DO UPDATE SET document_id = excluded.document_id, position = excluded.position, text = excluded.text, token_count = excluded.token_count, term_vector_json = excluded.term_vector_json, salience = excluded.salience, recency_score = excluded.recency_score, updated_at = excluded.updated_at
-    `).run(chunk.chunkId, chunk.documentId, chunk.position, chunk.text, chunk.tokenCount, JSON.stringify(chunk.termVector), chunk.salience, chunk.recencyScore, Date.now(), Date.now());
+    `).run(chunk.chunkId, chunk.documentId, chunk.position, chunk.text, chunk.tokenCount, JSON.stringify(chunk.termVector), chunk.salience, chunk.recencyScore, this.now(), this.now());
   }
 
   replaceWorkingFact(fact: MemoryFact) {
@@ -232,7 +239,7 @@ export class PokeCoreStore {
   }
 
   recordRetrieval(query: string, result: RetrievalResult) {
-    this.db.prepare(`INSERT INTO retrieval_queries(query_id, query, result_json, created_at) VALUES (?, ?, ?, ?)`).run(randomUUID(), query, JSON.stringify(result), Date.now());
+    this.db.prepare(`INSERT INTO retrieval_queries(query_id, query, result_json, created_at) VALUES (?, ?, ?, ?)`).run(randomUUID(), query, JSON.stringify(result), this.now());
   }
 
   allEvents(taskId: string): ExecutionEvent[] {
