@@ -54,7 +54,6 @@ type PreparedShellInvocation = {
   timeoutMs: number;
   maxOutputBytes: number;
   gracePeriodMs: number;
-  allowUnsafeCommands: boolean;
   onChunk?: (chunk: ShellOutputChunk) => void;
 };
 
@@ -92,23 +91,6 @@ function stringifyEnvValue(value: unknown): string | undefined {
   if (typeof value === 'string') return value;
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
   return String(value);
-}
-
-function appendWithLimit(current: string, chunk: string, maxBytes: number) {
-  const currentBytes = Buffer.byteLength(current, 'utf8');
-  const remainingBytes = Math.max(0, maxBytes - currentBytes);
-  if (remainingBytes <= 0) {
-    return { value: current, acceptedBytes: 0, truncated: Buffer.byteLength(chunk, 'utf8') > 0 };
-  }
-
-  const buffer = Buffer.from(chunk, 'utf8');
-  const acceptedBuffer = buffer.subarray(0, remainingBytes);
-  const acceptedText = acceptedBuffer.toString('utf8');
-  return {
-    value: current + acceptedText,
-    acceptedBytes: Buffer.byteLength(acceptedText, 'utf8'),
-    truncated: acceptedBuffer.length < buffer.length,
-  };
 }
 
 function resolveShellExecutable(shellOverride: string | undefined): string {
@@ -223,7 +205,6 @@ export class ShellRuntime {
       timeoutMs: options.timeoutMs ?? this.defaultTimeoutMs,
       maxOutputBytes: options.maxOutputBytes ?? this.defaultMaxOutputBytes,
       gracePeriodMs: options.gracePeriodMs ?? 5_000,
-      allowUnsafeCommands,
       onChunk: options.onChunk,
     };
   }
@@ -333,6 +314,7 @@ export class ShellRuntime {
       }, prepared.timeoutMs);
       timeoutHandle.unref?.();
 
+      const acceptedBytes = (value: string) => Buffer.byteLength(value, 'utf8');
       const emitChunk = (stream: 'stdout' | 'stderr', chunk: Buffer | string) => {
         if (settled) return;
         const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
@@ -340,31 +322,31 @@ export class ShellRuntime {
         const buffer = Buffer.from(text, 'utf8');
         const acceptedBuffer = buffer.subarray(0, remainingBytes);
         const acceptedText = acceptedBuffer.toString('utf8');
+        const acceptedByteCount = acceptedBytes(acceptedText);
 
-        if (acceptedBytes(acceptedText) > 0) {
+        if (acceptedByteCount > 0) {
           if (stream === 'stdout') {
             stdout += acceptedText;
-            stdoutBytes += acceptedBytes(acceptedText);
+            stdoutBytes += acceptedByteCount;
           } else {
             stderr += acceptedText;
-            stderrBytes += acceptedBytes(acceptedText);
+            stderrBytes += acceptedByteCount;
           }
-          totalBytes += acceptedBytes(acceptedText);
+          totalBytes += acceptedByteCount;
+        }
+
+        const chunkTruncated = acceptedBuffer.length < buffer.length;
+        truncated = truncated || chunkTruncated;
+        if (acceptedByteCount > 0) {
           prepared.onChunk?.({
             stream,
             data: acceptedText,
-            acceptedBytes: acceptedBytes(acceptedText),
+            acceptedBytes: acceptedByteCount,
             totalBytes,
             truncated,
           });
         }
-
-        if (acceptedBuffer.length < buffer.length) {
-          truncated = true;
-        }
       };
-
-      const acceptedBytes = (value: string) => Buffer.byteLength(value, 'utf8');
 
       child.stdout?.on('data', (chunk) => emitChunk('stdout', chunk));
       child.stderr?.on('data', (chunk) => emitChunk('stderr', chunk));
