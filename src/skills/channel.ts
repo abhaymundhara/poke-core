@@ -1,5 +1,6 @@
 import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
 import { BridgeRegistry, type BridgeConversation, type BridgeOutboundMessage, type BridgeThreadMetadata, type ChannelKind } from '../bridge/index.ts';
+import { EventBus } from '../events/index.ts';
 import type { SkillAdapter } from './types';
 
 export type ChannelSkillMode = 'send' | 'thread' | 'metadata';
@@ -7,6 +8,7 @@ export type ChannelSkillMode = 'send' | 'thread' | 'metadata';
 export type ChannelSkillOptions = {
   registry?: BridgeRegistry;
   defaultChannel?: ChannelKind;
+  eventBus?: EventBus;
 };
 
 function asText(value: unknown): string {
@@ -78,7 +80,7 @@ export class ChannelSkill implements SkillAdapter {
   private readonly defaultChannel?: ChannelKind;
 
   constructor(options: ChannelSkillOptions = {}) {
-    this.registry = options.registry ?? new BridgeRegistry();
+    this.registry = options.registry ?? new BridgeRegistry({ eventBus: options.eventBus });
     this.defaultChannel = options.defaultChannel;
   }
 

@@ -3,7 +3,8 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { PokeCoreStore } from './store';
 import { PokeCoreOrchestrator } from './orchestrator';
-import { AutopilotSkill, BrowserSkill, ComputerUseSkill, GroundingSkill, HarnessSkill, IntegrationSkill, SignalObservationSkill, UserModelingSkill } from './skills';
+import { EventBus } from './events';
+import { AutopilotSkill, BrowserSkill, ComputerUseSkill, EventSkill, GroundingSkill, HarnessSkill, IntegrationSkill, SignalObservationSkill, UserModelingSkill } from './skills';
 import { buildPlan } from './planner';
 import { formatRetrievalBenchmark } from './rag';
 import { formatAutopilotAudit, formatAutopilotBenchmark } from './autopilot';
@@ -20,7 +21,8 @@ const [cmd] = args._;
 const db = ensureDbPath(str(args, 'db', './poke-core.sqlite'));
 const store = new PokeCoreStore(db);
 store.init();
-const orchestrator = new PokeCoreOrchestrator(store, [new BrowserSkill(), new IntegrationSkill(), new AutopilotSkill(), new UserModelingSkill(), new GroundingSkill(), new SignalObservationSkill(), new ComputerUseSkill(), new HarnessSkill()]);
+const eventBus = new EventBus();
+const orchestrator = new PokeCoreOrchestrator(store, [new BrowserSkill(), new IntegrationSkill(), new AutopilotSkill(), new UserModelingSkill(), new GroundingSkill(), new SignalObservationSkill(), new ComputerUseSkill(), new HarnessSkill(), new EventSkill({ eventBus })], eventBus);
 
 try {
   if (!cmd || cmd === 'help' || cmd === '--help' || cmd === '-h') {

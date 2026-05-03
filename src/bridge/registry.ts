@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { EventBus } from '../events/index.ts';
 import type {
   BridgeConversation,
   BridgeDispatchContext,
@@ -51,6 +52,10 @@ export class BridgeRateLimitError extends BridgeRoutingError {
 type RateWindow = {
   count: number;
   startedAt: number;
+};
+
+export type BridgeRegistryOptions = {
+  eventBus?: EventBus;
 };
 
 type ConversationLocator = string | {
@@ -131,10 +136,22 @@ function materializeConversation(input: BridgeConversation): BridgeConversation 
 export class BridgeRegistry {
   private readonly bridgesById = new Map<string, IBridge>();
   private readonly bridgesByChannel = new Map<ChannelKind, IBridge[]>();
+  private readonly eventBus?: EventBus;
+
+  constructor(options: BridgeRegistryOptions = {}) {
+    this.eventBus = options.eventBus;
+  }
   private readonly conversationsById = new Map<string, BridgeConversation>();
   private readonly conversationIndex = new Map<string, string>();
   private readonly middleware: BridgeMiddleware[] = [];
   private readonly rateWindows = new Map<string, RateWindow>();
+
+  private async emitEvent(topic: string, payload: Record<string, unknown>): Promise<void> {
+    if (!this.eventBus) {
+      return;
+    }
+    await this.eventBus.publish({ topic, source: 'bridge', payload });
+  }
 
   registerBridge(bridge: IBridge): this {
     this.bridgesById.set(bridge.id, bridge);
@@ -286,6 +303,8 @@ export class BridgeRegistry {
       updatedAt: nowIso(),
     }));
 
+    await this.emitEvent('bridge.inbound', { bridgeId: bridge.id, channel: updatedConversation.channel, conversationId: updatedConversation.conversationId, externalMessageId: signal.externalMessageId });
+
     return {
       bridge,
       conversation: updatedConversation,
@@ -346,6 +365,8 @@ export class BridgeRegistry {
       }),
       updatedAt: nowIso(),
     }));
+
+    await this.emitEvent('bridge.thread.created', { bridgeId: bridge.id, channel: request.channel, conversationId: conversation.conversationId });
 
     return {
       conversation,
@@ -412,6 +433,8 @@ export class BridgeRegistry {
       updatedAt: nowIso(),
     }));
 
+    await this.emitEvent('bridge.outbound', { bridgeId: bridge.id, channel, conversationId: updatedConversation.conversationId, messageId: dispatch.messageId });
+
     return {
       bridge,
       conversation: updatedConversation,
@@ -441,7 +464,7 @@ export class BridgeRegistry {
       patch: formattedPatch,
     }));
 
-    return this.bindConversation(conversationPatch(nextConversation, {
+    const updated = this.bindConversation(conversationPatch(nextConversation, {
       bridgeId: bridge.id,
       channel: nextConversation.channel,
       participants: nextConversation.participants.length ? nextConversation.participants : conversation.participants,
@@ -452,6 +475,10 @@ export class BridgeRegistry {
       }),
       updatedAt: nowIso(),
     }));
+
+    await this.emitEvent('bridge.metadata.updated', { bridgeId: bridge.id, channel: updated.channel, conversationId: updated.conversationId });
+
+    return updated;
   }
 
   private async applyMiddleware(operation: BridgeOperation, bridge: IBridge, payload: unknown, conversation?: BridgeConversation): Promise<unknown | null> {

@@ -8,4 +8,5 @@ export * from './terminal';
 export * from './identity';
 export * from './channel';
 export * from './connections';
+export * from './events';
 export { AutopilotSkill, UserModelingSkill, GroundingSkill, SignalObservationSkill, ComputerUseSkill as FlagshipComputerUseSkill } from './flagship';
