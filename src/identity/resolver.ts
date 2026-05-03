@@ -21,13 +21,13 @@ function normalizeEmail(value: string): string { return text(value).toLowerCase(
 function normalizePhone(value: string): string {
   const trimmed = text(value);
   const hasPlus = trimmed.startsWith('+');
-  const digits = trimmed.replace(/D/g, '');
+  const digits = trimmed.replace(/\D/g, '');
   return hasPlus ? '+' + digits : digits;
 }
 function canonicalPlatform(platform: string): string { return text(platform).toLowerCase() === 'x' ? 'twitter' : text(platform).toLowerCase(); }
 function normalizeHandle(value: string): string { return text(value).replace(/^@+/, '').toLowerCase(); }
 function normalizeGeneral(value: string): string { return text(value).toLowerCase(); }
-function normalizeWhitespace(value: string): string { return text(value).replace(/s+/g, ' '); }
+function normalizeWhitespace(value: string): string { return text(value).replace(/\s+/g, ' '); }
 
 function combineConfidence(scores: number[]): number {
   let confidence = 0;
@@ -43,8 +43,8 @@ function parseQuery(input: ResolveIdentityInput): { query: string; email?: strin
 
   const query = text(input);
   if (!query) return { query: '' };
-  if (/^[^s@]+@[^s@]+.[^s@]+$/.test(query)) return { query, email: query };
-  if (/^+?[ds().-]{7,}$/.test(query)) return { query, phone: query };
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(query)) return { query, email: query };
+  if (/^\+?[\d\s().-]{7,}$/.test(query)) return { query, phone: query };
   const platformHandle = query.match(/^([a-z0-9-]+):@?([a-z0-9._-]+)$/i);
   if (platformHandle) return { query, platform: canonicalPlatform(platformHandle[1]), handle: platformHandle[2] };
   if (query.startsWith('@') && query.length > 1) return { query, handle: query.slice(1) };

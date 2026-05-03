@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
-import type { IdentityEdge, IdentityEdgeKind, IdentityHandle, IdentityKind, IdentityLinkInput, IdentityPhone, IdentityRecord, IdentityUpsertInput } from './types.ts';
+import type { IdentityEdge, IdentityEdgeKind, IdentityKind, IdentityLinkInput, IdentityRecord, IdentityUpsertInput } from './types.ts';
 
 export const DEFAULT_IDENTITY_DB_PATH = resolve(process.cwd(), '.poke-core', 'identity.sqlite');
 
@@ -29,11 +29,11 @@ function json<T>(value: string | null | undefined, fallback: T): T {
 }
 
 function normalizeWhitespace(value: string): string {
-  return value.trim().replace(/s+/g, ' ');
+  return value.trim().replace(/\s+/g, ' ');
 }
 
 function normalizeName(value: string): string {
-  return normalizeWhitespace(value).toLowerCase().replace(/[^p{L}p{N}]+/gu, ' ').replace(/s+/g, ' ').trim();
+  return normalizeWhitespace(value).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').replace(/\s+/g, ' ').trim();
 }
 
 function normalizeAlias(value: string): string {
@@ -47,7 +47,7 @@ function normalizeEmail(value: string): string {
 function normalizePhone(value: string): string {
   const trimmed = normalizeWhitespace(value);
   const hasPlus = trimmed.startsWith('+');
-  const digits = trimmed.replace(/D/g, '');
+  const digits = trimmed.replace(/\D/g, '');
   return hasPlus ? '+' + digits : digits;
 }
 
