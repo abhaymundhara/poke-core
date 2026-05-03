@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { ConnectionCryptoService } from './crypto.ts';
 import { SQLiteConnectionStore } from './store.ts';
 import { PermissionRegistry } from './permissions.ts';
@@ -105,9 +106,13 @@ export class ConnectionManager {
   private readonly autoRefreshWindowMs: number;
   private readonly defaultEncryptionKey?: string;
   private readonly keyResolver?: ConnectionManagerOptions['keyResolver'];
+  private readonly tenantId: string;
+  private readonly contextId: string;
 
   constructor(options: ConnectionManagerOptions = {}) {
-    this.storage = options.storage ?? new SQLiteConnectionStore();
+    this.tenantId = options.tenantId ?? process.env.POKE_CORE_TENANT_ID ?? 'global';
+    this.contextId = options.contextId ?? process.env.POKE_CORE_CONTEXT_ID ?? 'global';
+    this.storage = options.storage ?? new SQLiteConnectionStore({ storagePath: resolve(process.cwd(), '.poke-core', this.tenantId, this.contextId, 'connections.sqlite') });
     this.crypto = new ConnectionCryptoService({ defaultKey: options.encryptionKey });
     this.permissions = new PermissionRegistry();
     if (!options.clock) throw new Error('ConnectionManager clock is required');
