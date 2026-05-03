@@ -42,7 +42,8 @@ function parseJsonObject(value: string | null | undefined): Record<string, unkno
 }
 
 function parseScopes(value: unknown): PermissionScope[] {
-  return Array.isArray(value) ? value.filter((scope): scope is PermissionScope => scope === 'read' || scope === 'write' || scope === 'admin') : [];
+  const raw = typeof value === 'string' ? JSON.parse(value) : value;
+  return Array.isArray(raw) ? raw.filter((scope): scope is PermissionScope => scope === 'read' || scope === 'write' || scope === 'admin') : [];
 }
 
 function parseEnvelope(value: string): EncryptedSecretEnvelope {
@@ -173,14 +174,14 @@ export class SQLiteConnectionStore implements ConnectionStore {
 
   async list(): Promise<ConnectionRecord[]> {
     const rows = this.db.query(
-      'SELECT c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint, COALESCE(json_group_array(cs.scope), ''[]'') AS scopes FROM connections c LEFT JOIN connection_scopes cs ON cs.connection_id = c.connection_id GROUP BY c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint ORDER BY c.updated_at DESC, c.created_at DESC',
+      'SELECT c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint, COALESCE(json_group_array(cs.scope), \'[]\') AS scopes FROM connections c LEFT JOIN connection_scopes cs ON cs.connection_id = c.connection_id GROUP BY c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint ORDER BY c.updated_at DESC, c.created_at DESC',
     ).all();
     return rows.map(rowToRecord).map(cloneRecord);
   }
 
   async get(connectionId: string): Promise<ConnectionRecord | undefined> {
     const row = this.db.query(
-      'SELECT c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint, COALESCE(json_group_array(cs.scope), ''[]'') AS scopes FROM connections c LEFT JOIN connection_scopes cs ON cs.connection_id = c.connection_id WHERE c.connection_id = ? GROUP BY c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint LIMIT 1',
+      'SELECT c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint, COALESCE(json_group_array(cs.scope), \'[]\') AS scopes FROM connections c LEFT JOIN connection_scopes cs ON cs.connection_id = c.connection_id WHERE c.connection_id = ? GROUP BY c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint LIMIT 1',
     ).get(connectionId);
     return row ? cloneRecord(rowToRecord(row)) : undefined;
   }
@@ -228,7 +229,7 @@ export class SQLiteConnectionStore implements ConnectionStore {
 
   async findByProviderAndAccount(provider: string, accountId: string): Promise<ConnectionRecord | undefined> {
     const row = this.db.query(
-      'SELECT c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint, COALESCE(json_group_array(cs.scope), ''[]'') AS scopes FROM connections c LEFT JOIN connection_scopes cs ON cs.connection_id = c.connection_id WHERE c.provider = ? AND c.account_id = ? GROUP BY c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint LIMIT 1',
+      'SELECT c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint, COALESCE(json_group_array(cs.scope), \'[]\') AS scopes FROM connections c LEFT JOIN connection_scopes cs ON cs.connection_id = c.connection_id WHERE c.provider = ? AND c.account_id = ? GROUP BY c.connection_id, c.provider, c.account_id, c.label, c.credential_kind, c.auth_mode, c.status, c.metadata_json, c.secret_envelope_json, c.created_at, c.updated_at, c.last_refreshed_at, c.expires_at, c.owner_id, c.provider_account_hint LIMIT 1',
     ).get(provider, accountId);
     return row ? cloneRecord(rowToRecord(row)) : undefined;
   }
