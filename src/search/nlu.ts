@@ -179,7 +179,7 @@ async function invokeSemanticProvider(input: { objective: string; context: Recor
 
   if (resolved.provider === 'openai') {
     const response = await fetchJson<{ choices?: Array<{ message?: { content?: string } }> }>(
-      resolved.baseUrl.replace(//$/, '') + '/chat/completions',
+      resolved.baseUrl.replace(/\/$/, '') + '/chat/completions',
       {
         method: 'POST',
         headers: {
@@ -203,7 +203,7 @@ async function invokeSemanticProvider(input: { objective: string; context: Recor
 
   if (resolved.provider === 'anthropic') {
     const response = await fetchJson<{ content?: Array<{ type?: string; text?: string }> }>(
-      resolved.baseUrl.replace(//$/, '') + '/messages',
+      resolved.baseUrl.replace(/\/$/, '') + '/messages',
       {
         method: 'POST',
         headers: {
@@ -227,7 +227,7 @@ async function invokeSemanticProvider(input: { objective: string; context: Recor
   }
 
   const response = await fetchJson<{ message?: { content?: string }; response?: string }>(
-    resolved.baseUrl.replace(//$/, '') + '/api/chat',
+    resolved.baseUrl.replace(/\/$/, '') + '/api/chat',
     {
       method: 'POST',
       headers: {
@@ -566,8 +566,79 @@ function extractTextFromResponse(payload: unknown): string {
   return '';
 }
 
-async function invokeSemanticNluProvider(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): Promise<unknown> {
-  return localSemanticExtraction(objective, context);
+async function invokeSemanticProvider(input: { objective: string; context: Record<string, unknown>; schema: Record<string, unknown> }): Promise<unknown> {
+  const resolved = await resolveSemanticConnection(input);
+  const prompt = buildSemanticPrompt(input.objective, input.context, input.schema);
+  const endpoint = resolved.baseUrl.endsWith('/') ? resolved.baseUrl.slice(0, -1) : resolved.baseUrl;
+
+  if (resolved.provider === 'openai') {
+    const response = await fetchJson<{ choices?: Array<{ message?: { content?: string } }> }>(
+      endpoint + '/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer ' + (resolved.token ?? ''),
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolved.model,
+          temperature: 0,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: 'You are a semantic intent planner. Return JSON only.' },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      },
+    );
+    return parseSemanticResponse(response.choices?.[0]?.message?.content ?? response);
+  }
+
+  if (resolved.provider === 'anthropic') {
+    const response = await fetchJson<{ content?: Array<{ type?: string; text?: string }> }>(
+      endpoint + '/messages',
+      {
+        method: 'POST',
+        headers: {
+          'x-api-key': resolved.token ?? '',
+          'anthropic-version': '2023-06-01',
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolved.model,
+          max_tokens: 1024,
+          temperature: 0,
+          messages: [
+            { role: 'user', content: prompt },
+          ],
+        }),
+      },
+    );
+    const text = (response.content ?? []).map((item) => item.text ?? '').join('').trim();
+    return parseSemanticResponse(text || response);
+  }
+
+  const response = await fetchJson<{ message?: { content?: string }; response?: string }>(
+    endpoint + '/api/chat',
+    {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: resolved.model,
+        stream: false,
+        messages: [
+          { role: 'system', content: 'You are a semantic intent planner. Return JSON only.' },
+          { role: 'user', content: prompt },
+        ],
+      }),
+    },
+  );
+  return parseSemanticResponse(response.message?.content ?? response.response ?? response);
 }
 
 function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider: string, fallbackUsed: boolean): SearchIntent {
