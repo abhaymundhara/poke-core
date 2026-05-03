@@ -5,12 +5,19 @@ import { EventBus } from '../events/index.ts';
 import { createHighPrecisionClock } from './context.ts';
 import type { TimeProvider } from '../types';
 
+type RuntimeServiceScope = {
+  tenantId?: string;
+  contextId?: string;
+};
+
 export type RuntimeServices = {
   eventBus: EventBus;
   bridgeRegistry: BridgeRegistry;
   connectionManager: ConnectionManager;
   permissionRegistry: PermissionRegistry;
   clock: TimeProvider;
+  tenantId: string;
+  contextId: string;
 };
 
 declare global {
@@ -32,14 +39,16 @@ function registerIntegrationPermissions(registry: PermissionRegistry): void {
   }
 }
 
-function createRuntimeServices(): RuntimeServices {
+function createRuntimeServices(options: RuntimeServiceScope = {}): RuntimeServices {
   const clock = createHighPrecisionClock();
-  const eventBus = new EventBus({ clock });
-  const connectionManager = new ConnectionManager({ clock });
+  const tenantId = options.tenantId ?? process.env.POKE_CORE_TENANT_ID ?? 'global';
+  const contextId = options.contextId ?? process.env.POKE_CORE_CONTEXT_ID ?? 'global';
+  const eventBus = new EventBus({ clock, tenantId, contextId });
+  const connectionManager = new ConnectionManager({ clock, tenantId, contextId });
   const permissionRegistry = connectionManager.permissionRegistry;
   registerIntegrationPermissions(permissionRegistry);
   const bridgeRegistry = new BridgeRegistry({ eventBus });
-  return { eventBus, bridgeRegistry, connectionManager, permissionRegistry, clock };
+  return { eventBus, bridgeRegistry, connectionManager, permissionRegistry, clock, tenantId, contextId };
 }
 
 export function getRuntimeServices(): RuntimeServices {
