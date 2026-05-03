@@ -34,8 +34,8 @@ function registerIntegrationPermissions(registry: PermissionRegistry): void {
 
 function createRuntimeServices(): RuntimeServices {
   const clock = createHighPrecisionClock();
-  const eventBus = new EventBus();
-  const connectionManager = new ConnectionManager();
+  const eventBus = new EventBus({ clock });
+  const connectionManager = new ConnectionManager({ clock });
   const permissionRegistry = connectionManager.permissionRegistry;
   registerIntegrationPermissions(permissionRegistry);
   const bridgeRegistry = new BridgeRegistry({ eventBus });

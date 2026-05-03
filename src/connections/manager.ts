@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { ConnectionCryptoService } from './crypto.ts';
 import { SQLiteConnectionStore } from './store.ts';
 import { PermissionRegistry } from './permissions.ts';
+import type { TimeProvider } from '../types';
 import type {
   ConnectionAuthorizationRequest,
   ConnectionAuthorizationResult,
@@ -23,8 +24,8 @@ import type {
   ConnectionView,
 } from './types';
 
-function nowIso(clock: () => Date): string {
-  return clock().toISOString();
+function nowIso(clock: TimeProvider): string {
+  return clock.iso();
 }
 
 function dedupeScopes(scopes: ConnectionScope[] | undefined, fallback: ConnectionScope[] = []): ConnectionScope[] {
@@ -67,23 +68,23 @@ function summaryView(record: ConnectionRecord, secrets?: ConnectionSecretMateria
   return view;
 }
 
-function isNearExpiry(record: ConnectionRecord, thresholdMs: number): boolean {
+function isNearExpiry(record: ConnectionRecord, thresholdMs: number, now: number): boolean {
   if (!record.expiresAt) {
     return false;
   }
-  const expiresAt = new Date(record.expiresAt).getTime();
+  const expiresAt = Date.parse(record.expiresAt);
   if (Number.isNaN(expiresAt)) {
     return false;
   }
-  return expiresAt - Date.now() <= thresholdMs;
+  return expiresAt - now <= thresholdMs;
 }
 
-function isExpired(record: ConnectionRecord): boolean {
+function isExpired(record: ConnectionRecord, now: number): boolean {
   if (!record.expiresAt) {
     return false;
   }
-  const expiresAt = new Date(record.expiresAt).getTime();
-  return !Number.isNaN(expiresAt) && expiresAt <= Date.now();
+  const expiresAt = Date.parse(record.expiresAt);
+  return !Number.isNaN(expiresAt) && expiresAt <= now;
 }
 
 export class ConnectionLifecycleError extends Error {
@@ -100,7 +101,7 @@ export class ConnectionManager {
   private readonly crypto: ConnectionCryptoService;
   private readonly permissions: PermissionRegistry;
   private readonly providers = new Map<string, ConnectionProviderAdapter>();
-  private readonly clock: () => Date;
+  private readonly clock: TimeProvider;
   private readonly autoRefreshWindowMs: number;
   private readonly defaultEncryptionKey?: string;
   private readonly keyResolver?: ConnectionManagerOptions['keyResolver'];
@@ -109,7 +110,7 @@ export class ConnectionManager {
     this.storage = options.storage ?? new SQLiteConnectionStore();
     this.crypto = new ConnectionCryptoService({ defaultKey: options.encryptionKey });
     this.permissions = new PermissionRegistry();
-    this.clock = options.clock ?? (() => new Date());
+    this.clock = options.clock;
     this.autoRefreshWindowMs = options.autoRefreshWindowMs ?? 5 * 60 * 1000;
     this.defaultEncryptionKey = options.encryptionKey;
     this.keyResolver = options.keyResolver;
@@ -178,7 +179,8 @@ export class ConnectionManager {
     if (!record) {
       return null;
     }
-    if (options.autoRefresh && (isNearExpiry(record, options.refreshWindowMs ?? this.autoRefreshWindowMs) || isExpired(record))) {
+    const now = this.clock.now();
+    if (options.autoRefresh && (isNearExpiry(record, options.refreshWindowMs ?? this.autoRefreshWindowMs, now) || isExpired(record, now))) {
       return await this.refreshConnection(selector, { refreshWindowMs: options.refreshWindowMs });
     }
     return summaryView(record, options.includeSecrets ? await this.decryptSecrets(record) : undefined);
@@ -191,7 +193,8 @@ export class ConnectionManager {
     }
 
     const refreshWindowMs = options.refreshWindowMs ?? this.autoRefreshWindowMs;
-    const shouldRefresh = options.force || isNearExpiry(record, refreshWindowMs) || isExpired(record) || record.status === 'pending_refresh';
+    const now = this.clock.now();
+    const shouldRefresh = options.force || isNearExpiry(record, refreshWindowMs, now) || isExpired(record, now) || record.status === 'pending_refresh';
     const currentSecrets = await this.decryptSecrets(record, options.encryptionKey);
     if (!shouldRefresh) {
       return { connection: summaryView(record, currentSecrets), refreshed: false };
@@ -403,11 +406,11 @@ export class ConnectionManager {
     if (!expiresAt) {
       return 'active';
     }
-    const expiry = new Date(expiresAt).getTime();
+    const expiry = Date.parse(expiresAt);
     if (Number.isNaN(expiry)) {
       return 'active';
     }
-    return expiry <= Date.now() ? 'expired' : 'active';
+    return expiry <= this.clock.now() ? 'expired' : 'active';
   }
 
   private matchesQuery(record: ConnectionRecord, query: ConnectionQuery, statuses: ConnectionStatus[]): boolean {

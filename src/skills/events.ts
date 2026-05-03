@@ -1,5 +1,6 @@
 import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
 import { EventBus, type EventQuery, type EventRecord, type EventSource, type QueueJobInput, type QueueJobRecord, type QueueJobStatus, type QueueQuery } from '../events/index.ts';
+import { runtimeServices } from '../runtime/services.ts';
 import type { SkillAdapter } from './types';
 
 export type EventSkillMode = 'history' | 'queue' | 'replay' | 'enqueue' | 'claim' | 'complete' | 'fail';
@@ -20,7 +21,7 @@ function queueQueryFromArgs(args: Record<string, unknown>): QueueQuery { const s
 export class EventSkill implements SkillAdapter {
   descriptor: SkillDescriptor = { name: 'events', domain: 'durability-and-observability', capabilities: ['query_event_history', 'replay_events', 'enqueue_queue_jobs', 'claim_queue_jobs', 'complete_queue_jobs', 'fail_queue_jobs'], version: '1.0.0' };
   private readonly eventBus: EventBus;
-  constructor(options: EventSkillOptions = {}) { this.eventBus = options.eventBus ?? new EventBus(); }
+  constructor(options: EventSkillOptions = {}) { this.eventBus = options.eventBus ?? new EventBus({ clock: runtimeServices.clock }); }
   canHandle(step: PlanStep): boolean { return step.skill === 'events' || step.kind.startsWith('events.'); }
 
   async execute(ctx: ExecutionContext): Promise<SkillResult> {

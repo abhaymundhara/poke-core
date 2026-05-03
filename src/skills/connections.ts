@@ -1,5 +1,6 @@
 import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
 import { ConnectionManager, PermissionRegistry, type ConnectionAuthorizationRequest, type ConnectionQuery, type ConnectionRotationInput, type ConnectionScope, type ConnectionView } from '../connections/index.ts';
+import { runtimeServices } from '../runtime/services.ts';
 import type { SkillAdapter } from './types';
 
 export type ConnectionSkillMode = 'list' | 'request' | 'rotate';
@@ -69,7 +70,7 @@ export class ConnectionSkill implements SkillAdapter {
   private readonly permissions: PermissionRegistry;
 
   constructor(options: ConnectionSkillOptions = {}) {
-    this.manager = options.manager ?? new ConnectionManager();
+    this.manager = options.manager ?? new ConnectionManager({ clock: runtimeServices.clock });
     this.permissions = options.permissions ?? this.manager.permissionRegistry;
   }
 

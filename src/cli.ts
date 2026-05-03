@@ -4,6 +4,7 @@ import { dirname, resolve } from 'node:path';
 import { PokeCoreStore } from './store';
 import { PokeCoreOrchestrator } from './orchestrator';
 import { EventBus } from './events';
+import { runtimeServices } from './runtime/services.ts';
 import { AutopilotSkill, BrowserSkill, ComputerUseSkill, EventSkill, GroundingSkill, HarnessSkill, IntegrationSkill, SignalObservationSkill, UserModelingSkill } from './skills';
 import { buildPlan } from './planner';
 import { formatRetrievalBenchmark } from './rag';
@@ -19,9 +20,10 @@ function ensureDbPath(path: string) { const dir = dirname(resolve(path)); if (!e
 const args = parse(process.argv.slice(2));
 const [cmd] = args._;
 const db = ensureDbPath(str(args, 'db', './poke-core.sqlite'));
-const store = new PokeCoreStore(db);
+const clock = runtimeServices.clock;
+const store = new PokeCoreStore(db, clock);
 store.init();
-const eventBus = new EventBus();
+const eventBus = new EventBus({ clock });
 const orchestrator = new PokeCoreOrchestrator(store, [new BrowserSkill(), new IntegrationSkill(), new AutopilotSkill(), new UserModelingSkill(), new GroundingSkill(), new SignalObservationSkill(), new ComputerUseSkill(), new HarnessSkill(), new EventSkill({ eventBus })], eventBus);
 
 try {
@@ -30,10 +32,10 @@ try {
   } else if (cmd === 'init') {
     console.log(JSON.stringify({ ok: true, db }, null, 2));
   } else if (cmd === 'plan') {
-    const plan = buildPlan({ id: str(args, 'task', `task-${Date.now()}`), objective: str(args, 'objective'), context: typeof args.context === 'string' ? JSON.parse(args.context) : undefined });
+    const plan = await buildPlan({ id: str(args, 'task', `task-${clock.now()}`), objective: str(args, 'objective'), context: typeof args.context === 'string' ? JSON.parse(args.context) : undefined }, clock);
     console.log(JSON.stringify(plan, null, 2));
   } else if (cmd === 'run') {
-    const result = await orchestrator.execute({ id: str(args, 'task', `task-${Date.now()}`), objective: str(args, 'objective'), context: typeof args.context === 'string' ? JSON.parse(args.context) : undefined });
+    const result = await orchestrator.execute({ id: str(args, 'task', `task-${clock.now()}`), objective: str(args, 'objective'), context: typeof args.context === 'string' ? JSON.parse(args.context) : undefined });
     console.log(JSON.stringify(result, null, 2));
   } else if (cmd === 'tasks') {
     const task = store.getTask(str(args, 'task'));

@@ -2,6 +2,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { Database } from 'bun:sqlite';
+import type { TimeProvider } from '../types';
 
 export type EventSource = 'orchestrator' | 'bridge' | 'queue' | 'skill' | 'system';
 export type EventCursor = number;
@@ -104,7 +105,7 @@ export type QueueQuery = { queueName?: string; topic?: string; status?: QueueJob
 export type QueueStats = { queued: number; running: number; retrying: number; completed: number; dead: number; cancelled: number };
 export type QueueProcessResult = { claimed?: QueueJobRecord; completed?: boolean; output?: unknown; error?: string };
 
-export type EventBusOptions = { storagePath?: string; clock?: () => Date; workerId?: string; defaultQueue?: string };
+export type EventBusOptions = { storagePath?: string; clock: TimeProvider; workerId?: string; defaultQueue?: string };
 
 type Subscription = {
   id: string;
@@ -112,7 +113,7 @@ type Subscription = {
   handler: (event: EventRecord, context: EventDispatchContext) => void | Promise<void>;
 };
 
-function nowIso(now: number): string { return new Date(now).toISOString(); }
+function nowIso(clock: TimeProvider): string { return clock.iso(); }
 function asRecord(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function text(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
@@ -145,7 +146,7 @@ function parseEventRow(row: any): EventRecord {
     cursor: Number(row.sequence), eventId: String(row.event_id), topic: String(row.topic), source: String(row.source) as EventSource,
     aggregateType: row.aggregate_type ?? undefined, aggregateId: row.aggregate_id ?? undefined, correlationId: row.correlation_id ?? undefined,
     causationId: row.causation_id ?? undefined, payload: parseJson(row.payload_json), metadata: parseJson(row.metadata_json),
-    createdAt: Number(row.created_at), createdAtIso: nowIso(Number(row.created_at)),
+    createdAt: Number(row.created_at), createdAtIso: String(row.created_at_iso ?? ''),
   };
 }
 function parseJobRow(row: any): QueueJobRecord {
@@ -197,7 +198,7 @@ function normalizeQueueName(name: unknown, fallback: string): string { return te
 export class EventBus {
   private readonly db: Database;
   private readonly subscriptions = new Map<string, Subscription>();
-  private readonly clock: () => Date;
+  private readonly clock: TimeProvider;
   private readonly workerId: string;
   private readonly defaultQueue: string;
 
@@ -205,12 +206,12 @@ export class EventBus {
     const storagePath = resolve(options.storagePath ?? process.env.POKE_CORE_EVENTS_DB ?? resolve(process.cwd(), '.poke-core', 'events.sqlite'));
     mkdirSync(dirname(storagePath), { recursive: true });
     this.db = new Database(storagePath, { create: true });
-    this.clock = options.clock ?? (() => new Date());
+    this.clock = options.clock;
     this.workerId = options.workerId ?? 'event-bus';
     this.defaultQueue = options.defaultQueue ?? 'default';
     this.db.exec(
       'PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL; PRAGMA foreign_keys = ON; PRAGMA temp_store = MEMORY;' +
-      "CREATE TABLE IF NOT EXISTS event_log (sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, topic TEXT NOT NULL, source TEXT NOT NULL, aggregate_type TEXT, aggregate_id TEXT, correlation_id TEXT, causation_id TEXT, payload_json TEXT NOT NULL DEFAULT '{}', metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);" +
+      "CREATE TABLE IF NOT EXISTS event_log (sequence INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, topic TEXT NOT NULL, source TEXT NOT NULL, aggregate_type TEXT, aggregate_id TEXT, correlation_id TEXT, causation_id TEXT, payload_json TEXT NOT NULL DEFAULT '{}', metadata_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL, created_at_iso TEXT NOT NULL);" +
       'CREATE INDEX IF NOT EXISTS idx_event_log_topic_sequence ON event_log(topic, sequence);' +
       'CREATE INDEX IF NOT EXISTS idx_event_log_source_sequence ON event_log(source, sequence);' +
       'CREATE INDEX IF NOT EXISTS idx_event_log_aggregate_sequence ON event_log(aggregate_type, aggregate_id, sequence);' +
@@ -229,16 +230,17 @@ export class EventBus {
   }
 
   async publish(input: EventPublishInput): Promise<EventPublishResult> {
-    const now = input.createdAt ?? this.clock().getTime();
+    const now = input.createdAt ?? this.clock.now();
+    const createdAtIso = nowIso(this.clock);
     const event: EventRecord = {
       cursor: 0, eventId: randomUUID(), topic: text(input.topic), source: input.source ?? 'system', aggregateType: text(input.aggregateType) || undefined,
       aggregateId: text(input.aggregateId) || undefined, correlationId: text(input.correlationId) || undefined, causationId: text(input.causationId) || undefined,
-      payload: clone(asRecord(input.payload ?? {})), metadata: clone(asRecord(input.metadata ?? {})), createdAt: now, createdAtIso: nowIso(now),
+      payload: clone(asRecord(input.payload ?? {})), metadata: clone(asRecord(input.metadata ?? {})), createdAt: now, createdAtIso,
     };
     if (!event.topic) throw new Error('event topic is required');
     this.db.exec('BEGIN IMMEDIATE TRANSACTION');
     try {
-      this.db.prepare('INSERT INTO event_log (event_id, topic, source, aggregate_type, aggregate_id, correlation_id, causation_id, payload_json, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(event.eventId, event.topic, event.source, event.aggregateType ?? null, event.aggregateId ?? null, event.correlationId ?? null, event.causationId ?? null, JSON.stringify(event.payload), JSON.stringify(event.metadata), event.createdAt);
+      this.db.prepare('INSERT INTO event_log (event_id, topic, source, aggregate_type, aggregate_id, correlation_id, causation_id, payload_json, metadata_json, created_at, created_at_iso) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(event.eventId, event.topic, event.source, event.aggregateType ?? null, event.aggregateId ?? null, event.correlationId ?? null, event.causationId ?? null, JSON.stringify(event.payload), JSON.stringify(event.metadata), event.createdAt, event.createdAtIso);
       const row = this.db.prepare('SELECT last_insert_rowid() AS cursor').get() as { cursor?: number } | undefined;
       event.cursor = Number(row?.cursor ?? 0);
       this.db.exec('COMMIT');
@@ -276,7 +278,7 @@ export class EventBus {
   }
 
   async enqueueJob(input: QueueJobInput): Promise<QueueJobRecord> {
-    const now = this.clock().getTime();
+    const now = this.clock.now();
     const job: QueueJobRecord = {
       jobId: randomUUID(), queueName: normalizeQueueName(input.queueName, this.defaultQueue), topic: text(input.topic), status: 'queued',
       payload: clone(asRecord(input.payload ?? {})), metadata: clone(asRecord(input.metadata ?? {})), priority: Number.isFinite(input.priority ?? 0) ? Number(input.priority ?? 0) : 0,
@@ -304,7 +306,7 @@ export class EventBus {
   }
 
   async claimNextJob(options: { queueName?: string; workerId?: string } = {}): Promise<QueueClaim | null> {
-    const now = this.clock().getTime();
+    const now = this.clock.now();
     const queueName = normalizeQueueName(options.queueName, this.defaultQueue);
     const workerId = options.workerId ?? this.workerId;
     this.db.exec('BEGIN IMMEDIATE TRANSACTION');
@@ -327,7 +329,7 @@ export class EventBus {
   async completeJob(jobId: string, result?: unknown, workerId: string = this.workerId): Promise<QueueJobRecord | null> {
     const job = await this.getJob(jobId);
     if (!job) return null;
-    const now = this.clock().getTime();
+    const now = this.clock.now();
     const resultJson = result === undefined ? null : JSON.stringify(result);
     this.db.prepare('UPDATE queue_jobs SET status = ?, locked_at = NULL, locked_by = ?, completed_at = ?, last_result_json = ?, updated_at = ? WHERE job_id = ?').run('completed', workerId, now, resultJson, now, jobId);
     const updated = await this.getJob(jobId);
@@ -338,7 +340,7 @@ export class EventBus {
   async failJob(jobId: string, error: unknown, options: { retryable?: boolean; workerId?: string } = {}): Promise<QueueJobRecord | null> {
     const job = await this.getJob(jobId);
     if (!job) return null;
-    const now = this.clock().getTime();
+    const now = this.clock.now();
     const retryable = options.retryable !== false && job.attempts < job.maxAttempts;
     const status: QueueJobStatus = retryable ? 'retrying' : 'dead';
     const errorJson = JSON.stringify(error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : typeof error === 'string' ? { message: error } : { message: String(error) });

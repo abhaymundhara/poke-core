@@ -1,3 +1,5 @@
+import type { TimeProvider } from '../types';
+
 export type PermissionScope = 'read' | 'write' | 'admin';
 export type ConnectionCredentialKind = 'oauth' | 'api_key' | 'service_account' | 'session';
 export type ConnectionStatus = 'active' | 'pending_refresh' | 'expired' | 'revoked' | 'error';
@@ -199,6 +201,6 @@ export type ConnectionManagerOptions = {
   permissions?: PermissionRule[];
   encryptionKey?: string;
   keyResolver?: (params: { provider: string; accountId: string; encryptionKey?: string }) => string | Promise<string>;
-  clock?: () => Date;
+  clock: TimeProvider;
   autoRefreshWindowMs?: number;
 };
