@@ -1,14 +1,17 @@
 import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
+import type { ConnectionSelector, ConnectionView, PermissionScope } from '../connections/types.ts';
+import { ConnectionLifecycleError } from '../connections/manager.ts';
+import { getRuntimeServices, integrationPermissionScope } from '../runtime/services.ts';
 import type { SkillAdapter } from './types';
 
 type IntegrationMode = 'read' | 'write' | 'dry-run' | 'compensate';
 
-type IntegrationActionContext = {
+type IntegrationActionContext = ExecutionContext & {
   provider: string;
   action: string;
   mode: IntegrationMode;
   payload: Record<string, unknown>;
-  ctx: ExecutionContext;
+  connection: ConnectionView;
 };
 
 type IntegrationOutput = {
@@ -169,42 +172,90 @@ function findFirstString(root: unknown, keys: string[]): string | undefined {
   return undefined;
 }
 
-function resolveAuthValue(ctx: ExecutionContext, provider: string, keys: string[], fallbackEnv: string[]): string | undefined {
-  const roots: unknown[] = [
-    (ctx as unknown as Record<string, unknown>).step,
-    (ctx as unknown as Record<string, unknown>).state,
-    (ctx as unknown as Record<string, unknown>).plan,
-    (ctx as unknown as Record<string, unknown>).task,
-    (ctx.step.args ?? {}),
-    (ctx.step.args?.payload ?? {}),
-  ];
+function resolveAuthValue(connection: ConnectionView, keys: string[]): string | undefined {
+  return findFirstString(connection.secrets ?? {}, keys);
+}
 
-  for (const root of roots) {
-    const found = findFirstString(root, keys);
-    if (found) return found;
+function integrationConnectionSelector(provider: string, ctx: ExecutionContext): ConnectionSelector {
+  const args = asRecord(ctx.step.args);
+  const payload = providerPayload(ctx);
+
+  const readSelector = (source: unknown): { connectionId?: string; accountId?: string; label?: string } | undefined => {
+    if (!isRecord(source)) return undefined;
+    const connectionId = readString(source, ['connectionId', 'connection_id', 'id']);
+    const accountId = readString(source, ['accountId', 'account_id', 'account']);
+    const label = readString(source, ['label', 'name']);
+    if (!connectionId && !accountId && !label) return undefined;
+    const selector: { connectionId?: string; accountId?: string; label?: string } = {};
+    if (connectionId) selector.connectionId = connectionId;
+    if (accountId) selector.accountId = accountId;
+    if (label) selector.label = label;
+    return selector;
+  };
+
+  return {
+    provider,
+    ...(readSelector(args.connection) ?? {}),
+    ...(readSelector(args.credentials) ?? {}),
+    ...(readSelector(args.auth) ?? {}),
+    ...(readSelector(args.connectionSelector) ?? {}),
+    ...(readSelector(payload.connection) ?? {}),
+    ...(readSelector(payload.credentials) ?? {}),
+    ...(readSelector(payload.auth) ?? {}),
+    ...(readSelector(payload.connectionSelector) ?? {}),
+  };
+}
+
+function integrationConnection(ctx: ExecutionContext): ConnectionView {
+  const connection = (ctx as IntegrationActionContext).connection;
+  if (!connection) {
+    throw new IntegrationError('auth_missing', 'integration connection is required', false);
   }
+  return connection;
+}
 
-  for (const envName of fallbackEnv) {
-    const value = process.env[envName];
-    if (value && value.trim()) return value.trim();
+async function resolveIntegrationConnection(provider: string, ctx: ExecutionContext): Promise<ConnectionView> {
+  const { connectionManager } = getRuntimeServices();
+  const selector = integrationConnectionSelector(provider, ctx);
+
+  try {
+    const connection = await connectionManager.getConnection(selector, { includeSecrets: true, autoRefresh: true });
+    if (!connection) {
+      throw new IntegrationError('auth_missing', provider + ' connection is required', false, undefined, { provider, selector });
+    }
+    if (!connection.secrets) {
+      throw new IntegrationError('auth_missing', provider + ' connection does not expose secrets', false, undefined, { provider, connectionId: connection.connectionId });
+    }
+    return connection;
+  } catch (error) {
+    if (error instanceof ConnectionLifecycleError) {
+      throw new IntegrationError('auth_missing', error.message, false, undefined, { provider, selector, code: error.code });
+    }
+    throw error;
   }
+}
 
-  const providerRoots = [
-    (ctx.step.args?.payload as Record<string, unknown> | undefined)?.auth,
-    (ctx.step.args?.payload as Record<string, unknown> | undefined)?.secrets,
-    (ctx.step.args?.payload as Record<string, unknown> | undefined)?.credentials,
-    (ctx.step.args?.payload as Record<string, unknown> | undefined)?.context,
-    (ctx.state as unknown as Record<string, unknown>),
-  ];
-
-  for (const root of providerRoots) {
-    if (!isRecord(root)) continue;
-    const bucket = root[provider];
-    const found = findFirstString(bucket, keys);
-    if (found) return found;
+async function emitIntegrationTelemetry(topic: string, payload: Record<string, unknown>): Promise<void> {
+  try {
+    await getRuntimeServices().eventBus.publish({ topic, source: 'skill', payload });
+  } catch {
+    // telemetry must never block execution
   }
+}
 
-  return undefined;
+function ensureIntegrationPermission(provider: string, action: string, connection: ConnectionView): void {
+  const { permissionRegistry } = getRuntimeServices();
+  const decision = permissionRegistry.authorize({ subject: 'integration', action: integrationPermissionScope(action), provider }, connection.scopes);
+  if (!decision.allowed) {
+    throw new IntegrationError('permission_denied', provider + ' connection is missing required scopes: ' + decision.missingScopes.join(', '), false, 403, {
+      provider,
+      action,
+      requiredScopes: decision.requiredScopes,
+      grantedScopes: decision.grantedScopes,
+      missingScopes: decision.missingScopes,
+      connectionId: connection.connectionId,
+    });
+  }
 }
 
 function providerPayload(ctx: ExecutionContext): Record<string, unknown> {
@@ -269,14 +320,14 @@ function success(provider: string, action: string, mode: IntegrationMode, artifa
   return { ok: true, output, retryable: false, note, trace };
 }
 
-function failure(provider: string, action: string, error: unknown): SkillResult {
+function failure(provider: string, action: string, mode: IntegrationMode, error: unknown): SkillResult {
   if (error instanceof IntegrationError) {
     return {
       ok: false,
       output: {
         provider,
         action,
-        mode: 'write',
+        mode,
         artifact: {
           code: error.code,
           message: error.message,
@@ -297,7 +348,7 @@ function failure(provider: string, action: string, error: unknown): SkillResult 
     output: {
       provider,
       action,
-      mode: 'write',
+      mode,
       artifact: { message },
       nextAction: 'retry',
     },
@@ -308,23 +359,23 @@ function failure(provider: string, action: string, error: unknown): SkillResult 
 }
 
 function githubToken(ctx: ExecutionContext): string | undefined {
-  return resolveAuthValue(ctx, 'github', ['token', 'accessToken', 'apiToken', 'githubToken', 'github_access_token'], ['GITHUB_TOKEN', 'GITHUB_API_TOKEN', 'GH_TOKEN']);
+  return resolveAuthValue(integrationConnection(ctx), ['token', 'accessToken', 'apiToken', 'githubToken', 'github_access_token']);
 }
 
 function todoistToken(ctx: ExecutionContext): string | undefined {
-  return resolveAuthValue(ctx, 'todoist', ['token', 'accessToken', 'apiToken', 'todoistToken'], ['TODOIST_API_TOKEN', 'TODOIST_TOKEN']);
+  return resolveAuthValue(integrationConnection(ctx), ['token', 'accessToken', 'apiToken', 'todoistToken']);
 }
 
 function linearToken(ctx: ExecutionContext): string | undefined {
-  return resolveAuthValue(ctx, 'linear', ['token', 'accessToken', 'apiToken', 'linearToken', 'linearApiKey'], ['LINEAR_API_KEY', 'LINEAR_TOKEN']);
+  return resolveAuthValue(integrationConnection(ctx), ['token', 'accessToken', 'apiToken', 'linearToken', 'linearApiKey']);
 }
 
 function notionToken(ctx: ExecutionContext): string | undefined {
-  return resolveAuthValue(ctx, 'notion', ['token', 'accessToken', 'apiToken', 'notionToken'], ['NOTION_TOKEN', 'NOTION_API_KEY']);
+  return resolveAuthValue(integrationConnection(ctx), ['token', 'accessToken', 'apiToken', 'notionToken']);
 }
 
 function vercelToken(ctx: ExecutionContext): string | undefined {
-  return resolveAuthValue(ctx, 'vercel', ['token', 'accessToken', 'apiToken', 'vercelToken'], ['VERCEL_TOKEN', 'VERCEL_API_TOKEN']);
+  return resolveAuthValue(integrationConnection(ctx), ['token', 'accessToken', 'apiToken', 'vercelToken']);
 }
 
 class GithubIntegrationAdapter {
@@ -1252,7 +1303,50 @@ export class IntegrationSkill implements SkillAdapter {
     if (!adapter.actions.includes(action)) {
       throw new IntegrationError('unsupported_action', 'unsupported action ' + action + ' for provider ' + provider, false);
     }
-    return await adapter.execute({ provider, action, mode, payload, ctx });
+
+    await emitIntegrationTelemetry('skill.integration.started', {
+      provider,
+      action,
+      mode,
+      taskId: ctx.taskId,
+      stepId: ctx.step.id,
+    });
+
+    try {
+      const connection = await resolveIntegrationConnection(provider, ctx);
+      ensureIntegrationPermission(provider, action, connection);
+      const actionContext: IntegrationActionContext = {
+        ...ctx,
+        provider,
+        action,
+        mode,
+        payload,
+        connection,
+      };
+      const result = await adapter.execute(actionContext);
+      await emitIntegrationTelemetry('skill.integration.completed', {
+        provider,
+        action,
+        mode,
+        taskId: ctx.taskId,
+        stepId: ctx.step.id,
+        connectionId: connection.connectionId,
+        ok: result.ok,
+        note: result.note ?? null,
+      });
+      return result;
+    } catch (error) {
+      const failed = failure(provider, action, mode, error);
+      await emitIntegrationTelemetry('skill.integration.failed', {
+        provider,
+        action,
+        mode,
+        taskId: ctx.taskId,
+        stepId: ctx.step.id,
+        error: error instanceof Error ? { name: error.name, message: error.message } : String(error),
+      });
+      return failed;
+    }
   }
 
   async compensate(ctx: ExecutionContext): Promise<SkillResult> {

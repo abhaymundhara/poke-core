@@ -6,6 +6,7 @@ export * from './planner.ts';
 export * from './store.ts';
 export * from './skill-playbooks.ts';
 export * from './events';
+export * from './runtime/services.ts';
 export * from './orchestrator.ts';
 export * from './connections/index.ts';
 export * from './skills/index.ts';

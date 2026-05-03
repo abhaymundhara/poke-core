@@ -8,6 +8,7 @@ import { RagCorpus } from './rag/retriever';
 import { listSkillPlaybooks } from './skill-playbooks';
 import type { ExecutionProfile, ExecutionContext, PlanStep, RuntimeState, SkillResult, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
 import { EventBus } from './events/index.ts';
+import { getRuntimeServices } from './runtime/services.ts';
 import type { PokeCoreStore } from './store';
 import type { SkillAdapter } from './skills/types';
 
@@ -201,14 +202,14 @@ function dependencyCheck(step: PlanStep, state: RuntimeState): string[] {
 
 export class PokeCoreOrchestrator {
   private readonly skills: SkillAdapter[];
-  private readonly eventBus?: EventBus;
+  private readonly eventBus: EventBus;
   private rag = new RagCorpus();
   private working = new WorkingMemory();
   private episodic = new EpisodicMemory();
 
   constructor(private readonly _store: PokeCoreStore, skills: SkillAdapter[], eventBus?: EventBus) {
     this.skills = skills.slice();
-    this.eventBus = eventBus;
+    this.eventBus = eventBus ?? getRuntimeServices().eventBus;
   }
 
   get skillCatalog() {
@@ -242,9 +243,6 @@ export class PokeCoreOrchestrator {
   }
 
   private async emitEvent(topic: string, payload: Record<string, unknown>): Promise<void> {
-    if (!this.eventBus) {
-      return;
-    }
     await this.eventBus.publish({ topic, source: 'orchestrator', payload });
   }
 
