@@ -1,5 +1,5 @@
 import type { ExecutionContext, PlanStep, SkillDescriptor, SkillResult } from '../types';
-import type { ConnectionSelector, ConnectionView, PermissionScope } from '../connections/types.ts';
+import type { ConnectionSelector, ConnectionView } from '../connections/types.ts';
 import { ConnectionLifecycleError } from '../connections/manager.ts';
 import { getRuntimeServices, integrationPermissionScope } from '../runtime/services.ts';
 import type { SkillAdapter } from './types';
