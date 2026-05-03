@@ -511,7 +511,7 @@ class GithubIntegrationAdapter {
 
 class TodoistIntegrationAdapter {
   provider = 'todoist';
-  actions = ['list_tasks', 'create_task', 'complete_task', 'add_task'];
+  actions = ['list_tasks', 'create_task', 'update_task', 'complete_task', 'delete_task', 'add_comment', 'add_task'];
 
   private async todoistFetch<T>(ctx: ExecutionContext, method: string, path: string, body?: unknown): Promise<{ status: number; headers: Headers; data: T }> {
     const token = todoistToken(ctx);
@@ -530,6 +530,33 @@ class TodoistIntegrationAdapter {
       { attempts: 3, retryableStatuses: [429, 500, 502, 503, 504] },
     );
     return { status: response.status, headers: response.headers, data: response.data };
+  }
+
+  private buildTaskBody(payload: Record<string, unknown>): Record<string, unknown> {
+    const body: Record<string, unknown> = {};
+    const content = readString(payload, ['content', 'title', 'text']);
+    if (content) body.content = content;
+    const description = readString(payload, ['description']);
+    if (description) body.description = description;
+    const projectId = readString(payload, ['project_id', 'projectId']);
+    if (projectId) body.project_id = projectId;
+    const sectionId = readString(payload, ['section_id', 'sectionId']);
+    if (sectionId) body.section_id = sectionId;
+    const parentId = readString(payload, ['parent_id', 'parentId']);
+    if (parentId) body.parent_id = parentId;
+    const assigneeId = readString(payload, ['assignee_id', 'assigneeId']);
+    if (assigneeId) body.assignee_id = assigneeId;
+    const priority = readNumber(payload, ['priority']);
+    if (priority !== undefined) body.priority = priority;
+    const labels = asStringArray(payload.labels ?? payload.labelIds ?? payload.label_ids);
+    if (labels.length) body.labels = labels;
+    const dueString = readString(payload, ['due_string', 'dueString']);
+    if (dueString) body.due_string = dueString;
+    const dueDate = readString(payload, ['due_date', 'dueDate']);
+    if (dueDate) body.due_date = dueDate;
+    const dueDateTime = readString(payload, ['due_datetime', 'dueDateTime']);
+    if (dueDateTime) body.due_datetime = dueDateTime;
+    return body;
   }
 
   async execute(ctx: IntegrationActionContext): Promise<SkillResult> {
@@ -555,20 +582,9 @@ class TodoistIntegrationAdapter {
       }
 
       if (ctx.action === 'create_task' || ctx.action === 'add_task') {
-        const content = readString(payload, ['content', 'title', 'text']);
-        if (!content) throw new IntegrationError('missing_content', 'content is required', false);
-        const response = await this.todoistFetch<any>(ctx.ctx, 'POST', '/tasks', {
-          content,
-          description: readString(payload, ['description']),
-          project_id: readString(payload, ['project_id', 'projectId']) || undefined,
-          section_id: readString(payload, ['section_id', 'sectionId']) || undefined,
-          parent_id: readString(payload, ['parent_id', 'parentId']) || undefined,
-          priority: readNumber(payload, ['priority']),
-          labels: asStringArray(payload.labels),
-          due_string: readString(payload, ['due_string', 'dueString']) || undefined,
-          due_date: readString(payload, ['due_date', 'dueDate']) || undefined,
-          due_datetime: readString(payload, ['due_datetime', 'dueDateTime']) || undefined,
-        });
+        const body = this.buildTaskBody(payload);
+        if (!body.content) throw new IntegrationError('missing_content', 'content is required', false);
+        const response = await this.todoistFetch<any>(ctx.ctx, 'POST', '/tasks', body);
         return success(this.provider, 'create_task', ctx.mode, {
           id: response.data.id,
           content: response.data.content,
@@ -577,11 +593,61 @@ class TodoistIntegrationAdapter {
         }, [String(response.data.id)], 'done', 'created todoist task');
       }
 
+      if (ctx.action === 'update_task') {
+        const taskId = readString(payload, ['task_id', 'taskId', 'id']);
+        if (!taskId) throw new IntegrationError('missing_task_id', 'task_id is required', false);
+        const body = this.buildTaskBody(payload);
+        delete body.content;
+        if (!Object.keys(body).length) throw new IntegrationError('missing_update_fields', 'at least one task field must be provided', false);
+        const response = await this.todoistFetch<any>(ctx.ctx, 'POST', '/tasks/' + encodeURIComponent(taskId), body);
+        return success(this.provider, 'update_task', ctx.mode, {
+          id: response.data.id,
+          content: response.data.content,
+          description: response.data.description,
+          projectId: response.data.project_id,
+          sectionId: response.data.section_id,
+          parentId: response.data.parent_id,
+          priority: response.data.priority,
+          url: response.data.url,
+          due: response.data.due,
+          labels: response.data.labels ?? [],
+          assigneeId: response.data.assignee_id,
+          updatedAt: response.data.updated_at,
+        }, [String(response.data.id)], 'done', 'updated todoist task');
+      }
+
       if (ctx.action === 'complete_task') {
         const taskId = readString(payload, ['task_id', 'taskId', 'id']);
         if (!taskId) throw new IntegrationError('missing_task_id', 'task_id is required', false);
         await this.todoistFetch<unknown>(ctx.ctx, 'POST', '/tasks/' + encodeURIComponent(taskId) + '/close');
         return success(this.provider, 'complete_task', ctx.mode, { id: taskId, completed: true }, [taskId], 'done', 'completed todoist task');
+      }
+
+      if (ctx.action === 'delete_task') {
+        const taskId = readString(payload, ['task_id', 'taskId', 'id']);
+        if (!taskId) throw new IntegrationError('missing_task_id', 'task_id is required', false);
+        await this.todoistFetch<unknown>(ctx.ctx, 'DELETE', '/tasks/' + encodeURIComponent(taskId));
+        return success(this.provider, 'delete_task', ctx.mode, { id: taskId, deleted: true }, [taskId], 'done', 'deleted todoist task');
+      }
+
+      if (ctx.action === 'add_comment') {
+        const taskId = readString(payload, ['task_id', 'taskId']);
+        const projectId = readString(payload, ['project_id', 'projectId']);
+        const content = readString(payload, ['content', 'body', 'text', 'comment']);
+        if (!content) throw new IntegrationError('missing_content', 'content is required', false);
+        if (!taskId && !projectId) throw new IntegrationError('missing_reference', 'task_id or project_id is required', false);
+        const response = await this.todoistFetch<any>(ctx.ctx, 'POST', '/comments', {
+          ...(taskId ? { task_id: taskId } : {}),
+          ...(projectId ? { project_id: projectId } : {}),
+          content,
+        });
+        return success(this.provider, 'add_comment', ctx.mode, {
+          id: response.data.id,
+          content: response.data.content,
+          taskId: response.data.task_id,
+          projectId: response.data.project_id,
+          postedAt: response.data.posted_at,
+        }, [String(response.data.id)], 'done', 'created todoist comment');
       }
 
       throw new IntegrationError('unsupported_action', 'unsupported todoist action: ' + ctx.action, false);
@@ -593,7 +659,7 @@ class TodoistIntegrationAdapter {
 
 class LinearIntegrationAdapter {
   provider = 'linear';
-  actions = ['list_issues', 'create_issue', 'update_status', 'inspect', 'update_issue'];
+  actions = ['list_issues', 'create_issue', 'update_status', 'inspect', 'update_issue', 'create_comment', 'comment', 'merge_issue'];
 
   private async linearGraphQL<T>(ctx: ExecutionContext, query: string, variables: Record<string, unknown>): Promise<T> {
     const token = linearToken(ctx);
@@ -668,49 +734,124 @@ class LinearIntegrationAdapter {
       assigneeId: readString(payload, ['assignee_id', 'assigneeId']) || undefined,
       projectId: readString(payload, ['project_id', 'projectId']) || undefined,
       parentId: readString(payload, ['parent_id', 'parentId']) || undefined,
-      labelIds: asStringArray(payload.labelIds).length ? asStringArray(payload.labelIds) : undefined,
+      labelIds: asStringArray(payload.labelIds ?? payload.label_ids ?? payload.labels).length ? asStringArray(payload.labelIds ?? payload.label_ids ?? payload.labels) : undefined,
+      cycleId: readString(payload, ['cycle_id', 'cycleId']) || undefined,
+      estimate: readNumber(payload, ['estimate']) ?? undefined,
+      dueDate: readString(payload, ['due_date', 'dueDate']) || undefined,
     };
-    const data = await this.linearGraphQL<{ issueCreate: { success: boolean; issue: any } }>(ctx, 'mutation CreateIssue($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title url } } }', { input });
+    const data = await this.linearGraphQL<{ issueCreate: { success: boolean; issue: any } }>(ctx, 'mutation CreateIssue($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title url state { id name type } team { id key name } assignee { id name email } } } }', { input });
     return success(this.provider, 'create_issue', mode, {
       id: data.issueCreate.issue.id,
       identifier: data.issueCreate.issue.identifier,
       title: data.issueCreate.issue.title,
       url: data.issueCreate.issue.url,
+      state: data.issueCreate.issue.state,
+      team: data.issueCreate.issue.team,
+      assignee: data.issueCreate.issue.assignee,
     }, [String(data.issueCreate.issue.id)], 'done', 'created linear issue');
   }
 
   private async resolveStateId(ctx: ExecutionContext, payload: Record<string, unknown>, teamId: string | undefined): Promise<string | undefined> {
     const stateId = readString(payload, ['state_id', 'stateId']);
     if (stateId) return stateId;
-    const stateName = readString(payload, ['state_name', 'stateName']);
+    const stateName = readString(payload, ['state_name', 'stateName', 'status']);
     if (!stateName || !teamId) return undefined;
     const data = await this.linearGraphQL<{ issueStates: { nodes: Array<{ id: string; name: string }> } }>(ctx, 'query States($teamId: String!) { issueStates(filter: { team: { id: { eq: $teamId } } }) { nodes { id name } } }', { teamId });
     return data.issueStates.nodes.find((state) => state.name.toLowerCase() === stateName.toLowerCase())?.id;
   }
 
-  private async updateStatus(ctx: ExecutionContext, mode: IntegrationMode, payload: Record<string, unknown>): Promise<SkillResult> {
+  private async buildIssueUpdateInput(ctx: ExecutionContext, payload: Record<string, unknown>, teamId: string | undefined): Promise<Record<string, unknown>> {
+    const input: Record<string, unknown> = {};
+    const title = readString(payload, ['title', 'name']);
+    if (title) input.title = title;
+    const description = readString(payload, ['description', 'body']);
+    if (description) input.description = description;
+    const priority = readNumber(payload, ['priority']);
+    if (priority !== undefined) input.priority = priority;
+    const assigneeId = readString(payload, ['assignee_id', 'assigneeId']);
+    if (assigneeId) input.assigneeId = assigneeId;
+    const projectId = readString(payload, ['project_id', 'projectId']);
+    if (projectId) input.projectId = projectId;
+    const parentId = readString(payload, ['parent_id', 'parentId']);
+    if (parentId) input.parentId = parentId;
+    const cycleId = readString(payload, ['cycle_id', 'cycleId']);
+    if (cycleId) input.cycleId = cycleId;
+    const estimate = readNumber(payload, ['estimate']);
+    if (estimate !== undefined) input.estimate = estimate;
+    const dueDate = readString(payload, ['due_date', 'dueDate']);
+    if (dueDate) input.dueDate = dueDate;
+    const labelIds = asStringArray(payload.labelIds ?? payload.label_ids ?? payload.labels);
+    if (labelIds.length) input.labelIds = labelIds;
+    const stateId = await this.resolveStateId(ctx, payload, teamId);
+    if (stateId) input.stateId = stateId;
+    const teamValue = readString(payload, ['team_id', 'teamId']);
+    if (teamValue) input.teamId = teamValue;
+    return input;
+  }
+
+  private async updateIssue(ctx: ExecutionContext, mode: IntegrationMode, payload: Record<string, unknown>): Promise<SkillResult> {
     const issueId = readString(payload, ['issue_id', 'issueId', 'id']);
     const teamId = readString(payload, ['team_id', 'teamId']);
     if (!issueId) throw new IntegrationError('missing_issue_id', 'issueId is required', false);
-    const stateId = await this.resolveStateId(ctx, payload, teamId);
-    if (!stateId) throw new IntegrationError('missing_state', 'stateId or stateName is required', false);
-    const data = await this.linearGraphQL<{ issueUpdate: { success: boolean; issue: any } }>(ctx, 'mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier title url state { id name } } } }', { id: issueId, input: { stateId } });
-    return success(this.provider, 'update_status', mode, {
+    const input = await this.buildIssueUpdateInput(ctx, payload, teamId);
+    if (!Object.keys(input).length) throw new IntegrationError('missing_update_fields', 'at least one issue field must be provided', false);
+    const data = await this.linearGraphQL<{ issueUpdate: { success: boolean; issue: any } }>(ctx, 'mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success issue { id identifier title description url state { id name type } team { id key name } assignee { id name email } createdAt updatedAt } } }', { id: issueId, input });
+    return success(this.provider, 'update_issue', mode, {
       id: data.issueUpdate.issue.id,
       identifier: data.issueUpdate.issue.identifier,
       title: data.issueUpdate.issue.title,
+      description: data.issueUpdate.issue.description,
       url: data.issueUpdate.issue.url,
       state: data.issueUpdate.issue.state,
-    }, [String(data.issueUpdate.issue.id)], 'done', 'updated linear issue status');
+      team: data.issueUpdate.issue.team,
+      assignee: data.issueUpdate.issue.assignee,
+      createdAt: data.issueUpdate.issue.createdAt,
+      updatedAt: data.issueUpdate.issue.updatedAt,
+    }, [String(data.issueUpdate.issue.id)], 'done', 'updated linear issue');
+  }
+
+  private async updateStatus(ctx: ExecutionContext, mode: IntegrationMode, payload: Record<string, unknown>): Promise<SkillResult> {
+    const issueId = readString(payload, ['issue_id', 'issueId', 'id']);
+    if (!issueId) throw new IntegrationError('missing_issue_id', 'issueId is required', false);
+    const stateValue = readString(payload, ['state_id', 'stateId', 'state_name', 'stateName', 'status']);
+    if (!stateValue) throw new IntegrationError('missing_state', 'stateId or stateName is required', false);
+    return await this.updateIssue(ctx, mode, { ...payload, state_name: stateValue });
+  }
+
+  private async createComment(ctx: ExecutionContext, mode: IntegrationMode, payload: Record<string, unknown>): Promise<SkillResult> {
+    const issueId = readString(payload, ['issue_id', 'issueId', 'id']);
+    const body = readString(payload, ['body', 'comment', 'text', 'content']);
+    if (!issueId) throw new IntegrationError('missing_issue_id', 'issueId is required', false);
+    if (!body) throw new IntegrationError('missing_body', 'body is required', false);
+    const data = await this.linearGraphQL<{ commentCreate: { success: boolean; comment: any } }>(ctx, 'mutation CreateComment($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id body url createdAt updatedAt issue { id identifier title } user { id name email } } } }', { input: { issueId, body } });
+    return success(this.provider, 'create_comment', mode, {
+      id: data.commentCreate.comment.id,
+      body: data.commentCreate.comment.body,
+      url: data.commentCreate.comment.url,
+      issue: data.commentCreate.comment.issue,
+      user: data.commentCreate.comment.user,
+      createdAt: data.commentCreate.comment.createdAt,
+      updatedAt: data.commentCreate.comment.updatedAt,
+    }, [String(data.commentCreate.comment.id), issueId], 'done', 'created linear comment');
+  }
+
+  private async mergeIssue(ctx: ExecutionContext, mode: IntegrationMode, payload: Record<string, unknown>): Promise<SkillResult> {
+    const issueId = readString(payload, ['issue_id', 'issueId', 'id']);
+    if (!issueId) throw new IntegrationError('missing_issue_id', 'issueId is required', false);
+    const status = readString(payload, ['state_id', 'stateId', 'state_name', 'stateName', 'status']) || 'Done';
+    return await this.updateIssue(ctx, mode, { ...payload, issue_id: issueId, state_name: status });
   }
 
   async execute(ctx: IntegrationActionContext): Promise<SkillResult> {
     try {
-      const action = ctx.action === 'update_issue' ? 'update_status' : ctx.action;
+      const action = ctx.action === 'comment' ? 'create_comment' : ctx.action;
       if (action === 'inspect') return await this.listIssues(ctx.ctx, ctx.mode, ctx.payload);
       if (action === 'list_issues') return await this.listIssues(ctx.ctx, ctx.mode, ctx.payload);
       if (action === 'create_issue') return await this.createIssue(ctx.ctx, ctx.mode, ctx.payload);
       if (action === 'update_status') return await this.updateStatus(ctx.ctx, ctx.mode, ctx.payload);
+      if (action === 'update_issue') return await this.updateIssue(ctx.ctx, ctx.mode, ctx.payload);
+      if (action === 'create_comment') return await this.createComment(ctx.ctx, ctx.mode, ctx.payload);
+      if (action === 'merge_issue') return await this.mergeIssue(ctx.ctx, ctx.mode, ctx.payload);
       throw new IntegrationError('unsupported_action', 'unsupported linear action: ' + ctx.action, false);
     } catch (error) {
       return failure(this.provider, ctx.action, error);
@@ -720,7 +861,7 @@ class LinearIntegrationAdapter {
 
 class NotionIntegrationAdapter {
   provider = 'notion';
-  actions = ['query_database', 'create_page', 'append_blocks', 'inspect', 'append'];
+  actions = ['query_database', 'create_page', 'append_blocks', 'inspect', 'append', 'update_page', 'update_block', 'add_comment'];
 
   private notionConfig(ctx: ExecutionContext): { token: string; version: string } {
     const token = notionToken(ctx);
@@ -745,6 +886,21 @@ class NotionIntegrationAdapter {
       { attempts: 3, retryableStatuses: [429, 500, 502, 503, 504] },
     );
     return response.data;
+  }
+
+  private buildCommentRichText(payload: Record<string, unknown>): Array<Record<string, unknown>> {
+    const richText = payload.rich_text ?? payload.richText;
+    if (Array.isArray(richText) && richText.length) return richText as Array<Record<string, unknown>>;
+    const content = readString(payload, ['content', 'body', 'text', 'comment']);
+    if (!content) return [];
+    return [{ type: 'text', text: { content } }];
+  }
+
+  private buildBlockUpdateBody(payload: Record<string, unknown>): Record<string, unknown> {
+    const reserved = new Set(['block_id', 'blockId', 'page_id', 'pageId', 'id', 'children', 'content', 'body', 'text', 'comment']);
+    const direct = asRecord(payload.block ?? payload.data ?? payload.fields ?? payload.update);
+    if (Object.keys(direct).length) return direct;
+    return Object.fromEntries(Object.entries(payload).filter(([key]) => !reserved.has(key)));
   }
 
   async execute(ctx: IntegrationActionContext): Promise<SkillResult> {
@@ -780,6 +936,23 @@ class NotionIntegrationAdapter {
         return success(this.provider, 'create_page', ctx.mode, { id: data.id, url: data.url, properties: data.properties }, [String(data.id)], 'done', 'created notion page');
       }
 
+      if (ctx.action === 'update_page') {
+        const pageId = readString(payload, ['page_id', 'pageId', 'id']);
+        if (!pageId) throw new IntegrationError('missing_page_id', 'page_id is required', false);
+        const properties = asRecord(payload.properties);
+        const pageUpdate: Record<string, unknown> = {};
+        if (Object.keys(properties).length) pageUpdate.properties = properties;
+        const archived = payload.archived;
+        if (typeof archived === 'boolean') pageUpdate.archived = archived;
+        const icon = asRecord(payload.icon);
+        if (Object.keys(icon).length) pageUpdate.icon = icon;
+        const cover = asRecord(payload.cover);
+        if (Object.keys(cover).length) pageUpdate.cover = cover;
+        if (!Object.keys(pageUpdate).length) throw new IntegrationError('missing_update_fields', 'at least one page field must be provided', false);
+        const data = await this.notionFetch<any>(ctx.ctx, 'PATCH', '/pages/' + pageId, pageUpdate);
+        return success(this.provider, 'update_page', ctx.mode, { id: data.id, url: data.url, properties: data.properties, archived: data.archived }, [String(data.id)], 'done', 'updated notion page');
+      }
+
       if (ctx.action === 'append_blocks' || ctx.action === 'append') {
         const blockId = readString(payload, ['block_id', 'blockId', 'page_id', 'pageId']);
         const children = readArray(payload, ['children', 'blocks']);
@@ -787,6 +960,29 @@ class NotionIntegrationAdapter {
         if (!children.length) throw new IntegrationError('missing_children', 'children is required', false);
         const data = await this.notionFetch<any>(ctx.ctx, 'PATCH', '/blocks/' + blockId + '/children', { children });
         return success(this.provider, 'append_blocks', ctx.mode, { blockId, children: data.results ?? [] }, [blockId], 'done', 'appended notion blocks');
+      }
+
+      if (ctx.action === 'update_block') {
+        const blockId = readString(payload, ['block_id', 'blockId', 'id']);
+        if (!blockId) throw new IntegrationError('missing_block_id', 'block_id is required', false);
+        const blockUpdate = this.buildBlockUpdateBody(payload);
+        if (!Object.keys(blockUpdate).length) throw new IntegrationError('missing_update_fields', 'at least one block field must be provided', false);
+        const data = await this.notionFetch<any>(ctx.ctx, 'PATCH', '/blocks/' + blockId, blockUpdate);
+        return success(this.provider, 'update_block', ctx.mode, { id: data.id, archived: data.archived, type: data.type, block: data }, [String(data.id)], 'done', 'updated notion block');
+      }
+
+      if (ctx.action === 'add_comment') {
+        const pageId = readString(payload, ['page_id', 'pageId', 'parent_id', 'parentId', 'block_id', 'blockId']);
+        const discussionId = readString(payload, ['discussion_id', 'discussionId']);
+        const richText = this.buildCommentRichText(payload);
+        if (!pageId && !discussionId) throw new IntegrationError('missing_page_id', 'page_id is required', false);
+        if (!richText.length) throw new IntegrationError('missing_content', 'content is required', false);
+        const commentPayload: Record<string, unknown> = {
+          rich_text: richText,
+          ...(discussionId ? { parent: { discussion_id: discussionId } } : { parent: { page_id: pageId } }),
+        };
+        const data = await this.notionFetch<any>(ctx.ctx, 'POST', '/comments', commentPayload);
+        return success(this.provider, 'add_comment', ctx.mode, { id: data.id, discussionId: data.discussion_id, parent: data.parent, richText: data.rich_text, createdTime: data.created_time }, [String(data.id)], 'done', 'created notion comment');
       }
 
       throw new IntegrationError('unsupported_action', 'unsupported notion action: ' + ctx.action, false);
@@ -798,23 +994,105 @@ class NotionIntegrationAdapter {
 
 class VercelIntegrationAdapter {
   provider = 'vercel';
-  actions = ['list_deployments', 'get_build_logs', 'inspect', 'deploy'];
+  actions = ['list_deployments', 'get_build_logs', 'inspect', 'deploy', 'create_deployment', 'update_deployment', 'add_comment', 'cancel_deployment'];
 
-  private async vercelFetch<T>(ctx: ExecutionContext, path: string): Promise<T> {
+  private async vercelFetch<T>(ctx: ExecutionContext, method: string, path: string, body?: unknown): Promise<{ status: number; headers: Headers; data: T }> {
     const token = vercelToken(ctx);
     if (!token) throw new IntegrationError('auth_missing', 'vercel token is required', false);
     const response = await requestJson<T>(
       'https://api.vercel.com' + path,
       {
-        method: 'GET',
+        method,
         headers: {
           authorization: 'Bearer ' + token,
           accept: 'application/json',
+          ...(body !== undefined ? { 'content-type': 'application/json' } : {}),
         },
+        body: body !== undefined ? JSON.stringify(body) : undefined,
       },
       { attempts: 3, retryableStatuses: [429, 500, 502, 503, 504] },
     );
-    return response.data;
+    return { status: response.status, headers: response.headers, data: response.data };
+  }
+
+  private async vercelFetchFallback<T>(ctx: ExecutionContext, attempts: Array<{ method: string; path: string; body?: unknown }>): Promise<{ status: number; headers: Headers; data: T }> {
+    let lastError: unknown;
+    for (const attempt of attempts) {
+      try {
+        return await this.vercelFetch<T>(ctx, attempt.method, attempt.path, attempt.body);
+      } catch (error) {
+        lastError = error;
+        if (error instanceof IntegrationError && error.status && [404, 405, 409, 422].includes(error.status)) continue;
+        throw error;
+      }
+    }
+    throw lastError instanceof Error ? lastError : new IntegrationError('request_failed', 'vercel request failed', true);
+  }
+
+  private buildDeploymentBody(payload: Record<string, unknown>): Record<string, unknown> {
+    const source = asRecord(payload.deployment ?? payload.data ?? payload.body ?? payload.input ?? payload);
+    const body: Record<string, unknown> = {};
+    const name = readString(source, ['name']);
+    if (name) body.name = name;
+    const project = readString(source, ['project', 'projectId']);
+    if (project) body.project = project;
+    const target = readString(source, ['target']);
+    if (target) body.target = target;
+    const gitSource = asRecord(source.gitSource);
+    if (Object.keys(gitSource).length) body.gitSource = gitSource;
+    const meta = asRecord(source.meta);
+    if (Object.keys(meta).length) body.meta = meta;
+    const files = Array.isArray(source.files) ? source.files : [];
+    if (files.length) body.files = files;
+    const deletedFiles = Array.isArray(source.deletedFiles) ? source.deletedFiles : [];
+    if (deletedFiles.length) body.deletedFiles = deletedFiles;
+    const buildCommand = readString(source, ['buildCommand']);
+    if (buildCommand) body.buildCommand = buildCommand;
+    const ignoreCommand = readString(source, ['ignoreCommand']);
+    if (ignoreCommand) body.ignoreCommand = ignoreCommand;
+    const installCommand = readString(source, ['installCommand']);
+    if (installCommand) body.installCommand = installCommand;
+    const outputDirectory = readString(source, ['outputDirectory']);
+    if (outputDirectory) body.outputDirectory = outputDirectory;
+    const publicValue = source.public;
+    if (typeof publicValue === 'boolean') body.public = publicValue;
+    const skipAutoDetection = source.skipAutoDetection;
+    if (typeof skipAutoDetection === 'boolean') body.skipAutoDetection = skipAutoDetection;
+    const regions = Array.isArray(source.regions) ? source.regions : [];
+    if (regions.length) body.regions = regions;
+    const routeAliases = Array.isArray(source.routeAliases) ? source.routeAliases : [];
+    if (routeAliases.length) body.routeAliases = routeAliases;
+    const cleanUrls = source.cleanUrls;
+    if (typeof cleanUrls === 'boolean') body.cleanUrls = cleanUrls;
+    const trailingSlash = source.trailingSlash;
+    if (typeof trailingSlash === 'boolean') body.trailingSlash = trailingSlash;
+    const framework = readString(source, ['framework']);
+    if (framework) body.framework = framework;
+    const env = Array.isArray(source.env) ? source.env : [];
+    if (env.length) body.env = env;
+    return body;
+  }
+
+  private buildDeploymentCommentBody(payload: Record<string, unknown>): Record<string, unknown> {
+    const content = readString(payload, ['content', 'body', 'text', 'comment']);
+    if (!content) throw new IntegrationError('missing_content', 'content is required', false);
+    return { content };
+  }
+
+  private buildDeploymentUpdateBody(payload: Record<string, unknown>): Record<string, unknown> {
+    const source = asRecord(payload.deployment ?? payload.data ?? payload.body ?? payload.input ?? payload);
+    const body: Record<string, unknown> = {};
+    const name = readString(source, ['name']);
+    if (name) body.name = name;
+    const target = readString(source, ['target']);
+    if (target) body.target = target;
+    const meta = asRecord(source.meta);
+    if (Object.keys(meta).length) body.meta = meta;
+    const project = readString(source, ['project', 'projectId']);
+    if (project) body.project = project;
+    const publicValue = source.public;
+    if (typeof publicValue === 'boolean') body.public = publicValue;
+    return body;
   }
 
   async execute(ctx: IntegrationActionContext): Promise<SkillResult> {
@@ -827,8 +1105,8 @@ class VercelIntegrationAdapter {
         const query = new URLSearchParams({ limit: String(limit) });
         if (teamId) query.set('teamId', teamId);
         if (projectId) query.set('projectId', projectId);
-        const data = await this.vercelFetch<any>('/v13/deployments?' + query.toString());
-        const deployments = Array.isArray(data.deployments) ? data.deployments.map((deployment) => ({
+        const response = await this.vercelFetch<any>(ctx.ctx, 'GET', '/v13/deployments?' + query.toString());
+        const deployments = Array.isArray(response.data.deployments) ? response.data.deployments.map((deployment) => ({
           id: deployment.uid ?? deployment.id,
           name: deployment.name,
           url: deployment.url,
@@ -838,16 +1116,82 @@ class VercelIntegrationAdapter {
           projectId: deployment.projectId,
           meta: deployment.meta,
         })) : [];
-        return success(this.provider, 'list_deployments', ctx.mode, { deployments, pagination: data.pagination ?? null }, deployments.map((deployment) => String(deployment.id)), 'continue', 'listed vercel deployments');
+        return success(this.provider, 'list_deployments', ctx.mode, { deployments, pagination: response.data.pagination ?? null }, deployments.map((deployment) => String(deployment.id)), 'continue', 'listed vercel deployments');
       }
 
       if (ctx.action === 'get_build_logs') {
         const deploymentId = readString(payload, ['deployment_id', 'deploymentId', 'id']);
         if (!deploymentId) throw new IntegrationError('missing_deployment_id', 'deployment_id is required', false);
         const limit = readNumber(payload, ['limit'], 100) ?? 100;
-        const data = await this.vercelFetch<any>('/v2/deployments/' + encodeURIComponent(deploymentId) + '/logs?limit=' + String(limit));
-        const logs = Array.isArray(data.logs) ? data.logs : Array.isArray(data.data) ? data.data : data;
+        const response = await this.vercelFetch<any>(ctx.ctx, 'GET', '/v2/deployments/' + encodeURIComponent(deploymentId) + '/logs?limit=' + String(limit));
+        const logs = Array.isArray(response.data.logs) ? response.data.logs : Array.isArray(response.data.data) ? response.data.data : response.data;
         return success(this.provider, 'get_build_logs', ctx.mode, { deploymentId, logs }, [deploymentId], 'continue', 'retrieved vercel build logs');
+      }
+
+      if (ctx.action === 'create_deployment' || ctx.action === 'deploy') {
+        const body = this.buildDeploymentBody(payload);
+        const response = await this.vercelFetch<any>(ctx.ctx, 'POST', '/v13/deployments', body);
+        const deployment = response.data.deployment ?? response.data;
+        return success(this.provider, 'create_deployment', ctx.mode, {
+          id: deployment.uid ?? deployment.id,
+          url: deployment.url,
+          name: deployment.name,
+          state: deployment.state,
+          createdAt: deployment.createdAt,
+          target: deployment.target,
+          meta: deployment.meta,
+        }, [String(deployment.uid ?? deployment.id ?? '')].filter(Boolean), 'done', 'created vercel deployment');
+      }
+
+      if (ctx.action === 'update_deployment') {
+        const deploymentId = readString(payload, ['deployment_id', 'deploymentId', 'id']);
+        if (!deploymentId) throw new IntegrationError('missing_deployment_id', 'deployment_id is required', false);
+        const body = this.buildDeploymentUpdateBody(payload);
+        if (!Object.keys(body).length) throw new IntegrationError('missing_update_fields', 'at least one deployment field must be provided', false);
+        const response = await this.vercelFetchFallback<any>(ctx.ctx, [
+          { method: 'PATCH', path: '/v13/deployments/' + encodeURIComponent(deploymentId) + '/meta', body: body.meta ? { meta: body.meta } : body },
+          { method: 'PATCH', path: '/v13/deployments/' + encodeURIComponent(deploymentId), body },
+        ]);
+        const deployment = response.data.deployment ?? response.data;
+        return success(this.provider, 'update_deployment', ctx.mode, {
+          id: deployment.uid ?? deployment.id ?? deploymentId,
+          url: deployment.url,
+          name: deployment.name,
+          state: deployment.state,
+          createdAt: deployment.createdAt,
+          target: deployment.target,
+          meta: deployment.meta,
+        }, [String(deployment.uid ?? deployment.id ?? deploymentId)], 'done', 'updated vercel deployment');
+      }
+
+      if (ctx.action === 'add_comment') {
+        const deploymentId = readString(payload, ['deployment_id', 'deploymentId', 'id']);
+        if (!deploymentId) throw new IntegrationError('missing_deployment_id', 'deployment_id is required', false);
+        const body = this.buildDeploymentCommentBody(payload);
+        const response = await this.vercelFetchFallback<any>(ctx.ctx, [
+          { method: 'POST', path: '/v13/deployments/' + encodeURIComponent(deploymentId) + '/comments', body },
+          { method: 'POST', path: '/v12/deployments/' + encodeURIComponent(deploymentId) + '/comments', body },
+          { method: 'POST', path: '/v6/deployments/' + encodeURIComponent(deploymentId) + '/comments', body },
+        ]);
+        return success(this.provider, 'add_comment', ctx.mode, {
+          deploymentId,
+          comment: response.data.comment ?? response.data,
+          id: response.data.comment?.id ?? response.data.id,
+        }, [deploymentId, String(response.data.comment?.id ?? response.data.id ?? '')].filter(Boolean), 'done', 'created vercel deployment comment');
+      }
+
+      if (ctx.action === 'cancel_deployment') {
+        const deploymentId = readString(payload, ['deployment_id', 'deploymentId', 'id']);
+        if (!deploymentId) throw new IntegrationError('missing_deployment_id', 'deployment_id is required', false);
+        const response = await this.vercelFetchFallback<any>(ctx.ctx, [
+          { method: 'POST', path: '/v13/deployments/' + encodeURIComponent(deploymentId) + '/cancel' },
+          { method: 'POST', path: '/v12/deployments/' + encodeURIComponent(deploymentId) + '/cancel' },
+        ]);
+        return success(this.provider, 'cancel_deployment', ctx.mode, {
+          deploymentId,
+          status: response.data.state ?? response.data.status ?? 'canceled',
+          deployment: response.data.deployment ?? response.data,
+        }, [deploymentId], 'done', 'canceled vercel deployment');
       }
 
       throw new IntegrationError('unsupported_action', 'unsupported vercel action: ' + ctx.action, false);
