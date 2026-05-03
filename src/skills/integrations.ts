@@ -1323,6 +1323,9 @@ export class IntegrationSkill implements SkillAdapter {
         payload,
         connection,
       };
+      if (mode === 'compensate') {
+        return await this.compensate(actionContext);
+      }
       const result = await adapter.execute(actionContext);
       await emitIntegrationTelemetry('skill.integration.completed', {
         provider,
@@ -1350,17 +1353,71 @@ export class IntegrationSkill implements SkillAdapter {
   }
 
   async compensate(ctx: ExecutionContext): Promise<SkillResult> {
-    return {
-      ok: true,
-      output: {
-        provider: asString(ctx.step.args.provider) || 'github',
-        action: asString(ctx.step.args.action) || 'inspect',
-        mode: 'compensate',
-        artifact: { compensated: false },
-        nextAction: 'continue',
-      },
-      retryable: false,
-      note: 'no provider compensation hook registered',
-    };
+    const actionContext = ctx as IntegrationActionContext;
+    const provider = asString(actionContext.provider || actionContext.step.args.provider) || 'github';
+    const action = asString(actionContext.action || actionContext.step.args.action) || 'inspect';
+    const payload = providerPayload(actionContext);
+    const rollback = asRecord(payload.rollback ?? payload.previous ?? payload.before ?? payload.snapshot ?? payload.state);
+
+    if (provider === 'github') {
+      const { owner, repo } = parseRepo(payload);
+      const issueNumber = readNumber(payload, ['issue_number', 'issueNumber', 'number']) ?? readNumber(rollback, ['issue_number', 'issueNumber', 'number']);
+      const commentId = readNumber(payload, ['comment_id', 'commentId']) ?? readNumber(rollback, ['comment_id', 'commentId']);
+      const pathName = readString(payload, ['path', 'filePath']) || readString(rollback, ['path', 'filePath']);
+      const branch = readString(payload, ['branch'], 'main') || readString(rollback, ['branch'], 'main') || 'main';
+      const previousContent = readString(rollback, ['content', 'previousContent', 'body', 'text']);
+      const previousSha = readString(rollback, ['sha', 'previousSha', 'blobSha']);
+      if ((action === 'create_issue' || action === 'comment') && (issueNumber || commentId)) {
+        const token = githubToken(actionContext);
+        if (!token) throw new IntegrationError('auth_missing', 'github token is required', false);
+        const method = action === 'comment' ? 'DELETE' : 'PATCH';
+        const path = action === 'comment' ? '/repos/' + owner + '/' + repo + '/issues/comments/' + commentId : '/repos/' + owner + '/' + repo + '/issues/' + issueNumber;
+        await requestJson<unknown>('https://api.github.com' + path, { method, headers: { authorization: 'Bearer ' + token, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(action === 'comment' ? {} : { 'content-type': 'application/json' }) }, body: action === 'comment' ? undefined : JSON.stringify({ state: 'closed' }) }, { attempts: 3, retryableStatuses: [429, 500, 502, 503, 504] });
+        return success(this.provider, action, 'compensate', { rolledBack: true, provider, action, status: 'closed' }, [String(issueNumber ?? ''), String(commentId ?? '')].filter(Boolean), 'done', 'rolled back github state');
+      }
+      if ((action === 'upsert_file' || action === 'delete_file') && pathName && previousContent) {
+        const token = githubToken(actionContext);
+        if (!token) throw new IntegrationError('auth_missing', 'github token is required', false);
+        const response = await requestJson<any>('https://api.github.com/repos/' + owner + '/' + repo + '/contents/' + encodePath(pathName), { method: 'PUT', headers: { authorization: 'Bearer ' + token, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', 'content-type': 'application/json' }, body: JSON.stringify({ message: 'revert file after failed step', branch, content: base64(previousContent), sha: previousSha || undefined }) }, { attempts: 3, retryableStatuses: [429, 500, 502, 503, 504] });
+        return success(this.provider, action, 'compensate', { rolledBack: true, provider, action, path: pathName, commitSha: response.data.commit?.sha, contentSha: response.data.content?.sha }, [String(response.data.commit?.sha ?? ''), String(response.data.content?.sha ?? '')].filter(Boolean), 'done', 'restored github file state');
+      }
+      throw new IntegrationError('missing_rollback_context', 'github compensation requires issue, comment, or file rollback context', false);
+    }
+
+    if (provider === 'todoist') {
+      const todoist = new TodoistIntegrationAdapter();
+      const taskId = readString(payload, ['task_id', 'taskId', 'id']) || readString(rollback, ['task_id', 'taskId', 'id']);
+      if (!taskId) throw new IntegrationError('missing_rollback_context', 'todoist compensation requires a task id', false);
+      if (action === 'create_task' || action === 'add_task' || action === 'delete_task') return await todoist.execute({ ...actionContext, action: 'delete_task', payload: { ...payload, task_id: taskId }, mode: 'compensate' } as IntegrationActionContext);
+      if (action === 'update_task' && Object.keys(rollback).length > 0) return await todoist.execute({ ...actionContext, action: 'update_task', payload: { ...rollback, task_id: taskId }, mode: 'compensate' } as IntegrationActionContext);
+      return success(provider, action, 'compensate', { compensated: false, reason: 'no revert action for todoist state change' }, [taskId], 'continue', 'todoist compensation not applicable');
+    }
+
+    if (provider === 'linear') {
+      const linear = new LinearIntegrationAdapter();
+      const issueId = readString(payload, ['issue_id', 'issueId', 'id']) || readString(rollback, ['issue_id', 'issueId', 'id']);
+      const restoredStateId = readString(rollback, ['state_id', 'stateId', 'previousStateId']);
+      const restoredStateName = readString(rollback, ['state_name', 'stateName', 'previousStateName']);
+      if (!issueId || (!restoredStateId && !restoredStateName)) throw new IntegrationError('missing_rollback_context', 'linear compensation requires an issue id and previous state snapshot', false);
+      return await linear.execute({ ...actionContext, action: 'update_issue', payload: { ...payload, issue_id: issueId, state_id: restoredStateId || undefined, state_name: restoredStateName || undefined }, mode: 'compensate' } as IntegrationActionContext);
+    }
+
+    if (provider === 'notion') {
+      const notion = new NotionIntegrationAdapter();
+      const pageId = readString(payload, ['page_id', 'pageId', 'id']) || readString(rollback, ['page_id', 'pageId', 'id']);
+      const blockId = readString(payload, ['block_id', 'blockId', 'id']) || readString(rollback, ['block_id', 'blockId', 'id']);
+      if ((action === 'create_page' || action === 'update_page') && pageId) return await notion.execute({ ...actionContext, action: 'update_page', payload: { ...payload, page_id: pageId, archived: true }, mode: 'compensate' } as IntegrationActionContext);
+      if ((action === 'append_blocks' || action === 'append' || action === 'update_block') && blockId && Object.keys(rollback).length > 0) return await notion.execute({ ...actionContext, action: 'update_block', payload: { ...rollback, block_id: blockId, archived: true }, mode: 'compensate' } as IntegrationActionContext);
+      throw new IntegrationError('missing_rollback_context', 'notion compensation requires a page or block snapshot', false);
+    }
+
+    if (provider === 'vercel') {
+      const vercel = new VercelIntegrationAdapter();
+      const deploymentId = readString(payload, ['deployment_id', 'deploymentId', 'id']) || readString(rollback, ['deployment_id', 'deploymentId', 'id']);
+      if (!deploymentId) throw new IntegrationError('missing_rollback_context', 'vercel compensation requires a deployment id', false);
+      return await vercel.execute({ ...actionContext, action: 'cancel_deployment', payload: { ...payload, deployment_id: deploymentId, id: deploymentId }, mode: 'compensate' } as IntegrationActionContext);
+    }
+
+    throw new IntegrationError('unsupported_provider', 'unsupported compensation provider: ' + provider, false);
   }
 }
