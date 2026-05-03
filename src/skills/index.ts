@@ -6,4 +6,5 @@ export * from './computer';
 export * from './harness';
 export * from './terminal';
 export * from './identity';
+export * from './channel';
 export { AutopilotSkill, UserModelingSkill, GroundingSkill, SignalObservationSkill, ComputerUseSkill as FlagshipComputerUseSkill } from './flagship';

@@ -1,7 +1,7 @@
 export type SkillPlaybookStatus = 'live' | 'planned';
 
 export type SkillPlaybook = {
-  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use' | 'harness';
+  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use' | 'harness' | 'channel';
   status: SkillPlaybookStatus;
   instructionPath: string;
   summary: string;
@@ -131,6 +131,19 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
     failureModes: ['thin signal set', 'noisy inputs', 'window mismatch'],
     recovery: ['expand the observation window', 'reduce thresholds', 'return the strongest signals only'],
     advancedNotes: ['favor compact signal summaries', 'track changes over time'],
+  },
+  channel: {
+    name: 'channel',
+    status: 'live',
+    instructionPath: 'src/skills/channel.ts',
+    summary: 'multi-channel bridge routing and conversation metadata management',
+    coreCapabilities: ['inbound_routing', 'outbound_dispatch', 'thread_creation', 'metadata_updates', 'middleware'],
+    boundaries: ['no silent provider fallback', 'no invented delivery semantics', 'preserve conversation provenance'],
+    inputSchema: ['mode', 'channel', 'conversationId', 'threadId', 'participants', 'metadata', 'body', 'bubbleColor', 'readStatus'],
+    outputSchema: ['conversation', 'bridgeId', 'threadId', 'dispatch', 'metadata', 'trace'],
+    failureModes: ['missing bridge', 'ambiguous thread mapping', 'rate limiting', 'unsupported channel capability'],
+    recovery: ['resolve the conversation key first', 'retry through the registered bridge', 'defer unsupported metadata to the platform layer'],
+    advancedNotes: ['keep bridge routing idempotent', 'treat middleware as a first-class policy layer', 'prefer explicit channel selection when available'],
   },
   'computer-use': {
     name: 'computer-use',
