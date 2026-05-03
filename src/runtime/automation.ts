@@ -38,7 +38,7 @@ function unwrapToolResult(result: unknown): unknown {
   return result;
 }
 
-async function withRun<T>(store: JsonFileDurableStore<AutomationSpec, AutomationRunOutput>, kind: string, input: AutomationSpec, fn: (runId: string) => Promise<T>): Promise<{ run: DurableRunRecord<AutomationSpec, AutomationRunOutput>; output: T }> {
+async function withRun<T>(store: SqliteDurableStore<AutomationSpec, AutomationRunOutput>, kind: string, input: AutomationSpec, fn: (runId: string) => Promise<T>): Promise<{ run: DurableRunRecord<AutomationSpec, AutomationRunOutput>; output: T }> {
   const run = await store.create(kind, input);
   await store.checkpoint(run.id, 'start', { kind });
   try {
@@ -66,7 +66,7 @@ function normalizeEndpointList(parsed: unknown): Array<Record<string, unknown>> 
 }
 
 export class AutomationRuntime {
-  constructor(private deps: { tools: AutomationToolset; store: JsonFileDurableStore<AutomationSpec, AutomationRunOutput> }) {}
+  constructor(private deps: { tools: AutomationToolset; store: SqliteDurableStore<AutomationSpec, AutomationRunOutput> }) {}
 
   async createEmailAutomation(condition: string, action: string, repeating = true) {
     const { run, output } = await withRun(this.deps.store, 'createEmailAutomation', { type: 'email', condition, action, repeating }, async () => {

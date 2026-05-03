@@ -65,7 +65,7 @@ function extractText(payload: unknown, fallback = ''): string {
   return fallback;
 }
 
-async function withRun<T>(store: JsonFileDurableStore<MultimodalJobInput, MultimodalJobOutput>, kind: string, input: MultimodalJobInput, fn: (runId: string) => Promise<T>): Promise<{ run: DurableRunRecord<MultimodalJobInput, MultimodalJobOutput>; output: T }> {
+async function withRun<T>(store: SqliteDurableStore<MultimodalJobInput, MultimodalJobOutput>, kind: string, input: MultimodalJobInput, fn: (runId: string) => Promise<T>): Promise<{ run: DurableRunRecord<MultimodalJobInput, MultimodalJobOutput>; output: T }> {
   const run = await store.create(kind, input);
   await store.checkpoint(run.id, 'start', { kind });
   try {
@@ -80,7 +80,7 @@ async function withRun<T>(store: JsonFileDurableStore<MultimodalJobInput, Multim
 }
 
 export class MultimodalRuntime {
-  constructor(private deps: { tools: MultimodalToolset; store: JsonFileDurableStore<MultimodalJobInput, MultimodalJobOutput> }) {}
+  constructor(private deps: { tools: MultimodalToolset; store: SqliteDurableStore<MultimodalJobInput, MultimodalJobOutput> }) {}
 
   async inspectMedia(input: { mediaId: string; query: string }): Promise<{ runId: string; result: string }> {
     const { run, output } = await withRun(this.deps.store, 'inspectMedia', { kind: 'document', mediaId: input.mediaId, query: input.query }, async () => {
