@@ -3,7 +3,6 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { PokeCoreStore } from './store';
 import { PokeCoreOrchestrator } from './orchestrator';
-import { EventBus } from './events';
 import { runtimeServices } from './runtime/services.ts';
 import { AutopilotSkill, BrowserSkill, ComputerUseSkill, EventSkill, GroundingSkill, HarnessSkill, IntegrationSkill, SignalObservationSkill, UserModelingSkill } from './skills';
 import { buildPlan } from './planner';
@@ -23,7 +22,7 @@ const db = ensureDbPath(str(args, 'db', './poke-core.sqlite'));
 const clock = runtimeServices.clock;
 const store = new PokeCoreStore(db, clock);
 store.init();
-const eventBus = new EventBus({ clock });
+const eventBus = runtimeServices.eventBus;
 const orchestrator = new PokeCoreOrchestrator(store, [new BrowserSkill(), new IntegrationSkill(), new AutopilotSkill(), new UserModelingSkill(), new GroundingSkill(), new SignalObservationSkill(), new ComputerUseSkill(), new HarnessSkill(), new EventSkill({ eventBus })], eventBus);
 
 try {

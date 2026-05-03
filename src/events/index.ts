@@ -105,7 +105,7 @@ export type QueueQuery = { queueName?: string; topic?: string; status?: QueueJob
 export type QueueStats = { queued: number; running: number; retrying: number; completed: number; dead: number; cancelled: number };
 export type QueueProcessResult = { claimed?: QueueJobRecord; completed?: boolean; output?: unknown; error?: string };
 
-export type EventBusOptions = { storagePath?: string; clock?: TimeProvider; workerId?: string; defaultQueue?: string };
+export type EventBusOptions = { storagePath?: string; tenantId?: string; contextId?: string; clock?: TimeProvider; workerId?: string; defaultQueue?: string };
 
 type Subscription = {
   id: string;
@@ -117,6 +117,7 @@ function nowIso(clock: TimeProvider): string { return clock.iso(); }
 function asRecord(value: unknown): Record<string, unknown> { return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {}; }
 function clone<T>(value: T): T { return JSON.parse(JSON.stringify(value)) as T; }
 function text(value: unknown): string { return typeof value === 'string' ? value.trim() : ''; }
+function normalizePathSegment(value: string): string { return text(value) || 'global'; }
 function topicMatches(filter: EventTopicFilter | undefined, topic: string): boolean {
   if (!filter) return true;
   if (typeof filter === 'function') return filter(topic);
@@ -203,7 +204,9 @@ export class EventBus {
   private readonly defaultQueue: string;
 
   constructor(options: EventBusOptions = {}) {
-    const storagePath = resolve(options.storagePath ?? process.env.POKE_CORE_EVENTS_DB ?? resolve(process.cwd(), '.poke-core', 'events.sqlite'));
+    const tenantId = normalizePathSegment(options.tenantId ?? process.env.POKE_CORE_TENANT_ID ?? 'global');
+    const contextId = normalizePathSegment(options.contextId ?? process.env.POKE_CORE_CONTEXT_ID ?? 'global');
+    const storagePath = resolve(options.storagePath ?? resolve(process.cwd(), '.poke-core', tenantId, contextId, 'events.sqlite'));
     mkdirSync(dirname(storagePath), { recursive: true });
     this.db = new Database(storagePath, { create: true });
     if (!options.clock) throw new Error('EventBus clock is required');

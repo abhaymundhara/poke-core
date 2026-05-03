@@ -1,4 +1,4 @@
-import type { JsonFileDurableStore, DurableRunRecord } from './durable.ts';
+import type { SqliteDurableStore, DurableRunRecord } from './durable.ts';
 
 export type AutomationSpec =
   | { type: 'email'; condition: string; action: string; repeating: boolean }

@@ -1,4 +1,4 @@
-import type { JsonFileDurableStore, DurableRunRecord } from './durable.ts';
+import type { SqliteDurableStore, DurableRunRecord } from './durable.ts';
 
 export type MultimodalKind = 'image' | 'data_visualization' | 'pdf' | 'voice' | 'document' | 'audio';
 

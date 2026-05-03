@@ -43,8 +43,9 @@ function createRuntimeServices(options: RuntimeServiceScope = {}): RuntimeServic
   const clock = createHighPrecisionClock();
   const tenantId = options.tenantId ?? process.env.POKE_CORE_TENANT_ID ?? 'global';
   const contextId = options.contextId ?? process.env.POKE_CORE_CONTEXT_ID ?? 'global';
-  const eventBus = new EventBus({ clock, tenantId, contextId });
-  const connectionManager = new ConnectionManager({ clock, tenantId, contextId });
+  const scope = { tenantId, contextId };
+  const eventBus = new EventBus({ clock, ...scope });
+  const connectionManager = new ConnectionManager({ clock, ...scope });
   const permissionRegistry = connectionManager.permissionRegistry;
   registerIntegrationPermissions(permissionRegistry);
   const bridgeRegistry = new BridgeRegistry({ eventBus });

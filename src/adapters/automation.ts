@@ -1,7 +1,8 @@
 import { createTrigger } from '../../../../poke/triggers/create_trigger.ts';
 import { manageIngestEndpoints } from '../../../../poke/data/manage_ingest_endpoints.ts';
 import { AutomationRuntime } from '../runtime/automation.ts';
-import { JsonFileDurableStore } from '../runtime/durable.ts';
+import { runtimeServices } from '../runtime/services.ts';
+import { SqliteDurableStore } from '../runtime/durable.ts';
 
 function createToolset() {
   return {
@@ -10,10 +11,10 @@ function createToolset() {
   };
 }
 
-export function createPokeAutomationRuntime(stateDir = '.poke-core/automation-runs') {
+export function createPokeAutomationRuntime(tenantId = runtimeServices.tenantId, contextId = runtimeServices.contextId) {
   return new AutomationRuntime({
     tools: createToolset(),
-    store: new JsonFileDurableStore(stateDir),
+    store: new SqliteDurableStore(tenantId, contextId),
   });
 }
 

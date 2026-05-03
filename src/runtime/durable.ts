@@ -45,7 +45,11 @@ export type DurableDocumentRecord = {
 
 function normalizeNamespace(value: string): string {
   const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : 'default';
+  return trimmed.length > 0 ? trimmed : 'global';
+}
+
+function normalizePathSegment(value: string): string {
+  return normalizeNamespace(value).replace(/[\/]/g, '_');
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -69,16 +73,16 @@ function fromBlob(value: unknown): Uint8Array {
   return new Uint8Array();
 }
 
-export class JsonFileDurableStore<TInput = unknown, TOutput = unknown> {
+export class SqliteDurableStore<TInput = unknown, TOutput = unknown> {
   private readonly db: Database;
   private readonly namespace: string;
   private readonly clock: TimeProvider;
   private readonly dbPath: string;
 
-  constructor(rootDir: string, clock: TimeProvider = runtimeServices.clock) {
-    this.namespace = normalizeNamespace(rootDir);
+  constructor(tenantId: string = 'global', contextId: string = 'global', clock: TimeProvider = runtimeServices.clock) {
+    this.namespace = normalizeNamespace(tenantId + ':' + contextId);
     this.clock = clock;
-    this.dbPath = resolve(process.cwd(), '.poke-core', 'durable.sqlite');
+    this.dbPath = resolve(process.cwd(), '.poke-core', normalizePathSegment(tenantId), normalizePathSegment(contextId), 'durable.sqlite');
     mkdirSync(dirname(this.dbPath), { recursive: true });
     this.db = new Database(this.dbPath, { create: true });
     this.db.exec(
