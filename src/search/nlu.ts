@@ -1,3 +1,6 @@
+import type { ConnectionView } from '../connections/types.ts';
+import { extractWithDefaultProviderSync } from '../llm-bridge';
+import { getRuntimeServices } from '../runtime/services.ts';
 import type { IntentAmbiguity, SearchConstraint, SearchFocus, SearchFreshness, SearchIntent, SearchSource, SemanticFrame, SourcePrior, TrustMode } from './types.ts';
 import { clamp, normalize, stableHash, uniq, words } from './utils.ts';
 
@@ -42,6 +45,207 @@ export const SEMANTIC_NLU_SCHEMA = {
     confidence: { type: 'number', minimum: 0, maximum: 1 },
   },
 };
+
+type ExternalSemanticBackend = 'openai' | 'anthropic' | 'ollama';
+
+type ResolvedSemanticConnection = {
+  provider: ExternalSemanticBackend;
+  connection: ConnectionView;
+  model: string;
+  baseUrl: string;
+  token?: string;
+};
+
+function firstString(value: unknown, fallback = ''): string {
+  return typeof value === 'string' ? value.trim() : fallback;
+}
+
+function readContextString(context: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = context[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+function readSecretString(connection: ConnectionView, keys: string[]): string {
+  for (const key of keys) {
+    const secret = connection.secrets?.[key];
+    if (typeof secret === 'string' && secret.trim()) return secret.trim();
+    const metadata = connection.metadata?.[key];
+    if (typeof metadata === 'string' && metadata.trim()) return metadata.trim();
+  }
+  return '';
+}
+
+function normalizeBackend(value: unknown): ExternalSemanticBackend | null {
+  const normalized = firstString(value).toLowerCase();
+  if (normalized === 'openai' || normalized === 'anthropic' || normalized === 'ollama') return normalized;
+  return null;
+}
+
+function backendFromContext(context: Record<string, unknown>): ExternalSemanticBackend | null {
+  return normalizeBackend(
+    context.llmProvider ??
+    context.semanticProvider ??
+    context.modelProvider ??
+    context.provider ??
+    context.backend,
+  );
+}
+
+function buildSemanticPrompt(objective: string, context: Record<string, unknown>, schema: Record<string, unknown>): string {
+  const contextText = bundle(objective, context);
+  return [
+    'Return JSON only. Do not include markdown, commentary, or code fences.',
+    'Resolve the user objective into the requested semantic schema.',
+    'Objective:',
+    objective.trim(),
+    'Context:',
+    contextText,
+    'Schema:',
+    JSON.stringify(schema),
+  ].join('
+');
+}
+
+function parseSemanticResponse(value: unknown): unknown {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) throw new Error('empty semantic response');
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return { semanticQuery: trimmed };
+    }
+  }
+  return value;
+}
+
+async function fetchJson<T>(url: string, init: RequestInit, attempts = 2): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await fetch(url, init);
+      const raw = await response.text();
+      if (!response.ok) {
+        if (attempt < attempts && [429, 500, 502, 503, 504].includes(response.status)) {
+          await new Promise((resolve) => setTimeout(resolve, 250 * attempt));
+          continue;
+        }
+        throw new Error('semantic provider request failed with ' + response.status + ': ' + raw);
+      }
+      return raw ? JSON.parse(raw) as T : ({} as T);
+    } catch (error) {
+      lastError = error;
+      if (attempt >= attempts) break;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('semantic provider request failed');
+}
+
+function resolveConnectionSettings(provider: ExternalSemanticBackend, connection: ConnectionView, context: Record<string, unknown>): ResolvedSemanticConnection {
+  const baseUrl = readContextString(context, ['llmBaseUrl', 'baseUrl', 'endpoint']) || readSecretString(connection, ['baseUrl', 'baseURL', 'endpoint']) || (provider === 'openai' ? 'https://api.openai.com/v1' : provider === 'anthropic' ? 'https://api.anthropic.com/v1' : 'http://127.0.0.1:11434');
+  const model = readContextString(context, ['llmModel', 'model']) || readSecretString(connection, ['model']) || (provider === 'openai' ? 'gpt-4o-mini' : provider === 'anthropic' ? 'claude-3-5-sonnet-latest' : 'llama3.1');
+  const token = readContextString(context, ['llmApiKey', 'apiKey', 'token']) || readSecretString(connection, ['apiKey', 'accessToken', 'token', 'bearerToken']);
+  return { provider, connection, model, baseUrl, token: token || undefined };
+}
+
+async function resolveSemanticConnection(input: { objective: string; context: Record<string, unknown> }): Promise<ResolvedSemanticConnection> {
+  const manager = getRuntimeServices().connectionManager;
+  const preferred = backendFromContext(input.context);
+  const candidates: ExternalSemanticBackend[] = preferred ? [preferred, ...(['openai', 'anthropic', 'ollama'] as ExternalSemanticBackend[]).filter((provider) => provider !== preferred)] : ['openai', 'anthropic', 'ollama'];
+
+  for (const provider of candidates) {
+    const selector: Record<string, unknown> = { provider };
+    const connectionId = readContextString(input.context, ['llmConnectionId', 'connectionId', 'semanticConnectionId']);
+    const accountId = readContextString(input.context, ['llmAccountId', 'accountId', 'semanticAccountId']);
+    const label = readContextString(input.context, ['llmLabel', 'connectionLabel', 'semanticLabel']);
+    if (connectionId) selector.connectionId = connectionId;
+    if (accountId) selector.accountId = accountId;
+    if (label) selector.label = label;
+
+    const connection = await manager.getConnection(selector as any, { includeSecrets: true, autoRefresh: true });
+    if (!connection?.secrets) continue;
+    return resolveConnectionSettings(provider, connection, input.context);
+  }
+
+  throw new Error('no semantic llm connection available for openai, anthropic, or ollama');
+}
+
+async function invokeSemanticProvider(input: { objective: string; context: Record<string, unknown>; schema: Record<string, unknown> }): Promise<unknown> {
+  const resolved = await resolveSemanticConnection(input);
+  const prompt = buildSemanticPrompt(input.objective, input.context, input.schema);
+
+  if (resolved.provider === 'openai') {
+    const response = await fetchJson<{ choices?: Array<{ message?: { content?: string } }> }>(
+      resolved.baseUrl.replace(//$/, '') + '/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer ' + (resolved.token ?? ''),
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolved.model,
+          temperature: 0,
+          response_format: { type: 'json_object' },
+          messages: [
+            { role: 'system', content: 'You are a semantic intent planner. Return JSON only.' },
+            { role: 'user', content: prompt },
+          ],
+        }),
+      },
+    );
+    return parseSemanticResponse(response.choices?.[0]?.message?.content ?? response);
+  }
+
+  if (resolved.provider === 'anthropic') {
+    const response = await fetchJson<{ content?: Array<{ type?: string; text?: string }> }>(
+      resolved.baseUrl.replace(//$/, '') + '/messages',
+      {
+        method: 'POST',
+        headers: {
+          'x-api-key': resolved.token ?? '',
+          'anthropic-version': '2023-06-01',
+          accept: 'application/json',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: resolved.model,
+          max_tokens: 1024,
+          temperature: 0,
+          messages: [
+            { role: 'user', content: prompt },
+          ],
+        }),
+      },
+    );
+    const text = (response.content ?? []).map((item) => item.text ?? '').join('').trim();
+    return parseSemanticResponse(text || response);
+  }
+
+  const response = await fetchJson<{ message?: { content?: string }; response?: string }>(
+    resolved.baseUrl.replace(//$/, '') + '/api/chat',
+    {
+      method: 'POST',
+      headers: {
+        accept: 'application/json',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: resolved.model,
+        stream: false,
+        messages: [
+          { role: 'system', content: 'You are a semantic intent planner. Return JSON only.' },
+          { role: 'user', content: prompt },
+        ],
+      }),
+    },
+  );
+  return parseSemanticResponse(response.message?.content ?? response.response ?? response);
+}
 
 function bundle(objective: string, context: Record<string, unknown>): string {
   const contextText = Object.entries(context)
@@ -401,51 +605,23 @@ function buildIntentFromNlu(objective: string, nlu: SemanticNluOutput, provider:
   };
 }
 
-export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
+export async function understandSearchIntentWithNlu(objective: string, context: Record<string, unknown> = {}, provider?: SemanticNluProvider): Promise<SearchIntent> {
   const activeProvider = provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
-  const fallback = normalizeSemanticOutput(localSemanticExtraction(objective, context));
-
-  if (!strict) {
-    return buildIntentFromNlu(objective, {
-      ...fallback,
-      warnings: uniq([...(fallback.warnings ?? []), 'heuristic-only-runtime-path']),
-    }, activeProvider.name, true);
-  }
-
-  try {
-    const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
-    if (extracted) {
-      return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, false);
-    }
-  } catch {
-    // fall through to heuristic fallback
-  }
-
-  return buildIntentFromNlu(objective, {
-    ...fallback,
-    warnings: uniq([...(fallback.warnings ?? []), 'heuristic-fallback:' + activeProvider.name]),
-  }, activeProvider.name, true);
-}, provider?: SemanticNluProvider, strict = false): Promise<SearchIntent> {
-  const activeProvider = provider ?? DEFAULT_LLM_SEMANTIC_NLU_PROVIDER;
-  try {
-    const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
-    if (extracted) return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, false);
-  } catch {
-    // fallback below
-  }
-  const fallback = normalizeSemanticOutput(localSemanticExtraction(objective, context));
-  return buildIntentFromNlu(objective, fallback, activeProvider.name, true);
+  const extracted = asNluOutput(await activeProvider.extract({ objective, context, schema: SEMANTIC_NLU_SCHEMA }));
+  if (!extracted) throw new Error('semantic nlu provider returned invalid output');
+  return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), activeProvider.name, false);
 }
 
 export function understandSearchIntent(objective: string, context: Record<string, unknown> = {}): SearchIntent {
-  const extracted = normalizeSemanticOutput(localSemanticExtraction(objective, context));
-  return buildIntentFromNlu(objective, extracted, DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
+  const extracted = asNluOutput(extractWithDefaultProviderSync<unknown>({ objective, context, schema: SEMANTIC_NLU_SCHEMA }, './src/search/nlu.ts', 'DEFAULT_LLM_SEMANTIC_NLU_PROVIDER'));
+  if (!extracted) throw new Error('semantic nlu provider returned invalid output');
+  return buildIntentFromNlu(objective, normalizeSemanticOutput(extracted), DEFAULT_LLM_SEMANTIC_NLU_PROVIDER.name, false);
 }
 
 export const DEFAULT_LLM_SEMANTIC_NLU_PROVIDER: SemanticNluProvider = {
-  name: 'latent-local-semantic-inference',
-  async extract({ objective, context }) {
-    return localSemanticExtraction(objective, context);
+  name: 'connection-managed-llm-semantic-nlu',
+  async extract(input) {
+    return await invokeSemanticProvider(input);
   },
 };
 
