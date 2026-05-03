@@ -120,6 +120,20 @@ export type ContextWindowSegment = {
   metadata: Record<string, unknown>;
 };
 
+export type ContextCompactionTelemetry = {
+  source: string;
+  budget: number;
+  inputTokens: number;
+  outputTokens: number;
+  overflowTokens: number;
+  knowledgeOverhangTokens: number;
+  selectedSegments: number;
+  compactedSegments: number;
+  selectedTokenEstimate: number;
+  compactedTokenEstimate: number;
+  efficiency: number;
+};
+
 export type ContextWindowSummary = {
   budget: number;
   usedTokens: number;
@@ -127,6 +141,7 @@ export type ContextWindowSummary = {
   selected: ContextWindowSegment[];
   compacted: ContextWindowSegment[];
   summary: string;
+  telemetry?: ContextCompactionTelemetry;
 };
 
 export type ThreadIdentityResolution = {

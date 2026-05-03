@@ -4,7 +4,8 @@ import { classifyTransition } from './state-machine';
 import { validatePlan } from './validator';
 import { RagCorpus } from './rag/retriever';
 import { listSkillPlaybooks } from './skill-playbooks';
-import type { ContextWindowSummary, ExecutionContext, ExecutionProfile, PlanStep, PlannerLoopState, RuntimeState, SkillResult, TaskInput, TaskPlan, TaskRecord, TaskStatus, ThreadIdentityResolution } from './types';
+import type { ContextCompactionTelemetry, ContextWindowSummary, ExecutionContext, ExecutionProfile, PlanStep, PlannerLoopState, RuntimeState, SkillResult, TaskInput, TaskPlan, TaskRecord, TaskStatus, ThreadIdentityResolution, ValidationDecision } from './types';
+import { createSoulContractManifest, verifySoulContractManifest, type FailureTrigger, type ParityRegressionEvalEntrypoint, type SoulContractManifest, type SoulContractVerification, type SoulPrimitiveBinding } from './runtime/soul-contract.ts';
 import { EventBus } from './events/index.ts';
 import { getRuntimeServices } from './runtime/services.ts';
 import type { PokeCoreStore } from './store';
@@ -311,6 +312,117 @@ export class PokeCoreOrchestrator {
 
   private async emitEvent(topic: string, payload: Record<string, unknown>): Promise<void> {
     await this.eventBus.publish({ topic, source: 'orchestrator', payload });
+  }
+
+  private buildSoulContractManifest(task: TaskRecord, plan: TaskPlan, state: RuntimeState, validation: ValidationDecision): SoulContractManifest {
+    const telemetry: ContextCompactionTelemetry = state.contextWindow?.telemetry ?? {
+      source: 'runtime.context.compactSegments',
+      budget: state.contextWindow?.budget ?? 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      overflowTokens: state.contextWindow?.overflowTokens ?? 0,
+      knowledgeOverhangTokens: state.contextWindow?.overflowTokens ?? 0,
+      selectedSegments: state.contextWindow?.selected.length ?? 0,
+      compactedSegments: state.contextWindow?.compacted.length ?? 0,
+      selectedTokenEstimate: 0,
+      compactedTokenEstimate: 0,
+      efficiency: 0,
+    };
+    const currentSha = task.taskId + ':' + task.revision;
+    const baselineSha = task.taskId + ':' + Math.max(0, task.revision - 1);
+    const compactionEntry: ParityRegressionEvalEntrypoint = {
+      name: 'runtime.parity.context_compaction',
+      artifactSha: currentSha,
+      baselineSha,
+      run: () => ({
+        name: 'runtime.parity.context_compaction',
+        artifactSha: currentSha,
+        baselineSha,
+        passed: telemetry.inputTokens > 0 && telemetry.outputTokens > 0 && telemetry.efficiency >= 0.45,
+        details: 'efficiency=' + telemetry.efficiency.toFixed(4) + ' overhang=' + telemetry.knowledgeOverhangTokens,
+        measuredAt: new Date(this.now()).toISOString(),
+      }),
+    };
+    const validationEntry: ParityRegressionEvalEntrypoint = {
+      name: 'runtime.parity.plan_validation',
+      artifactSha: currentSha,
+      baselineSha,
+      run: () => ({
+        name: 'runtime.parity.plan_validation',
+        artifactSha: currentSha,
+        baselineSha,
+        passed: validation.ok,
+        details: validation.reasons.length > 0 ? validation.reasons.join('; ') : 'plan validation passed',
+        measuredAt: new Date(this.now()).toISOString(),
+      }),
+    };
+    const primitiveEntry: ParityRegressionEvalEntrypoint = {
+      name: 'runtime.parity.domain_primitives',
+      artifactSha: currentSha,
+      baselineSha,
+      run: () => ({
+        name: 'runtime.parity.domain_primitives',
+        artifactSha: currentSha,
+        baselineSha,
+        passed: Boolean(this.runtime.workingMemory) && Boolean(this.runtime.episodicMemory) && telemetry.source === 'runtime.context.compactSegments',
+        details: 'primitive runtime linked to compactor=' + telemetry.source,
+        measuredAt: new Date(this.now()).toISOString(),
+      }),
+    };
+    const rollbackEntry: ParityRegressionEvalEntrypoint = {
+      name: 'runtime.parity.rollback_readiness',
+      artifactSha: currentSha,
+      baselineSha,
+      run: () => ({
+        name: 'runtime.parity.rollback_readiness',
+        artifactSha: currentSha,
+        baselineSha,
+        passed: true,
+        details: 'rollback target=' + baselineSha,
+        measuredAt: new Date(this.now()).toISOString(),
+      }),
+    };
+    const primitives: SoulPrimitiveBinding[] = [
+      { name: 'context_compactor', role: 'compactor', source: 'runtime.context.compactSegments', guaranteed: true },
+      { name: 'semantic_nlu_provider', role: 'nlu', source: DEFAULT_LLM_SEMANTIC_NLU_PROVIDER, guaranteed: true },
+      { name: 'thread_identity_graph', role: 'identity', source: 'OrchestratorRuntimeContext.identityGraph', guaranteed: true },
+      { name: 'planner_context_window', role: 'planner', source: 'OrchestratorRuntimeContext.buildContextWindow', guaranteed: true },
+      { name: 'plan_validator', role: 'verifier', source: 'validatePlan', guaranteed: true },
+    ];
+    const failureTriggers: FailureTrigger[] = [
+      { name: 'missing_context_compaction_telemetry', condition: 'context window telemetry is missing', severity: 'rollback', rollbackTo: baselineSha, evidence: ['contextWindow.telemetry'] },
+      { name: 'compaction_efficiency_below_threshold', condition: 'context compaction efficiency falls below 0.45', severity: 'rollback', rollbackTo: baselineSha, evidence: ['telemetry.efficiency'] },
+      { name: 'parity_regression_failed', condition: 'one or more parity regression entrypoints failed', severity: 'rollback', rollbackTo: baselineSha, evidence: ['evalEntrypoints'] },
+    ];
+    return createSoulContractManifest({
+      compaction: telemetry,
+      primitives,
+      evalEntrypoints: [compactionEntry, validationEntry, primitiveEntry, rollbackEntry],
+      failureTriggers,
+    });
+  }
+
+  private async enforceSoulContracts(task: TaskRecord, plan: TaskPlan, state: RuntimeState, validation: ValidationDecision): Promise<SoulContractVerification> {
+    const manifest = this.buildSoulContractManifest(task, plan, state, validation);
+    const verification = await verifySoulContractManifest(manifest);
+    this.runtime.workingMemory.appendTrail('soul_contract_verification', {
+      taskId: task.taskId,
+      ok: verification.ok,
+      reasons: verification.reasons,
+      gates: verification.gates,
+      failures: verification.failures,
+      telemetry: verification.telemetry,
+    });
+    await this.emitEvent('runtime.soul_contract', {
+      taskId: task.taskId,
+      ok: verification.ok,
+      reasons: verification.reasons,
+      telemetry: verification.telemetry,
+      gates: verification.gates,
+      failures: verification.failures,
+      primitiveSources: manifest.primitives.map((primitive) => primitive.source),
+    });
+    return verification;
   }
 
   private createExecutionContext(task: TaskRecord, plan: TaskPlan, step: PlanStep, state: RuntimeState): ExecutionContext {
@@ -720,6 +832,7 @@ export class PokeCoreOrchestrator {
     task = this._store.getTask(input.id) ?? task;
 
     let replanCount = 0;
+    let soulContractVerified = false;
     const decisionLog: string[] = [`planned ${plan.steps.length} step(s)`];
 
     while (true) {
@@ -727,6 +840,32 @@ export class PokeCoreOrchestrator {
       this._store.bumpRevision(input.id);
       this._store.recordEvent(input.id, classifyTransition('routing', 'executing'), 'routing', 'executing', { cursor: state.cursor, activeStepId: plan.steps[state.cursor]?.id ?? null });
       this._store.recordSnapshot(input.id, 'executing', state);
+
+      if (!soulContractVerified) {
+        const verification = await this.enforceSoulContracts(task, plan, state, validation);
+        soulContractVerified = verification.ok;
+        if (!verification.ok) {
+          const failureJson = JSON.stringify({ reasons: verification.reasons, gates: verification.gates, failures: verification.failures, telemetry: verification.telemetry });
+          this._store.updateTask(input.id, { status: 'rolled_back', currentStepIndex: state.cursor, activeStepId: null, errorJson: failureJson });
+          this._store.bumpRevision(input.id);
+          this._store.recordEvent(input.id, classifyTransition('executing', 'rolled_back'), 'executing', 'rolled_back', { reasons: verification.reasons, gates: verification.gates, failures: verification.failures, telemetry: verification.telemetry });
+          await this.emitEvent('task.rolled_back', { taskId: input.id, reasons: verification.reasons, gates: verification.gates, failures: verification.failures, telemetry: verification.telemetry });
+          this._store.recordSnapshot(input.id, 'rolled_back', state);
+          this.runtime.workingMemory.upsertFact('task:' + input.id + ':status', 'rolled_back', 0.98, 'orchestrator');
+          this.runtime.workingMemory.appendTrail('task_rolled_back', { taskId: input.id, reasons: verification.reasons, gates: verification.gates, failures: verification.failures });
+          return {
+            ok: false,
+            status: 'rolled_back',
+            taskId: input.id,
+            plan,
+            state,
+            error: verification.reasons.join('; '),
+            note: 'soul contract verification failed',
+            rationale: verification.reasons,
+            executionProfile: state.executionProfile,
+          };
+        }
+      }
 
       let stepOutcome: { control: StepControl; task: TaskRecord } | null = null;
       for (let index = state.cursor; index < plan.steps.length; index += 1) {

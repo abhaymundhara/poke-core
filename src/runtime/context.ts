@@ -3,6 +3,7 @@ import { IdentityGraph } from '../identity/graph.ts';
 import type { IdentityResolution } from '../identity/types.ts';
 import type { EpisodicMemoryItem } from '../memory/episodic-memory';
 import type { MemoryFact } from '../memory/working-memory';
+import { buildContextCompactionTelemetry } from './soul-contract.ts';
 import type { PokeCoreStore } from '../store';
 import type {
   ContextWindowSegment,
@@ -195,8 +196,19 @@ function compactSegments(segments: ContextWindowSegment[], budget: number, hints
     }
   }
 
+  const selectedTokenEstimate = selected.reduce((sum, segment) => sum + segment.tokenEstimate, 0);
+  const compactedTokenEstimate = compacted.reduce((sum, segment) => sum + segment.tokenEstimate, 0);
+  const telemetry = buildContextCompactionTelemetry({
+    source: 'runtime.context.compactSegments',
+    budget,
+    selectedSegments: selected.length,
+    compactedSegments: compacted.length,
+    selectedTokenEstimate,
+    compactedTokenEstimate,
+    overflowTokens,
+  });
   const summary = [...selected, ...compacted]
-    .map((segment) => `[${segment.title}] ${segment.text}`)
+    .map((segment) => '[' + segment.title + '] ' + segment.text)
     .join('\n');
 
   return {
@@ -206,6 +218,7 @@ function compactSegments(segments: ContextWindowSegment[], budget: number, hints
     selected,
     compacted,
     summary,
+    telemetry,
   };
 }
 
