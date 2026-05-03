@@ -21,17 +21,6 @@ type IntegrationOutput = {
   nextAction: 'confirm' | 'retry' | 'continue' | 'clarify' | 'done';
 };
 
-type ProviderConfig = {
-  token?: string;
-  baseUrl?: string;
-  version?: string;
-  teamId?: string;
-  projectId?: string;
-  workspaceId?: string;
-  databaseId?: string;
-  notionVersion?: string;
-};
-
 class IntegrationError extends Error {
   constructor(
     public readonly code: string,
@@ -59,10 +48,6 @@ function asString(value: unknown): string {
 
 function asNumber(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
-}
-
-function asBoolean(value: unknown, fallback = false): boolean {
-  return typeof value === 'boolean' ? value : fallback;
 }
 
 function asStringArray(value: unknown): string[] {
@@ -101,10 +86,6 @@ function parseRetryAfter(headers: Headers): number | undefined {
   }
 
   return undefined;
-}
-
-function isRetryableStatus(status: number): boolean {
-  return status === 408 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 async function requestJson<T>(url: string, init: RequestInit, options?: { attempts?: number; provider?: string; action?: string; retryableStatuses?: number[]; parseText?: boolean }): Promise<{ status: number; headers: Headers; data: T; rawText: string }> {
@@ -247,14 +228,6 @@ function readNumber(payload: Record<string, unknown>, keys: string[], fallback?:
       const parsed = Number(value);
       if (Number.isFinite(parsed)) return parsed;
     }
-  }
-  return fallback;
-}
-
-function readBoolean(payload: Record<string, unknown>, keys: string[], fallback = false): boolean {
-  for (const key of keys) {
-    const value = payload[key];
-    if (typeof value === 'boolean') return value;
   }
   return fallback;
 }
