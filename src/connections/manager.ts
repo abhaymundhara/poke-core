@@ -110,6 +110,7 @@ export class ConnectionManager {
     this.storage = options.storage ?? new SQLiteConnectionStore();
     this.crypto = new ConnectionCryptoService({ defaultKey: options.encryptionKey });
     this.permissions = new PermissionRegistry();
+    if (!options.clock) throw new Error('ConnectionManager clock is required');
     this.clock = options.clock;
     this.autoRefreshWindowMs = options.autoRefreshWindowMs ?? 5 * 60 * 1000;
     this.defaultEncryptionKey = options.encryptionKey;

@@ -201,6 +201,6 @@ export type ConnectionManagerOptions = {
   permissions?: PermissionRule[];
   encryptionKey?: string;
   keyResolver?: (params: { provider: string; accountId: string; encryptionKey?: string }) => string | Promise<string>;
-  clock: TimeProvider;
+  clock?: TimeProvider;
   autoRefreshWindowMs?: number;
 };

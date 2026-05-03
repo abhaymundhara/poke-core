@@ -105,7 +105,7 @@ export type QueueQuery = { queueName?: string; topic?: string; status?: QueueJob
 export type QueueStats = { queued: number; running: number; retrying: number; completed: number; dead: number; cancelled: number };
 export type QueueProcessResult = { claimed?: QueueJobRecord; completed?: boolean; output?: unknown; error?: string };
 
-export type EventBusOptions = { storagePath?: string; clock: TimeProvider; workerId?: string; defaultQueue?: string };
+export type EventBusOptions = { storagePath?: string; clock?: TimeProvider; workerId?: string; defaultQueue?: string };
 
 type Subscription = {
   id: string;
@@ -206,6 +206,7 @@ export class EventBus {
     const storagePath = resolve(options.storagePath ?? process.env.POKE_CORE_EVENTS_DB ?? resolve(process.cwd(), '.poke-core', 'events.sqlite'));
     mkdirSync(dirname(storagePath), { recursive: true });
     this.db = new Database(storagePath, { create: true });
+    if (!options.clock) throw new Error('EventBus clock is required');
     this.clock = options.clock;
     this.workerId = options.workerId ?? 'event-bus';
     this.defaultQueue = options.defaultQueue ?? 'default';
