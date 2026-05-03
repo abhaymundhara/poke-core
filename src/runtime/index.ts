@@ -6,5 +6,6 @@ export * from './durable.ts';
 export * from './multimodal.ts';
 export * from './automation.ts';
 export * from './clock.ts';
+export * from './context.ts';
 export * from './shell.ts';
 export * from './computer.ts';

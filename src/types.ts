@@ -1,4 +1,5 @@
 import type { SearchIntent } from './search/types';
+import type { IdentityResolution, IdentityResolutionSignal } from './identity/types.ts';
 export type TaskStatus = 'draft' | 'planning' | 'routing' | 'executing' | 'recovering' | 'completed' | 'failed' | 'rolled_back';
 export type StepKind = 'browser.navigate' | 'browser.extract' | 'integration.call' | 'verify' | 'autopilot.loop' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use.vision' | 'harness.readthread' | 'harness.draftreply' | 'harness.conflict_detection' | 'harness.relationship_recall' | 'harness.filesystem_scan' | 'channel.send' | 'channel.thread' | 'channel.metadata' | 'connection.list' | 'connection.request' | 'connection.rotate' | 'connection.refresh' | 'connection.delete' | 'events.history' | 'events.queue' | 'events.replay' | 'events.enqueue' | 'events.claim' | 'events.complete' | 'events.fail';
 export type TransitionKind = 'plan' | 'route' | 'execute' | 'validate' | 'recover' | 'complete' | 'fail' | 'rollback';
@@ -98,12 +99,92 @@ export type SkillResult = {
   trace?: Record<string, unknown>;
 };
 
+export type TimeProvider = {
+  now: () => number;
+  nowNs?: () => bigint;
+  iso: () => string;
+  advance?: (ms: number) => number;
+  origin?: number;
+  label?: string;
+};
+
+export type ContextWindowSource = 'objective' | 'identity' | 'step' | 'plan' | 'state' | 'memory' | 'episodic' | 'event' | 'observation' | 'system';
+
+export type ContextWindowSegment = {
+  id: string;
+  source: ContextWindowSource;
+  title: string;
+  text: string;
+  priority: number;
+  tokenEstimate: number;
+  metadata: Record<string, unknown>;
+};
+
+export type ContextWindowSummary = {
+  budget: number;
+  usedTokens: number;
+  overflowTokens: number;
+  selected: ContextWindowSegment[];
+  compacted: ContextWindowSegment[];
+  summary: string;
+};
+
+export type ThreadIdentityResolution = {
+  query: string;
+  identityId: string;
+  label: string;
+  confidence: number;
+  matchedBy: IdentityResolutionSignal | 'synthetic';
+  source: 'graph' | 'synthetic';
+  resolution: IdentityResolution;
+  signals: string[];
+  aliases: string[];
+  anchor: string;
+};
+
+export type PlannerLoopObservation = {
+  stepId: string;
+  stepKind: StepKind;
+  outcome: 'completed' | 'failed' | 'blocked' | 'replanned' | 'compensated';
+  note?: string;
+  summary: string;
+  confidence?: number;
+  evidence: string[];
+  result?: unknown;
+  at: number;
+};
+
+export type PlannerLoopReflection = {
+  cycle: number;
+  summary: string;
+  shouldReplan: boolean;
+  reasons: string[];
+  nextQuestions: string[];
+  at: number;
+};
+
+export type PlannerLoopState = {
+  planId: string;
+  objective: string;
+  cycle: number;
+  status: 'planning' | 'executing' | 'reflecting' | 'replanning' | 'done' | 'blocked';
+  observations: PlannerLoopObservation[];
+  reflections: PlannerLoopReflection[];
+  lastObservedAt: number;
+  lastReflectedAt: number;
+  threadIdentity?: ThreadIdentityResolution | null;
+};
+
 export type ExecutionContext = {
   taskId: string;
   task: TaskRecord;
   plan: TaskPlan;
   step: PlanStep;
   state: RuntimeState;
+  contextWindow?: ContextWindowSummary | null;
+  threadIdentity?: ThreadIdentityResolution | null;
+  plannerLoop?: PlannerLoopState | null;
+  clock?: TimeProvider;
 };
 
 export type SkillDescriptor = {
@@ -215,5 +296,8 @@ export type RuntimeState = {
   semanticIntent?: SearchIntent;
   intentGraph?: PlannerIntentGraph;
   planner?: PlannerRuntimeState;
+  threadIdentity?: ThreadIdentityResolution | null;
+  contextWindow?: ContextWindowSummary | null;
+  plannerLoop?: PlannerLoopState | null;
 };
 

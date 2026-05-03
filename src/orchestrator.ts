@@ -2,15 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { buildPlan } from './planner';
 import { classifyTransition } from './state-machine';
 import { validatePlan } from './validator';
-import { EpisodicMemory } from './memory/episodic-memory';
-import { WorkingMemory } from './memory/working-memory';
 import { RagCorpus } from './rag/retriever';
 import { listSkillPlaybooks } from './skill-playbooks';
-import type { ExecutionProfile, ExecutionContext, PlanStep, RuntimeState, SkillResult, TaskInput, TaskPlan, TaskRecord, TaskStatus } from './types';
+import type { ContextWindowSummary, ExecutionContext, ExecutionProfile, PlanStep, PlannerLoopState, RuntimeState, SkillResult, TaskInput, TaskPlan, TaskRecord, TaskStatus, ThreadIdentityResolution } from './types';
 import { EventBus } from './events/index.ts';
 import { getRuntimeServices } from './runtime/services.ts';
 import type { PokeCoreStore } from './store';
 import type { SkillAdapter } from './skills/types';
+import { OrchestratorRuntimeContext, compactText } from './runtime/context.ts';
 
 export type TaskExecutionResult = {
   ok?: boolean;
@@ -101,34 +100,66 @@ function buildExecutionProfile(plan: TaskPlan): ExecutionProfile {
   };
 }
 
-function buildRuntimeState(plan: TaskPlan): RuntimeState {
+function buildRuntimeState(
+  plan: TaskPlan,
+  seed: Partial<RuntimeState> & {
+    threadIdentity?: ThreadIdentityResolution | null;
+    contextWindow?: ContextWindowSummary | null;
+    plannerLoop?: PlannerLoopState | null;
+  } = {},
+): RuntimeState {
   return {
     objective: plan.objective,
     cursor: 0,
-    attempts: {},
-    outputs: {},
-    artifacts: {},
-    breadcrumbs: [],
-    recovery: [],
-    executionProfile: buildExecutionProfile(plan),
-    semanticIntent: plan.semanticIntent,
-    intentGraph: plan.intentGraph,
-    planner: plan.planner
-      ? {
-          strategy: plan.planner.strategy,
-          provider: plan.planner.provider,
-          fallbackUsed: plan.planner.fallbackUsed,
-          confidence: plan.planner.confidence,
-          currentNodeId: plan.intentGraph?.frontier?.[0] ?? null,
-          completedNodeIds: [],
-          blockedNodeIds: [],
-          notes: [...(plan.planner.warnings ?? [])],
-        }
-      : undefined,
+    attempts: seed.attempts ?? {},
+    outputs: seed.outputs ?? {},
+    artifacts: seed.artifacts ?? {},
+    breadcrumbs: seed.breadcrumbs ?? [],
+    recovery: seed.recovery ?? [],
+    executionProfile: seed.executionProfile ?? buildExecutionProfile(plan),
+    semanticIntent: seed.semanticIntent ?? plan.semanticIntent,
+    intentGraph: seed.intentGraph ?? plan.intentGraph,
+    planner: seed.planner
+      ? { ...seed.planner }
+      : plan.planner
+        ? {
+            strategy: plan.planner.strategy,
+            provider: plan.planner.provider,
+            fallbackUsed: plan.planner.fallbackUsed,
+            confidence: plan.planner.confidence,
+            currentNodeId: plan.intentGraph?.frontier?.[0] ?? null,
+            completedNodeIds: [],
+            blockedNodeIds: [],
+            notes: [...(plan.planner.warnings ?? [])],
+          }
+        : undefined,
+    threadIdentity: seed.threadIdentity ?? null,
+    contextWindow: seed.contextWindow ?? null,
+    plannerLoop: seed.plannerLoop ?? {
+      planId: plan.taskId,
+      objective: plan.objective,
+      cycle: 0,
+      status: 'planning',
+      observations: [],
+      reflections: [],
+      lastObservedAt: 0,
+      lastReflectedAt: 0,
+      threadIdentity: seed.threadIdentity ?? null,
+    },
   };
 }
 
-function buildTaskContext(input: TaskInput, plan: TaskPlan, state: RuntimeState, extra: Record<string, unknown> = {}): Record<string, unknown> {
+type TaskContextExtras = {
+  workingMemory?: unknown;
+  episodicMemory?: unknown;
+  currentStep?: unknown;
+  lastObservation?: unknown;
+  contextWindow?: ContextWindowSummary | null;
+  threadIdentity?: ThreadIdentityResolution | null;
+  plannerLoop?: PlannerLoopState | null;
+};
+
+function buildTaskContext(input: TaskInput, plan: TaskPlan, state: RuntimeState, extra: TaskContextExtras = {}): Record<string, unknown> {
   return {
     ...(input.context ?? {}),
     taskId: input.id,
@@ -139,6 +170,9 @@ function buildTaskContext(input: TaskInput, plan: TaskPlan, state: RuntimeState,
     episodicMemory: extra.episodicMemory ?? null,
     currentStep: extra.currentStep ?? null,
     lastObservation: extra.lastObservation ?? null,
+    contextWindow: extra.contextWindow ?? state.contextWindow ?? null,
+    threadIdentity: extra.threadIdentity ?? state.threadIdentity ?? null,
+    plannerLoop: extra.plannerLoop ?? state.plannerLoop ?? null,
   };
 }
 
@@ -158,13 +192,39 @@ function stepInputSummary(plan: TaskPlan, state: RuntimeState, step: PlanStep, a
     cursor: state.cursor,
     completedSteps: state.breadcrumbs.filter((entry) => entry.status === 'done' || entry.status === 'compensated').map((entry) => entry.stepId),
     outputKeys: Object.keys(state.outputs),
+    contextWindow: state.contextWindow
+      ? {
+          budget: state.contextWindow.budget,
+          usedTokens: state.contextWindow.usedTokens,
+          overflowTokens: state.contextWindow.overflowTokens,
+          selectedCount: state.contextWindow.selected.length,
+          compactedCount: state.contextWindow.compacted.length,
+        }
+      : null,
+    threadIdentity: state.threadIdentity
+      ? {
+          identityId: state.threadIdentity.identityId,
+          label: state.threadIdentity.label,
+          confidence: state.threadIdentity.confidence,
+          source: state.threadIdentity.source,
+        }
+      : null,
+    plannerLoop: state.plannerLoop
+      ? {
+          planId: state.plannerLoop.planId,
+          cycle: state.plannerLoop.cycle,
+          status: state.plannerLoop.status,
+          lastObservedAt: state.plannerLoop.lastObservedAt,
+          lastReflectedAt: state.plannerLoop.lastReflectedAt,
+        }
+      : null,
   };
 }
 
 function summarizeSkillResult(result: SkillResult): string {
-  if (result.note) return result.note;
-  if (typeof result.output === 'string') return result.output.slice(0, 240);
-  if (isRecord(result.output) && asString(result.output.message)) return asString(result.output.message);
+  if (result.note) return compactText(result.note, 120);
+  if (typeof result.output === 'string') return compactText(result.output, 120);
+  if (isRecord(result.output) && asString(result.output.message)) return compactText(asString(result.output.message), 120);
   return result.ok ? 'step completed' : 'step failed';
 }
 
@@ -203,13 +263,13 @@ function dependencyCheck(step: PlanStep, state: RuntimeState): string[] {
 export class PokeCoreOrchestrator {
   private readonly skills: SkillAdapter[];
   private readonly eventBus: EventBus;
-  private rag = new RagCorpus();
-  private working = new WorkingMemory();
-  private episodic = new EpisodicMemory();
+  private readonly runtime: OrchestratorRuntimeContext;
+  private readonly rag = new RagCorpus();
 
   constructor(private readonly _store: PokeCoreStore, skills: SkillAdapter[], eventBus?: EventBus) {
     this.skills = skills.slice();
     this.eventBus = eventBus ?? getRuntimeServices().eventBus;
+    this.runtime = new OrchestratorRuntimeContext(this._store);
   }
 
   get skillCatalog() {
@@ -225,11 +285,15 @@ export class PokeCoreOrchestrator {
   }
 
   get workingMemory() {
-    return this.working;
+    return this.runtime.workingMemory;
   }
 
   get episodicMemory() {
-    return this.episodic;
+    return this.runtime.episodicMemory;
+  }
+
+  private now(): number {
+    return this.runtime.now();
   }
 
   private resolveSkill(step: PlanStep): SkillAdapter | null {
@@ -253,6 +317,10 @@ export class PokeCoreOrchestrator {
       plan,
       step,
       state,
+      contextWindow: state.contextWindow ?? null,
+      threadIdentity: state.threadIdentity ?? null,
+      plannerLoop: state.plannerLoop ?? null,
+      clock: this.runtime.clock,
     };
   }
 
@@ -264,6 +332,15 @@ export class PokeCoreOrchestrator {
     decisionLog: string[],
   ): Promise<{ control: StepControl; task: TaskRecord }> {
     const adapter = this.resolveSkill(step);
+    state.contextWindow = this.runtime.buildContextWindow({
+      taskId: plan.taskId,
+      objective: plan.objective,
+      plan,
+      state,
+      step,
+      limitTokens: state.contextWindow?.budget ?? 1600,
+      threadIdentity: state.threadIdentity ?? null,
+    });
     if (!adapter) {
       return {
         control: { kind: 'halt', status: 'failed', note: `no skill registered for ${step.skill || step.kind}` },
@@ -276,7 +353,7 @@ export class PokeCoreOrchestrator {
 
     for (let attemptIndex = 1; attemptIndex <= maxAttempts; attemptIndex += 1) {
       const attemptId = randomUUID();
-      const startedAt = Date.now();
+      const startedAt = this.now();
       await this.emitEvent('step.started', { taskId: plan.taskId, stepId: step.id, attemptIndex });
       const inputPayload = stepInputSummary(plan, state, step, attemptIndex);
 
@@ -297,7 +374,7 @@ export class PokeCoreOrchestrator {
       try {
         const ctx = this.createExecutionContext(task, plan, step, state);
         const result = await adapter.execute(ctx);
-        const finishedAt = Date.now();
+        const finishedAt = this.now();
         const validated = summarizeSkillResult(result);
         const outputPayload = {
           ...inputPayload,
@@ -327,8 +404,8 @@ export class PokeCoreOrchestrator {
 
           if (retryableByPolicy && hasRetriesLeft) {
             decisionLog.push(`[${step.id}] attempt ${attemptIndex} failed (${attemptFailureKind}); retrying`);
-            this.working.appendTrail('step_retry', { taskId: plan.taskId, stepId: step.id, attemptIndex, failureKind: attemptFailureKind });
-            state.recovery.push({ stepId: step.id, reason: `retry:${attemptFailureKind}`, at: Date.now() });
+            this.runtime.workingMemory.appendTrail('step_retry', { taskId: plan.taskId, stepId: step.id, attemptIndex, failureKind: attemptFailureKind });
+            state.recovery.push({ stepId: step.id, reason: `retry:${attemptFailureKind}`, at: this.now() });
             await sleep(Math.min(1_500, 250 * (2 ** (attemptIndex - 1))));
             continue;
           }
@@ -337,6 +414,16 @@ export class PokeCoreOrchestrator {
         }
 
         const observation = observationDecision(step, result);
+        state.plannerLoop = this.runtime.observePlannerLoop(state.plannerLoop ?? undefined, {
+          stepId: step.id,
+          stepKind: step.kind,
+          outcome: observation.kind === 'halt' ? 'blocked' : observation.kind === 'replan' ? 'replanned' : observation.kind === 'complete' ? 'completed' : 'completed',
+          note: result.note ?? observation.note ?? null,
+          summary: summarizeSkillResult(result),
+          confidence: isRecord(result.output) ? asNumber((result.output as Record<string, unknown>).confidence) : undefined,
+          at: finishedAt,
+          result: result.output,
+        });
 
         state.attempts[step.id] = attemptIndex;
         state.outputs[step.id] = result.output;
@@ -354,11 +441,11 @@ export class PokeCoreOrchestrator {
           state.planner.completedNodeIds = [...new Set([...state.planner.completedNodeIds, step.id])];
         }
 
-        this.working.upsertFact(`task:${plan.taskId}:step:${step.id}:status`, 'completed', 0.93, 'orchestrator');
-        this.working.upsertFact(`task:${plan.taskId}:cursor`, String(step.position + 1), 0.8, 'orchestrator');
-        this.working.appendTrail('step_completed', { taskId: plan.taskId, stepId: step.id, skill: adapter.descriptor.name, note: result.note ?? null });
+        this.runtime.workingMemory.upsertFact(`task:${plan.taskId}:step:${step.id}:status`, 'completed', 0.93, 'orchestrator');
+        this.runtime.workingMemory.upsertFact(`task:${plan.taskId}:cursor`, String(step.position + 1), 0.8, 'orchestrator');
+        this.runtime.workingMemory.appendTrail('step_completed', { taskId: plan.taskId, stepId: step.id, skill: adapter.descriptor.name, note: result.note ?? null });
         await this.emitEvent('step.completed', { taskId: plan.taskId, stepId: step.id, skill: adapter.descriptor.name, attemptIndex, note: result.note ?? null });
-        this.episodic.add({
+        this.runtime.episodicMemory.add({
           id: randomUUID(),
           taskId: plan.taskId,
           category: 'success',
@@ -393,7 +480,7 @@ export class PokeCoreOrchestrator {
 
         return { control: observation, task: this._store.getTask(plan.taskId) ?? task };
       } catch (error) {
-        const finishedAt = Date.now();
+        const finishedAt = this.now();
         const message = error instanceof Error ? error.message : String(error);
         const failure: FailureContext = {
           message,
@@ -401,6 +488,16 @@ export class PokeCoreOrchestrator {
           retryable: /timeout|network|stale|closed|detached|refused|reset|429|tempor/i.test(message.toLowerCase()),
         };
         lastFailure = failure;
+        state.plannerLoop = this.runtime.observePlannerLoop(state.plannerLoop ?? undefined, {
+          stepId: step.id,
+          stepKind: step.kind,
+          outcome: 'failed',
+          note: message,
+          summary: message,
+          confidence: 0.2,
+          at: finishedAt,
+          result: serializeError(error),
+        });
 
         this._store.finalizeAttempt(attemptId, {
           status: 'failed',
@@ -414,8 +511,8 @@ export class PokeCoreOrchestrator {
 
         if (retryableByPolicy && hasRetriesLeft) {
           decisionLog.push(`[${step.id}] attempt ${attemptIndex} errored (${failure.kind}); retrying`);
-          this.working.appendTrail('step_retry', { taskId: plan.taskId, stepId: step.id, attemptIndex, failureKind: failure.kind, error: message });
-          state.recovery.push({ stepId: step.id, reason: `error:${failure.kind}`, at: Date.now() });
+          this.runtime.workingMemory.appendTrail('step_retry', { taskId: plan.taskId, stepId: step.id, attemptIndex, failureKind: failure.kind, error: message });
+          state.recovery.push({ stepId: step.id, reason: `error:${failure.kind}`, at: this.now() });
           await sleep(Math.min(1_500, 250 * (2 ** (attemptIndex - 1))));
           continue;
         }
@@ -438,7 +535,7 @@ export class PokeCoreOrchestrator {
       const compensationAdapter = this.resolveSkill(compensationStep);
       if (compensationAdapter) {
         const attemptId = randomUUID();
-        const startedAt = Date.now();
+        const startedAt = this.now();
         this._store.recordAttempt({
           attemptId,
           taskId: plan.taskId,
@@ -455,7 +552,7 @@ export class PokeCoreOrchestrator {
 
         try {
           const result = await compensationAdapter.execute(this.createExecutionContext(task, plan, compensationStep, state));
-          const finishedAt = Date.now();
+          const finishedAt = this.now();
           this._store.finalizeAttempt(attemptId, {
             status: result.ok ? 'succeeded' : 'failed',
             outputJson: JSON.stringify({ output: result.output, note: result.note ?? null, trace: result.trace ?? null }),
@@ -465,9 +562,18 @@ export class PokeCoreOrchestrator {
           if (result.ok) {
             state.artifacts[compensationStep.id] = result.output;
             state.breadcrumbs.push({ stepId: compensationStep.id, kind: compensationStep.kind, skill: compensationAdapter.descriptor.name, status: 'compensated' });
-            state.recovery.push({ stepId: step.id, reason: 'compensation-completed', at: Date.now() });
-            this.working.appendTrail('step_compensated', { taskId: plan.taskId, stepId: step.id, compensationSkill: compensationAdapter.descriptor.name });
-            this.episodic.add({
+            state.recovery.push({ stepId: step.id, reason: 'compensation-completed', at: this.now() });
+            state.plannerLoop = this.runtime.observePlannerLoop(state.plannerLoop ?? undefined, {
+              stepId: compensationStep.id,
+              stepKind: compensationStep.kind,
+              outcome: 'compensated',
+              note: 'compensation completed',
+              summary: summarizeSkillResult(result),
+              at: finishedAt,
+              result: result.output,
+            });
+            this.runtime.workingMemory.appendTrail('step_compensated', { taskId: plan.taskId, stepId: step.id, compensationSkill: compensationAdapter.descriptor.name });
+            this.runtime.episodicMemory.add({
               id: randomUUID(),
               taskId: plan.taskId,
               category: 'correction',
@@ -482,7 +588,7 @@ export class PokeCoreOrchestrator {
             status: 'failed',
             outputJson: JSON.stringify({ error: serializeError(error) }),
             errorJson: JSON.stringify(serializeError(error)),
-            endedAt: Date.now(),
+            endedAt: this.now(),
           });
         }
       }
@@ -490,10 +596,10 @@ export class PokeCoreOrchestrator {
 
     const failureMessage = lastFailure?.message ?? `step ${step.id} failed`;
     decisionLog.push(`[${step.id}] failed: ${failureMessage}`);
-    this.working.upsertFact(`task:${plan.taskId}:step:${step.id}:status`, 'failed', 0.92, 'orchestrator');
-    this.working.appendTrail('step_failed', { taskId: plan.taskId, stepId: step.id, message: failureMessage });
+    this.runtime.workingMemory.upsertFact(`task:${plan.taskId}:step:${step.id}:status`, 'failed', 0.92, 'orchestrator');
+    this.runtime.workingMemory.appendTrail('step_failed', { taskId: plan.taskId, stepId: step.id, message: failureMessage });
     await this.emitEvent('step.failed', { taskId: plan.taskId, stepId: step.id, message: failureMessage });
-    this.episodic.add({
+    this.runtime.episodicMemory.add({
       id: randomUUID(),
       taskId: plan.taskId,
       category: 'failure',
@@ -509,13 +615,34 @@ export class PokeCoreOrchestrator {
   }
 
   private async refreshPlan(input: TaskInput, plan: TaskPlan, state: RuntimeState, lastReason: string, replanCount: number): Promise<TaskPlan> {
+    state.contextWindow = this.runtime.buildContextWindow({
+      taskId: plan.taskId,
+      objective: input.objective,
+      plan,
+      state,
+      step: plan.steps[state.cursor] ?? null,
+      limitTokens: state.contextWindow?.budget ?? 1600,
+      threadIdentity: state.threadIdentity ?? null,
+    });
+    state.plannerLoop = this.runtime.reflectPlannerLoop(state.plannerLoop ?? undefined, {
+      reason: lastReason,
+      stepId: plan.steps[state.cursor]?.id,
+      cycle: replanCount + 1,
+      objective: input.objective,
+      at: this.now(),
+      threadIdentity: state.threadIdentity ?? null,
+      notes: [lastReason, state.contextWindow.summary],
+    });
     const nextInput: TaskInput = {
       ...input,
       context: buildTaskContext(input, plan, state, {
         currentPlan: plan,
         lastObservation: lastReason,
-        workingMemory: this.working.snapshot(),
-        episodicMemory: this.episodic.snapshot(),
+        workingMemory: this.runtime.workingMemory.snapshot(),
+        episodicMemory: this.runtime.episodicMemory.snapshot(),
+        contextWindow: state.contextWindow,
+        threadIdentity: state.threadIdentity,
+        plannerLoop: state.plannerLoop,
       }),
     };
     const nextPlan = await buildPlan(nextInput);
@@ -535,20 +662,29 @@ export class PokeCoreOrchestrator {
     }
 
     this._store.recordEvent(input.id, classifyTransition('draft', 'planning'), 'draft', 'planning', { objective: input.objective, source: 'execute' });
-    this.working.upsertFact(`task:${input.id}:objective`, input.objective, 1, 'orchestrator');
-    this.working.appendTrail('task_started', { taskId: input.id, objective: input.objective });
-    await this.emitEvent('task.started', { taskId: input.id, objective: input.objective });
+    const threadIdentity = await this.runtime.resolveThreadIdentity(input, this._store.getTask(input.id), this._store.getPlan(input.id));
+    this.runtime.workingMemory.upsertFact(`task:${input.id}:objective`, input.objective, 1, 'orchestrator');
+    this.runtime.workingMemory.upsertFact(`task:${input.id}:thread`, threadIdentity.identityId, threadIdentity.confidence, threadIdentity.source);
+    this.runtime.workingMemory.appendTrail('task_started', { taskId: input.id, objective: input.objective, threadIdentity });
+    this.runtime.workingMemory.appendTrail('thread_identity_resolved', { taskId: input.id, identityId: threadIdentity.identityId, confidence: threadIdentity.confidence, source: threadIdentity.source, signals: threadIdentity.signals });
+    await this.emitEvent('task.started', { taskId: input.id, objective: input.objective, threadIdentity });
+
+    const bootstrapPlan: TaskPlan = { taskId: input.id, objective: input.objective, steps: [] };
+    const bootstrapState = buildRuntimeState(bootstrapPlan, {
+      threadIdentity,
+      contextWindow: this.runtime.buildContextWindow({ taskId: input.id, objective: input.objective, limitTokens: asNumber((input.context ?? {})['tokenBudget']) ?? 1600, threadIdentity }),
+      plannerLoop: this.runtime.createPlannerLoopState(input.id, input.objective, threadIdentity),
+    });
 
     let plan = await buildPlan({
       ...input,
-      context: buildTaskContext(input, { taskId: input.id, objective: input.objective, steps: [] }, {
-        objective: input.objective,
-        cursor: 0,
-        attempts: {},
-        outputs: {},
-        artifacts: {},
-        breadcrumbs: [],
-        recovery: [],
+      context: buildTaskContext(input, bootstrapPlan, bootstrapState, {
+        currentPlan: bootstrapPlan,
+        workingMemory: this.runtime.workingMemory.snapshot(),
+        episodicMemory: this.runtime.episodicMemory.snapshot(),
+        contextWindow: bootstrapState.contextWindow,
+        threadIdentity,
+        plannerLoop: bootstrapState.plannerLoop,
       }),
     });
     const validation = validatePlan(plan.steps);
@@ -572,7 +708,11 @@ export class PokeCoreOrchestrator {
     this._store.bumpRevision(input.id);
     this._store.recordEvent(input.id, classifyTransition('planning', 'routing'), 'planning', 'routing', { planSize: plan.steps.length, taskId: input.id });
 
-    let state = buildRuntimeState(plan);
+    let state = buildRuntimeState(plan, {
+      threadIdentity,
+      contextWindow: this.runtime.buildContextWindow({ taskId: input.id, objective: input.objective, plan, state: bootstrapState, limitTokens: bootstrapState.contextWindow?.budget ?? 1600, threadIdentity }),
+      plannerLoop: { ...bootstrapState.plannerLoop!, planId: plan.taskId, objective: plan.objective },
+    });
     this._store.recordSnapshot(input.id, 'routing', state);
     task = this._store.getTask(input.id) ?? task;
 
@@ -627,20 +767,25 @@ export class PokeCoreOrchestrator {
       }
 
       if (stepOutcome.control.kind === 'complete') {
+        state.plannerLoop = {
+          ...(state.plannerLoop ?? this.runtime.createPlannerLoopState(plan.taskId, plan.objective, threadIdentity)),
+          status: 'done',
+          lastReflectedAt: this.now(),
+        };
         this._store.updateTask(input.id, {
           status: 'completed',
           currentStepIndex: plan.steps.length,
           activeStepId: null,
-          resultJson: JSON.stringify({ plan, state, rationale: decisionLog }),
+          resultJson: JSON.stringify({ plan, state, rationale: decisionLog, threadIdentity }),
           errorJson: null,
         });
         this._store.bumpRevision(input.id);
         this._store.recordEvent(input.id, classifyTransition('executing', 'completed'), 'executing', 'completed', { rationale: decisionLog });
       await this.emitEvent('task.completed', { taskId: input.id, rationale: decisionLog });
         this._store.recordSnapshot(input.id, 'completed', state);
-        this.working.upsertFact(`task:${input.id}:status`, 'completed', 1, 'orchestrator');
-        this.working.appendTrail('task_completed', { taskId: input.id, rationale: decisionLog.slice(-5) });
-        this.episodic.add({
+        this.runtime.workingMemory.upsertFact(`task:${input.id}:status`, 'completed', 1, 'orchestrator');
+        this.runtime.workingMemory.appendTrail('task_completed', { taskId: input.id, rationale: decisionLog.slice(-5) });
+        this.runtime.episodicMemory.add({
           id: randomUUID(),
           taskId: input.id,
           category: 'success',
@@ -671,8 +816,8 @@ export class PokeCoreOrchestrator {
         this._store.recordEvent(input.id, classifyTransition('executing', stepOutcome.control.status), 'executing', stepOutcome.control.status, { reason: stepOutcome.control.note, decisionLog });
         await this.emitEvent('task.failed', { taskId: input.id, status: stepOutcome.control.status, reason: stepOutcome.control.note, decisionLog });
         this._store.recordSnapshot(input.id, stepOutcome.control.status, state);
-        this.working.upsertFact(`task:${input.id}:status`, stepOutcome.control.status, 0.95, 'orchestrator');
-        this.working.appendTrail('task_halted', { taskId: input.id, status: stepOutcome.control.status, reason: stepOutcome.control.note });
+        this.runtime.workingMemory.upsertFact(`task:${input.id}:status`, stepOutcome.control.status, 0.95, 'orchestrator');
+        this.runtime.workingMemory.appendTrail('task_halted', { taskId: input.id, status: stepOutcome.control.status, reason: stepOutcome.control.note });
         return {
           ok: false,
           status: stepOutcome.control.status,
@@ -689,7 +834,7 @@ export class PokeCoreOrchestrator {
       if (stepOutcome.control.kind === 'replan') {
         if (replanCount >= 2) {
           const message = `replan limit reached after ${replanCount} recovery cycle(s)`;
-          this._store.updateTask(input.id, { status: 'failed', errorJson: JSON.stringify({ message, decisionLog }) });
+          this._store.updateTask(input.id, { status: 'failed', errorJson: JSON.stringify({ message, decisionLog, threadIdentity }) });
           this._store.bumpRevision(input.id);
           this._store.recordEvent(input.id, classifyTransition('executing', 'failed'), 'executing', 'failed', { message, decisionLog });
           this._store.recordSnapshot(input.id, 'failed', state);
@@ -711,17 +856,33 @@ export class PokeCoreOrchestrator {
         this._store.recordEvent(input.id, classifyTransition('executing', 'recovering'), 'executing', 'recovering', { reason: stepOutcome.control.note, replanCount });
         await this.emitEvent('task.replanned', { taskId: input.id, reason: stepOutcome.control.note, replanCount });
         this._store.recordSnapshot(input.id, 'recovering', state);
-        state.recovery.push({ stepId: plan.steps[Math.max(0, Math.min(state.cursor, plan.steps.length - 1))]?.id ?? input.id, reason: stepOutcome.control.note, at: Date.now() });
+        state.recovery.push({ stepId: plan.steps[Math.max(0, Math.min(state.cursor, plan.steps.length - 1))]?.id ?? input.id, reason: stepOutcome.control.note, at: this.now() });
+        state.plannerLoop = this.runtime.reflectPlannerLoop(state.plannerLoop ?? undefined, {
+          reason: stepOutcome.control.note,
+          stepId: plan.steps[Math.max(0, Math.min(state.cursor, plan.steps.length - 1))]?.id,
+          cycle: replanCount + 1,
+          objective: input.objective,
+          at: this.now(),
+          threadIdentity,
+          notes: [stepOutcome.control.note, state.contextWindow?.summary ?? ''],
+        });
 
         plan = await this.refreshPlan(input, plan, state, stepOutcome.control.note, replanCount);
         replanCount += 1;
         state = {
-          ...buildRuntimeState(plan),
-          attempts: state.attempts,
-          outputs: state.outputs,
-          artifacts: state.artifacts,
-          breadcrumbs: state.breadcrumbs,
-          recovery: state.recovery,
+          ...buildRuntimeState(plan, {
+            attempts: state.attempts,
+            outputs: state.outputs,
+            artifacts: state.artifacts,
+            breadcrumbs: state.breadcrumbs,
+            recovery: state.recovery,
+            semanticIntent: plan.semanticIntent,
+            intentGraph: plan.intentGraph,
+            planner: state.planner,
+            threadIdentity,
+            contextWindow: this.runtime.buildContextWindow({ taskId: input.id, objective: input.objective, plan, state, limitTokens: state.contextWindow?.budget ?? 1600, threadIdentity }),
+            plannerLoop: state.plannerLoop,
+          }),
           cursor: 0,
         };
         decisionLog.push(`replanned: ${stepOutcome.control.note}`);
@@ -733,12 +894,12 @@ export class PokeCoreOrchestrator {
       }
 
       const message = stepOutcome.control.note;
-      this._store.updateTask(input.id, { status: 'failed', errorJson: JSON.stringify({ reason: message, decisionLog }) });
+      this._store.updateTask(input.id, { status: 'failed', errorJson: JSON.stringify({ reason: message, decisionLog, threadIdentity }) });
       this._store.bumpRevision(input.id);
       this._store.recordEvent(input.id, classifyTransition('executing', 'failed'), 'executing', 'failed', { reason: message, decisionLog });
       this._store.recordSnapshot(input.id, 'failed', state);
-      this.working.upsertFact(`task:${input.id}:status`, 'failed', 0.95, 'orchestrator');
-      this.working.appendTrail('task_failed', { taskId: input.id, reason: message });
+      this.runtime.workingMemory.upsertFact(`task:${input.id}:status`, 'failed', 0.95, 'orchestrator');
+      this.runtime.workingMemory.appendTrail('task_failed', { taskId: input.id, reason: message });
       return {
         ok: false,
         status: 'failed',
