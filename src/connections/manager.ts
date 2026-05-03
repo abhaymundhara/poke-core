@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ConnectionCryptoService } from './crypto.ts';
-import { InMemoryConnectionStore } from './store.ts';
+import { SQLiteConnectionStore } from './store.ts';
 import { PermissionRegistry } from './permissions.ts';
 import type {
   ConnectionAuthorizationRequest,
@@ -103,14 +103,16 @@ export class ConnectionManager {
   private readonly clock: () => Date;
   private readonly autoRefreshWindowMs: number;
   private readonly defaultEncryptionKey?: string;
+  private readonly keyResolver?: ConnectionManagerOptions['keyResolver'];
 
   constructor(options: ConnectionManagerOptions = {}) {
-    this.storage = options.storage ?? new InMemoryConnectionStore();
+    this.storage = options.storage ?? new SQLiteConnectionStore();
     this.crypto = new ConnectionCryptoService({ defaultKey: options.encryptionKey });
     this.permissions = new PermissionRegistry();
     this.clock = options.clock ?? (() => new Date());
     this.autoRefreshWindowMs = options.autoRefreshWindowMs ?? 5 * 60 * 1000;
     this.defaultEncryptionKey = options.encryptionKey;
+    this.keyResolver = options.keyResolver;
     this.registerDefaultPermissions();
     this.registerProviders(options.providers);
     if (options.permissions) {
@@ -132,9 +134,7 @@ export class ConnectionManager {
   async listConnections(query: ConnectionQuery = {}, includeSecrets = false): Promise<ConnectionView[]> {
     const records = await this.storage.list();
     const statusFilter = normalizeQueryStatus(query.status);
-    return records
-      .filter((record) => this.matchesQuery(record, query, statusFilter))
-      .map((record) => summaryView(record, includeSecrets ? this.safeDecrypt(record) : undefined));
+    return Promise.all(records.filter((record) => this.matchesQuery(record, query, statusFilter)).map(async (record) => summaryView(record, includeSecrets ? await this.decryptSecrets(record) : undefined)));
   }
 
   async createConnection(input: ConnectionCreateInput): Promise<ConnectionView> {
@@ -146,6 +146,7 @@ export class ConnectionManager {
       throw new ConnectionLifecycleError('connection_exists', 'connection already exists for provider and account');
     }
 
+    const secretEnvelope = await this.encryptSecrets(provider, accountId, input.secrets, input.encryptionKey);
     const record: ConnectionRecord = {
       connectionId: existing?.connectionId ?? randomUUID(),
       provider,
@@ -159,7 +160,7 @@ export class ConnectionManager {
         ...(existing?.metadata ?? {}),
         ...(input.metadata ?? {}),
       },
-      secretEnvelope: this.crypto.encrypt(input.secrets, this.resolveEncryptionKey(input.encryptionKey)),
+      secretEnvelope,
       createdAt: existing?.createdAt ?? nowIso(this.clock),
       updatedAt: nowIso(this.clock),
       lastRefreshedAt: existing?.lastRefreshedAt,
@@ -178,9 +179,9 @@ export class ConnectionManager {
       return null;
     }
     if (options.autoRefresh && (isNearExpiry(record, options.refreshWindowMs ?? this.autoRefreshWindowMs) || isExpired(record))) {
-      return await this.refreshConnection(selector, { refreshWindowMs: options.refreshWindowMs, encryptionKey: undefined });
+      return await this.refreshConnection(selector, { refreshWindowMs: options.refreshWindowMs });
     }
-    return summaryView(record, options.includeSecrets ? this.safeDecrypt(record) : undefined);
+    return summaryView(record, options.includeSecrets ? await this.decryptSecrets(record) : undefined);
   }
 
   async refreshConnection(selector: ConnectionSelector, options: ConnectionRefreshInput = {}): Promise<ConnectionRefreshResult> {
@@ -191,7 +192,7 @@ export class ConnectionManager {
 
     const refreshWindowMs = options.refreshWindowMs ?? this.autoRefreshWindowMs;
     const shouldRefresh = options.force || isNearExpiry(record, refreshWindowMs) || isExpired(record) || record.status === 'pending_refresh';
-    const currentSecrets = this.safeDecrypt(record, options.encryptionKey);
+    const currentSecrets = await this.decryptSecrets(record, options.encryptionKey);
     if (!shouldRefresh) {
       return { connection: summaryView(record, currentSecrets), refreshed: false };
     }
@@ -212,7 +213,7 @@ export class ConnectionManager {
     const refreshed = await provider.refreshConnection({
       connection: summaryView(record, currentSecrets),
       secrets: currentSecrets,
-      encryptionKey: this.resolveEncryptionKey(options.encryptionKey),
+      encryptionKey: await this.resolveMasterKey(record.provider, record.accountId, options.encryptionKey),
       requestedScopes: record.scopes,
       refreshWindowMs,
     });
@@ -247,7 +248,7 @@ export class ConnectionManager {
     }
 
     const provider = this.providers.get(record.provider);
-    const currentSecrets = this.safeDecrypt(record, options.encryptionKey);
+    const currentSecrets = await this.decryptSecrets(record, options.encryptionKey);
 
     if (options.newSecrets) {
       const rotated = await this.persistSecrets(record, options.newSecrets, options.encryptionKey, {
@@ -281,7 +282,7 @@ export class ConnectionManager {
       const rotated = await provider.rotateConnection({
         connection: summaryView(record, currentSecrets),
         secrets: currentSecrets,
-        encryptionKey: this.resolveEncryptionKey(options.encryptionKey),
+        encryptionKey: await this.resolveMasterKey(record.provider, record.accountId, options.encryptionKey),
         request: options.request,
       });
       const next = await this.persistSecrets(record, rotated.rotatedSecrets ?? currentSecrets, options.encryptionKey, {
@@ -356,6 +357,9 @@ export class ConnectionManager {
   }
 
   async findByProviderAndAccount(provider: string, accountId: string): Promise<ConnectionRecord | undefined> {
+    if (this.storage instanceof SQLiteConnectionStore) {
+      return await this.storage.findByProviderAndAccount(provider, accountId);
+    }
     const records = await this.storage.list();
     return records.find((record) => record.provider === provider && record.accountId === accountId);
   }
@@ -449,16 +453,27 @@ export class ConnectionManager {
     return undefined;
   }
 
-  private resolveEncryptionKey(override?: string): string | undefined {
-    return override ?? this.defaultEncryptionKey;
+  private async resolveMasterKey(provider: string, accountId: string, override?: string): Promise<string | undefined> {
+    if (override) {
+      return override;
+    }
+    if (this.keyResolver) {
+      const resolved = await this.keyResolver({ provider, accountId, encryptionKey: this.defaultEncryptionKey });
+      if (resolved) {
+        return resolved;
+      }
+    }
+    return this.defaultEncryptionKey;
   }
 
-  private safeDecrypt(record: ConnectionRecord, override?: string): ConnectionSecretMaterial | undefined {
-    try {
-      return this.crypto.decrypt(record.secretEnvelope, this.resolveEncryptionKey(override));
-    } catch {
-      return undefined;
-    }
+  private async encryptSecrets(provider: string, accountId: string, secrets: ConnectionSecretMaterial, override?: string): Promise<ConnectionRecord['secretEnvelope']> {
+    const masterKey = await this.resolveMasterKey(provider, accountId, override);
+    return this.crypto.encrypt(secrets, masterKey);
+  }
+
+  private async decryptSecrets(record: ConnectionRecord, override?: string): Promise<ConnectionSecretMaterial> {
+    const masterKey = await this.resolveMasterKey(record.provider, record.accountId, override);
+    return this.crypto.decrypt(record.secretEnvelope, masterKey);
   }
 
   private async persistSecrets(record: ConnectionRecord, secrets: ConnectionSecretMaterial, override?: string, updates: Partial<ConnectionRecord> = {}): Promise<ConnectionRecord> {
@@ -470,7 +485,7 @@ export class ConnectionManager {
         ...record.metadata,
         ...(updates.metadata ?? {}),
       },
-      secretEnvelope: this.crypto.encrypt(secrets, this.resolveEncryptionKey(override)),
+      secretEnvelope: await this.encryptSecrets(record.provider, record.accountId, secrets, override),
       updatedAt: updates.updatedAt ?? nowIso(this.clock),
     };
     await this.storage.upsert(next);
