@@ -10,6 +10,7 @@ import { getRuntimeServices } from './runtime/services.ts';
 import type { PokeCoreStore } from './store';
 import type { SkillAdapter } from './skills/types';
 import { OrchestratorRuntimeContext, compactText } from './runtime/context.ts';
+import { DEFAULT_LLM_SEMANTIC_NLU_PROVIDER } from './search/nlu.ts';
 
 export type TaskExecutionResult = {
   ok?: boolean;
@@ -173,6 +174,8 @@ function buildTaskContext(input: TaskInput, plan: TaskPlan, state: RuntimeState,
     contextWindow: extra.contextWindow ?? state.contextWindow ?? null,
     threadIdentity: extra.threadIdentity ?? state.threadIdentity ?? null,
     plannerLoop: extra.plannerLoop ?? state.plannerLoop ?? null,
+    semanticProvider: DEFAULT_LLM_SEMANTIC_NLU_PROVIDER,
+    plannerProvider: DEFAULT_LLM_SEMANTIC_NLU_PROVIDER,
   };
 }
 
