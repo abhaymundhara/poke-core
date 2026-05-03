@@ -95,7 +95,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 function normalizeText(value: string): string {
-  return value.replace(/s+/g, ' ').trim();
+  return value.replace(/\s+/g, ' ').trim();
 }
 
 function sanitizeSessionKey(sessionKey: string): string {
@@ -123,7 +123,7 @@ function normalizeUrl(input: string): string {
   try {
     return new URL(raw).toString();
   } catch {
-    return 'https://' + raw.replace(/^/+/g, '');
+    return 'https://' + raw.replace(/^\/+/, '');
   }
 }
 
@@ -143,6 +143,15 @@ function truncate(value: string, limit = 12_000): string {
   return value.length <= limit ? value : value.slice(0, limit);
 }
 
+function snapshotFallback() {
+  return {
+    interactive: [] as Array<Record<string, unknown>>,
+    links: [] as Array<Record<string, unknown>>,
+    forms: [] as Array<Record<string, unknown>>,
+    activeElement: null as null,
+  };
+}
+
 export class BrowserAutomationError extends Error {
   constructor(message: string, public readonly recoverable = true, public readonly cause?: unknown) {
     super(message);
@@ -153,7 +162,6 @@ export class BrowserAutomationError extends Error {
 export class BrowserRuntime {
   private readonly defaults: Partial<ResolvedOptions>;
   private readonly sessions = new Map<string, Promise<SessionState>>();
-  private readonly browserLoader: Promise<Record<string, any>> | null = null;
 
   constructor(options: BrowserRuntimeOptions = {}) {
     this.defaults = mergeOptions({}, options);
@@ -161,7 +169,7 @@ export class BrowserRuntime {
 
   private async loadPlaywright(): Promise<Record<string, any>> {
     try {
-      return await import('playwright') as unknown as Record<string, any>;
+      return (await import('playwright')) as unknown as Record<string, any>;
     } catch (error) {
       throw new BrowserAutomationError('Playwright is required for browser automation', false, error);
     }
@@ -219,10 +227,8 @@ export class BrowserRuntime {
     try {
       return await fn(session);
     } catch (error) {
-      if (!(error instanceof BrowserAutomationError)) {
-        throw new BrowserAutomationError(stringifyError(error), isRecoverableError(error), error);
-      }
-      throw error;
+      if (error instanceof BrowserAutomationError) throw error;
+      throw new BrowserAutomationError(stringifyError(error), isRecoverableError(error), error);
     }
   }
 
@@ -231,7 +237,7 @@ export class BrowserRuntime {
       const statePath = resolve(this.sessionDir(sessionKey, session.options), 'storage-state.json');
       await session.context.storageState({ path: statePath });
     } catch {
-      /* best-effort persistence */
+      // best-effort persistence
     }
   }
 
@@ -260,11 +266,11 @@ export class BrowserRuntime {
       page.title().catch(() => ''),
       page.evaluate(() => document.body?.innerText ?? '').catch(() => ''),
       page.evaluate(() => {
-        const text = (value: unknown): string => typeof value === 'string' ? value.replace(/s+/g, ' ').trim() : '';
+        const clean = (value: unknown): string => typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
         const interactiveSelector = 'a[href],button,input,textarea,select,summary,[role="button"],[role="link"],[role="textbox"],[role="menuitem"]';
         const interactive = Array.from(document.querySelectorAll(interactiveSelector)).slice(0, 200).map((element: any) => ({
           tag: String(element.tagName ?? '').toLowerCase(),
-          text: text(element.innerText ?? element.value ?? element.getAttribute('aria-label') ?? element.getAttribute('title') ?? ''),
+          text: clean(element.innerText ?? element.value ?? element.getAttribute('aria-label') ?? element.getAttribute('title') ?? ''),
           ariaLabel: element.getAttribute('aria-label') || undefined,
           name: element.getAttribute('name') || undefined,
           type: element.getAttribute('type') || undefined,
@@ -273,7 +279,7 @@ export class BrowserRuntime {
           id: element.id || undefined,
         }));
         const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 100).map((element: any) => ({
-          text: text(element.innerText ?? element.getAttribute('aria-label') ?? element.textContent ?? ''),
+          text: clean(element.innerText ?? element.getAttribute('aria-label') ?? element.textContent ?? ''),
           href: String(element.href ?? element.getAttribute('href') ?? ''),
         }));
         const forms = Array.from(document.querySelectorAll('input,textarea,select,button')).slice(0, 100).map((element: any) => ({
@@ -292,7 +298,7 @@ export class BrowserRuntime {
           forms,
           activeElement: activeElement ? {
             tag: String(activeElement.tagName ?? '').toLowerCase(),
-            text: text(activeElement.innerText ?? activeElement.value ?? activeElement.getAttribute('aria-label') ?? activeElement.textContent ?? ''),
+            text: clean(activeElement.innerText ?? activeElement.value ?? activeElement.getAttribute('aria-label') ?? activeElement.textContent ?? ''),
             name: activeElement.getAttribute('name') || undefined,
             type: activeElement.getAttribute('type') || undefined,
             placeholder: activeElement.getAttribute('placeholder') || undefined,
@@ -300,12 +306,11 @@ export class BrowserRuntime {
             id: activeElement.id || undefined,
           } : null,
         };
-      }).catch(() => ({ interactive: [], links: [], forms: [], activeElement: null })),
+      }).catch(() => snapshotFallback()),
     ]);
 
     const visibleText = truncate(normalizeText(rawText), 12_000);
-    const htmlDigest = sha256([url, title, visibleText].join('
-'));
+    const htmlDigest = sha256([url, title, visibleText].join('\n'));
     return {
       url,
       title,
@@ -356,10 +361,13 @@ export class BrowserRuntime {
         const locator = session.page.locator(params.selector).first();
         await locator.waitFor({ state: 'visible', timeout: session.options.timeoutMs });
         await locator.scrollIntoViewIfNeeded();
-        await locator.click({ timeout: session.options.timeoutMs });
         if (params.expectNavigation) {
-          await session.page.waitForLoadState('domcontentloaded', { timeout: session.options.timeoutMs }).catch(() => undefined);
+          await Promise.all([
+            session.page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: session.options.timeoutMs }).catch(() => undefined),
+            locator.click({ timeout: session.options.timeoutMs }),
+          ]);
         } else {
+          await locator.click({ timeout: session.options.timeoutMs });
           await session.page.waitForTimeout(150);
         }
       }, params.retries ?? 3, params.backoffMs ?? 250);
@@ -390,9 +398,7 @@ export class BrowserRuntime {
           }
           await session.page.keyboard.type(params.text, { delay: 10 });
         }
-        if (params.pressEnter) {
-          await session.page.keyboard.press('Enter');
-        }
+        if (params.pressEnter) await session.page.keyboard.press('Enter');
         await session.page.waitForTimeout(150);
       }, params.retries ?? 3, params.backoffMs ?? 250);
       return await this.finishAction(params.sessionKey, session, 'type', beforeUrl, { selector: params.selector, textLength: String(params.text ?? '').length, pressEnter: Boolean(params.pressEnter) }, startedAt);
@@ -460,7 +466,7 @@ export class BrowserRuntime {
       const before = session.page.url();
       let result: BrowserActionResult;
       if (step.action === 'navigate') {
-        result = await this.navigate({ sessionKey: params.sessionKey, url: String(step.url ?? ''), overrides: params.overrides, waitUntil: step.waitUntil, retries: step.timeoutMs ? 1 : params.retries, backoffMs: params.backoffMs });
+        result = await this.navigate({ sessionKey: params.sessionKey, url: String(step.url ?? ''), overrides: params.overrides, waitUntil: step.waitUntil, retries: params.retries, backoffMs: params.backoffMs });
       } else if (step.action === 'click') {
         result = await this.click({ sessionKey: params.sessionKey, selector: String(step.selector ?? ''), overrides: params.overrides, expectNavigation: step.expectNavigation, retries: params.retries, backoffMs: params.backoffMs });
       } else if (step.action === 'type') {
@@ -473,9 +479,7 @@ export class BrowserRuntime {
         result = await this.domSnapshot({ sessionKey: params.sessionKey, overrides: params.overrides, retries: params.retries, backoffMs: params.backoffMs });
       }
       results.push(result);
-      if (before !== result.afterUrl) {
-        trail.push({ from: before, to: result.afterUrl, reason: step.label ?? step.action });
-      }
+      if (before !== result.afterUrl) trail.push({ from: before, to: result.afterUrl, reason: step.label ?? step.action });
     }
 
     const finalSnapshot = results.length > 0 ? results[results.length - 1].snapshot : await this.collectSnapshot(session);

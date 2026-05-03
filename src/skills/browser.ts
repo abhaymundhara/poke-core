@@ -35,9 +35,10 @@ function buildRuntimeOptions(args: Record<string, unknown>): BrowserRuntimeOptio
     ? args.viewport as { width?: unknown; height?: unknown }
     : undefined;
 
+  const browserName = asText(args.browserName);
   return {
     headless: asBoolean(args.headless, true),
-    browserName: asText(args.browserName) === 'firefox' || asText(args.browserName) === 'webkit' ? asText(args.browserName) as 'firefox' | 'webkit' : 'chromium',
+    browserName: browserName === 'firefox' || browserName === 'webkit' ? browserName : 'chromium',
     timeoutMs: asNumber(args.timeoutMs) ?? asNumber(args.timeout) ?? 15_000,
     slowMoMs: asNumber(args.slowMoMs) ?? asNumber(args.slowMo) ?? 0,
     sessionRoot: asText(args.sessionRoot) || undefined,
@@ -99,16 +100,34 @@ export class BrowserSkill implements SkillAdapter {
 
     try {
       if ((mode === 'navigate' || mode === 'interact' || mode === 'audit') && url) {
-        results.push(await this.runtime.navigate({ sessionKey, url, overrides: runtimeOptions, waitUntil: (asText(args.waitUntil) as 'load' | 'domcontentloaded' | 'networkidle') || 'domcontentloaded', retries: asNumber(args.retries) ?? 3, backoffMs: asNumber(args.backoffMs) ?? 250 }));
+        results.push(await this.runtime.navigate({
+          sessionKey,
+          url,
+          overrides: runtimeOptions,
+          waitUntil: (asText(args.waitUntil) as 'load' | 'domcontentloaded' | 'networkidle') || 'domcontentloaded',
+          retries: asNumber(args.retries) ?? 3,
+          backoffMs: asNumber(args.backoffMs) ?? 250,
+        }));
       }
 
       if (interactionPlan.length > 0) {
-        const planResult = await this.runtime.runInteractionPlan({ sessionKey, actions: interactionPlan, overrides: runtimeOptions, retries: asNumber(args.retries) ?? 3, backoffMs: asNumber(args.backoffMs) ?? 250 });
+        const planResult = await this.runtime.runInteractionPlan({
+          sessionKey,
+          actions: interactionPlan,
+          overrides: runtimeOptions,
+          retries: asNumber(args.retries) ?? 3,
+          backoffMs: asNumber(args.backoffMs) ?? 250,
+        });
         results.push(...planResult.actions);
       }
 
       if (mode === 'extract' || mode === 'audit' || results.length === 0) {
-        results.push(await this.runtime.domSnapshot({ sessionKey, overrides: runtimeOptions, retries: asNumber(args.retries) ?? 3, backoffMs: asNumber(args.backoffMs) ?? 250 }));
+        results.push(await this.runtime.domSnapshot({
+          sessionKey,
+          overrides: runtimeOptions,
+          retries: asNumber(args.retries) ?? 3,
+          backoffMs: asNumber(args.backoffMs) ?? 250,
+        }));
       }
 
       const finalSnapshot = results[results.length - 1].snapshot;
@@ -146,7 +165,7 @@ export class BrowserSkill implements SkillAdapter {
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      const retryable = error instanceof Error && /timeout|detached|not visible|not attached|stale|closed|target closed|navigation/i.test(message.toLowerCase());
+      const retryable = /timeout|detached|not visible|not attached|stale|closed|target closed|navigation/i.test(message.toLowerCase());
       const failure = {
         sessionKey,
         mode,
