@@ -99,73 +99,41 @@ export class SQLiteConnectionStore implements ConnectionStore {
     const storagePath = resolve(options.storagePath ?? DEFAULT_STORAGE_PATH);
     ensureParentDirectory(storagePath);
     this.db = new Database(storagePath, { create: true });
-    this.db.exec(
-      'PRAGMA journal_mode = WAL;
-' +
-        'PRAGMA synchronous = FULL;
-' +
-        'PRAGMA foreign_keys = ON;
-' +
-        'PRAGMA temp_store = MEMORY;
-' +
-        'CREATE TABLE IF NOT EXISTS connections (
-' +
-        '  connection_id TEXT PRIMARY KEY,
-' +
-        '  provider TEXT NOT NULL,
-' +
-        '  account_id TEXT NOT NULL,
-' +
-        '  label TEXT,
-' +
-        '  credential_kind TEXT NOT NULL,
-' +
-        '  auth_mode TEXT NOT NULL,
-' +
-        '  status TEXT NOT NULL,
-' +
-        "  metadata_json TEXT NOT NULL DEFAULT '{}',
-" +
-        '  secret_envelope_json TEXT NOT NULL,
-' +
-        '  created_at TEXT NOT NULL,
-' +
-        '  updated_at TEXT NOT NULL,
-' +
-        '  last_refreshed_at TEXT,
-' +
-        '  expires_at TEXT,
-' +
-        '  owner_id TEXT,
-' +
-        '  provider_account_hint TEXT,
-' +
-        '  UNIQUE(provider, account_id)
-' +
-        ');
-' +
-        'CREATE TABLE IF NOT EXISTS connection_scopes (
-' +
-        '  connection_id TEXT NOT NULL,
-' +
-        '  scope TEXT NOT NULL,
-' +
-        '  PRIMARY KEY(connection_id, scope),
-' +
-        '  FOREIGN KEY(connection_id) REFERENCES connections(connection_id) ON DELETE CASCADE
-' +
-        ');
-' +
-        'CREATE INDEX IF NOT EXISTS idx_connections_provider_account ON connections(provider, account_id);
-' +
-        'CREATE INDEX IF NOT EXISTS idx_connections_provider_status ON connections(provider, status);
-' +
-        'CREATE INDEX IF NOT EXISTS idx_connections_provider_label ON connections(provider, label);
-' +
-        'CREATE INDEX IF NOT EXISTS idx_connection_scopes_scope ON connection_scopes(scope);
-' +
-        'CREATE INDEX IF NOT EXISTS idx_connection_scopes_connection ON connection_scopes(connection_id);',
-    );
+    this.db.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA synchronous = FULL;
+      PRAGMA foreign_keys = ON;
+      PRAGMA temp_store = MEMORY;
+      CREATE TABLE IF NOT EXISTS connections (
+        connection_id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        label TEXT,
+        credential_kind TEXT NOT NULL,
+        auth_mode TEXT NOT NULL,
+        status TEXT NOT NULL,
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        secret_envelope_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        last_refreshed_at TEXT,
+        expires_at TEXT,
+        owner_id TEXT,
+        provider_account_hint TEXT,
+        UNIQUE(provider, account_id)
+      );
+      CREATE TABLE IF NOT EXISTS connection_scopes (
+        connection_id TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        PRIMARY KEY(connection_id, scope),
+        FOREIGN KEY(connection_id) REFERENCES connections(connection_id) ON DELETE CASCADE
+      );
+      CREATE INDEX IF NOT EXISTS idx_connections_provider_account ON connections(provider, account_id);
+      CREATE INDEX IF NOT EXISTS idx_connections_provider_status ON connections(provider, status);
+      CREATE INDEX IF NOT EXISTS idx_connections_provider_label ON connections(provider, label);
+      CREATE INDEX IF NOT EXISTS idx_connection_scopes_scope ON connection_scopes(scope);
+      CREATE INDEX IF NOT EXISTS idx_connection_scopes_connection ON connection_scopes(connection_id);
+    `);
     this.upsertConnectionStatement = this.db.query(
       'INSERT INTO connections (connection_id, provider, account_id, label, credential_kind, auth_mode, status, metadata_json, secret_envelope_json, created_at, updated_at, last_refreshed_at, expires_at, owner_id, provider_account_hint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(connection_id) DO UPDATE SET provider = excluded.provider, account_id = excluded.account_id, label = excluded.label, credential_kind = excluded.credential_kind, auth_mode = excluded.auth_mode, status = excluded.status, metadata_json = excluded.metadata_json, secret_envelope_json = excluded.secret_envelope_json, created_at = excluded.created_at, updated_at = excluded.updated_at, last_refreshed_at = excluded.last_refreshed_at, expires_at = excluded.expires_at, owner_id = excluded.owner_id, provider_account_hint = excluded.provider_account_hint',
     );

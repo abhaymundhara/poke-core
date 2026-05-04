@@ -105,8 +105,7 @@ function buildSemanticPrompt(objective: string, context: Record<string, unknown>
     contextText,
     'Schema:',
     JSON.stringify(schema),
-  ].join('
-');
+  ].join('\n');
 }
 
 function parseSemanticResponse(value: unknown): unknown {
