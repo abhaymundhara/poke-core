@@ -28,6 +28,11 @@ export type ChunkRecord = {
   source: string;
 };
 
+export type EmbeddingModel = {
+  readonly dimension?: number;
+  embedText(text: string): number[];
+};
+
 export type RetrievalQuery = {
   query: string;
   k: number;
@@ -76,6 +81,9 @@ export type RetrievalHit = {
   recencyScore: number;
   salienceScore: number;
   sourceScore: number;
+  grade: 'strong' | 'usable' | 'weak';
+  gradeScore: number;
+  gradeRationale: string;
   phraseMatches: string[];
   excerpt: string;
   evidence: RetrievalEvidenceHit[];
@@ -86,12 +94,17 @@ export type RetrievalResult = {
   hits: RetrievalHit[];
   coverage: {
     chunksScanned: number;
+    chunksIndexed: number;
+    lexicalCandidates: number;
+    vectorCandidates: number;
+    gradedCandidates: number;
     documentsScanned: number;
     matchedDocuments: number;
   };
   trace: {
     tokens: string[];
     expandedTokens: string[];
+    rewrites?: string[];
     stages: Array<{ name: string; topScore: number; notes: string[] }>;
     compaction?: {
       summary: string;
@@ -104,5 +117,14 @@ export type RetrievalResult = {
       anchorDocumentId: string;
       evidence: RetrievalEvidenceHit[];
     }>;
+    needsFallback?: boolean;
   };
+};
+
+export type RagCorpusSnapshot = {
+  version: 1;
+  exportedAt: number;
+  documents: MemoryDocument[];
+  chunks: ChunkRecord[];
+  lastCompaction: string | null;
 };

@@ -1,3 +1,5 @@
+import type { EmbeddingModel } from './types';
+
 const DEFAULT_DIMENSION = 46;
 
 export type SemanticSignals = {
@@ -176,7 +178,7 @@ export function extractSemanticSignals(text: string): SemanticSignals {
   return { tokens, phrases, axes };
 }
 
-export class SemanticEmbeddingModel {
+export class SemanticEmbeddingModel implements EmbeddingModel {
   readonly dimension = DEFAULT_DIMENSION;
 
   embedText(text: string): number[] {

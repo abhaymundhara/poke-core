@@ -67,8 +67,8 @@ export class RecoveryPlanner {
   }
 }
 
-export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; episodic: EpisodicMemory; }) {
-  const recoveryPlanner = new RecoveryPlanner();
+export function buildPokeGraph(deps: { rag: RagCorpus; working: WorkingMemory; episodic: EpisodicMemory; recoveryProvider?: SemanticNluProvider; }) {
+  const recoveryPlanner = new RecoveryPlanner(deps.recoveryProvider);
   const nodes: GraphNode<PokeGraphState>[] = [
     {
       id: 'recovery-plan',

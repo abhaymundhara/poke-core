@@ -4,8 +4,10 @@ const STOPWORDS = new Set([
 
 export function tokenize(text: string): string[] {
   return text
+    .normalize('NFKC')
     .toLowerCase()
-    .replace(/[^a-z0-9\s_-]+/g, ' ')
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
     .split(/\s+/)
     .map((t) => t.trim())
     .filter((t) => t.length > 1 && !STOPWORDS.has(t));

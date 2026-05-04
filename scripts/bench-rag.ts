@@ -37,7 +37,23 @@ const working = new WorkingMemory();
 working.upsertFact('user:timezone', 'Europe/London', 0.99, 'profile');
 const episodic = new EpisodicMemory();
 episodic.add({ id: 'ep-1', taskId: 'task-a', category: 'success', summary: 'retrieval picked the right architecture doc', signals: ['rag', 'graph', 'retrieval'], score: 0.8 });
-const graph = buildPokeGraph({ rag: corpus, working, episodic });
+const graph = buildPokeGraph({
+  rag: corpus,
+  working,
+  episodic,
+  recoveryProvider: {
+    name: 'bench-recovery-provider',
+    async extract() {
+      return {
+        recoveryPolicy: { mode: 'retry', maxAttempts: 1, backoffMs: 0 },
+        recoverySignals: ['rag', 'graph'],
+        latentGoals: ['retrieve graph context'],
+        executionProfile: { primarySource: 'docs', secondarySources: ['memory'], parallelizable: false, rationale: ['deterministic benchmark provider'] },
+        trajectoryNotes: ['deterministic recovery trajectory for RAG benchmark'],
+      };
+    },
+  },
+});
 
 const query = 'world class rag retrieval architecture with graph orchestration';
 const retrieval = corpus.retrieve({ query, k: 2, boost: { recency: 0.25, salience: 0.25, exactPhrase: 0.3, title: 0.15 } });
