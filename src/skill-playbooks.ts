@@ -1,7 +1,7 @@
 export type SkillPlaybookStatus = 'live' | 'planned';
 
 export type SkillPlaybook = {
-  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use' | 'harness' | 'channel' | 'connection';
+  name: 'browser' | 'email' | 'calendar' | 'filesystem' | 'integration' | 'autopilot' | 'user-modeling' | 'grounding' | 'signal-observation' | 'computer-use' | 'harness' | 'channel' | 'connection' | 'review' | 'qa' | 'investigate';
   status: SkillPlaybookStatus;
   instructionPath: string;
   summary: string;
@@ -183,6 +183,45 @@ export const SKILL_PLAYBOOKS: Record<SkillPlaybook['name'], SkillPlaybook> = {
     failureModes: ['missing thread signal', 'stale transactional noise', 'over-compressed history'],
     recovery: ['re-run compaction with a narrower query', 'fall back to relationship-weighted recall', 'prefer the freshest high-value context'],
     advancedNotes: ['no harness, no moat', 'domain primitives beat generic tool calls', 'preserve provenance through compaction'],
+  },
+  review: {
+    name: 'review',
+    status: 'live',
+    instructionPath: 'src/skills/review/skill.md',
+    summary: 'pre-merge diff review for correctness, completeness, and risk',
+    coreCapabilities: ['diff inspection', 'cross-file consistency checks', 'review finding synthesis', 'staleness detection'],
+    boundaries: ['no speculative findings', 'no style-only nitpicks unless risky', 'no ignoring sibling handlers or shared types'],
+    inputSchema: ['objective', 'baseBranch', 'diffScope', 'files', 'findingsOnly', 'context'],
+    outputSchema: ['verdict', 'findings', 'coverageNotes', 'missingChecks', 'confidence'],
+    failureModes: ['stale base diff', 'hidden enum branches', 'insufficient surrounding context', 'review without evidence'],
+    recovery: ['read sibling handlers', 'compare introduced values against call sites', 'narrow to exact file and line evidence'],
+    advancedNotes: ['treat review as evidence-first gatekeeping', 'prefer concrete merge-risk findings', 'verify changes against the whole control path'],
+  },
+  qa: {
+    name: 'qa',
+    status: 'live',
+    instructionPath: 'src/skills/qa/skill.md',
+    summary: 'real-user QA test loops with reproduction, fixes, and verification',
+    coreCapabilities: ['flow testing', 'bug reproduction', 'fix verification', 'regression proof'],
+    boundaries: ['no blind fixes', 'no unverified passes', 'no scope creep beyond the tested flow'],
+    inputSchema: ['objective', 'url', 'scope', 'tier', 'mode', 'auth', 'regressionBaseline', 'outputDir', 'context'],
+    outputSchema: ['reportPath', 'baselineScore', 'afterScore', 'issues', 'screenshots', 'summary'],
+    failureModes: ['environment noise', 'missing auth', 'incomplete reproduction', 'fix without re-test'],
+    recovery: ['reproduce first', 'fix smallest possible surface', 're-run the same path after each change'],
+    advancedNotes: ['use before/after evidence', 'regression tests should fail before the fix and pass after it', 'treat severity as a triage tool'],
+  },
+  investigate: {
+    name: 'investigate',
+    status: 'live',
+    instructionPath: 'src/skills/investigate/skill.md',
+    summary: 'root-cause debugging before any repair is applied',
+    coreCapabilities: ['symptom tracing', 'hypothesis testing', 'root-cause isolation', 'regression proof'],
+    boundaries: ['no symptom-only fixes', 'no guessing', 'no broad edits without evidence'],
+    inputSchema: ['objective', 'symptom', 'affectedFiles', 'reproduction', 'recentChanges', 'context'],
+    outputSchema: ['rootCause', 'hypothesisTrail', 'evidence', 'fixSummary', 'regressionTest', 'status'],
+    failureModes: ['false hypothesis', 'insufficient reproduction', 'wrong layer', 'architecture spread'],
+    recovery: ['re-trace the code path', 'instrument the suspected branch', 'stop and escalate when hypotheses fail repeatedly'],
+    advancedNotes: ['always verify before fixing', 'the bug report should tell the story from symptom to cause', 'prefer minimal verified repairs'],
   },
 };
 
